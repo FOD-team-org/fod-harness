@@ -1,0 +1,35 @@
+{
+  "name": "fod-harness",
+  "version": "0.1.5",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "fodh": "bin/fodh"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/provider/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run --maxWorkers=1 --no-file-parallelism",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@mariozechner/pi-coding-agent",
+    "@mariozechner/pi-ai": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai",
+    "@types/node": "24.12.3",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

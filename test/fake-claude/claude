@@ -1,0 +1,69 @@
+#!/usr/bin/env node
+import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+const args = process.argv.slice(2);
+const self = fileURLToPath(import.meta.url);
+const recordPid = () => { mkdirSync('.pi', { recursive: true }); appendFileSync('.pi/fake-pids.jsonl', JSON.stringify({ pid: process.pid }) + '\n'); };
+if (args.includes('--hang-child') || args.includes('--hang-grandchild')) {
+  recordPid();
+  if (args.includes('--hang-child')) spawn(process.execPath, [self, '--hang-grandchild'], { stdio: 'ignore' });
+  if (process.env.FAKE_CLAUDE_SCENARIO === 'hang-stubborn') process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+} else {
+  const scenario = process.env.FAKE_CLAUDE_SCENARIO ?? 'first';
+  if (!args.includes('--verbose') || scenario === 'no-verbose') {
+    process.stderr.write('Error: When using --print, --output-format=stream-json requires --verbose\n'); process.exit(1);
+  }
+  const get = flag => args[args.indexOf(flag) + 1];
+  const resume = args.includes('--resume');
+  const sid = get(resume ? '--resume' : '--session-id');
+  if (!sid || (scenario === 'resume' && !resume) || (process.env.FAKE_EXPECT_SID && process.env.FAKE_EXPECT_SID !== sid)) {
+    process.stderr.write('세션 인자가 일치하지 않습니다.\n'); process.exit(1);
+  }
+  let prompt = ''; for await (const chunk of process.stdin) prompt += chunk;
+  mkdirSync('.pi', { recursive: true });
+  appendFileSync('.pi/fake-calls.jsonl', JSON.stringify({ args, prompt, forbiddenEnvPresent: ['CLAUDECODE','CLAUDE_CODE_ENTRYPOINT','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL'].filter(key => key in process.env) }) + '\n');
+  const path = new URL(`../fixtures/claude-stream-json/${scenario === 'resume' ? 'resume-run' : 'first-run-hook-deny'}.jsonl`, import.meta.url);
+  const events = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const emit = event => process.stdout.write(JSON.stringify({ ...event, session_id: sid }) + '\n');
+  if (scenario === 'hang' || scenario === 'hang-stubborn') {
+    recordPid();
+    if (scenario === 'hang-stubborn') process.on('SIGTERM', () => {});
+    spawn(process.execPath, [self, '--hang-child'], { stdio: 'ignore' });
+    emit(events.find(event => event.subtype === 'init'));
+    setInterval(() => {}, 1000);
+  } else if (scenario === 'rate-limited' || scenario === 'stderr-limit') {
+    emit(events.find(event => event.subtype === 'init'));
+    if (scenario === 'stderr-limit') process.stderr.write('usage limit reached\n');
+    else emit({ type: 'result', is_error: true, api_error_status: 429, permission_denials: [], usage: {} });
+    process.exitCode = 1;
+  } else {
+    // doctor 시험은 재생 결과만 믿지 않고 지정 settings의 실제 훅을 실행한다.
+    if (prompt.includes('FODH_DOCTOR_MARKER')) {
+      const settings = JSON.parse(readFileSync(get('--settings'), 'utf8'));
+      const hooks = settings.hooks?.PreToolUse?.flatMap(entry => entry.hooks ?? []) ?? [];
+      const denied = hooks.some(hook => spawnSync('/bin/sh', ['-c', hook.command], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' }, cwd: process.cwd() }), encoding: 'utf8',
+      }).status === 2);
+      emit(events.find(event => event.subtype === 'init'));
+      emit({ type: 'result', is_error: false, permission_denials: denied ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] : [], usage: {} });
+    } else {
+      if (scenario === 'inherited-pipe') {
+        recordPid();
+        spawn(process.execPath, [self, '--hang-child'], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+      for (const original of events) {
+        const event = structuredClone(original);
+        if (scenario === 'bad-init' && event.subtype === 'init') event.permissionMode = 'default';
+        if ((scenario === 'overage' || scenario === 'overage-status') && event.type === 'rate_limit_event') {
+          if (scenario === 'overage') event.rate_limit_info.isUsingOverage = true;
+          else event.rate_limit_info.overageStatus = 'allowed';
+        }
+        emit(event);
+      }
+    }
+  }
+}

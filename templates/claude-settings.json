@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "\"${FODH_PACKAGE_ROOT:?FODH_PACKAGE_ROOT 설정 필요}/hooks/pretooluse.sh\"" }]
+      }
+    ]
+  }
+}
