@@ -1,17 +1,18 @@
 import { listBacklog, setTask, type Task } from './backlog.ts';
 import { addJudgment } from './judgment.ts';
-import { readState, transitionState, updateState, type HarnessState } from './state.ts';
+import { readState, transitionState, updateState, taskStates, type HarnessState } from './state.ts';
 import { harnessPath, withFileLock } from './storage.ts';
 
 export interface PickResources { slots: 'ok' | 'unavailable' | boolean; now?: number }
 export interface PickDecision {
-  outcome: 'SPEC' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
-  task?: Task; reason: string; cycle?: string[]; retry?: { count: number; nextAt?: string }; exhausted?: boolean;
+  outcome: 'RESUME' | 'SPEC' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
+  task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
+  retry?: { count: number; nextAt?: string }; exhausted?: boolean;
 }
-export function decidePick(backlog: Task[], state: HarnessState, resources: PickResources): PickDecision {
+const inProgress = (task: Task) => ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status);
+export function decidePick(backlog: Task[], state: HarnessState, resources: PickResources,
+  current: { taskId?: string; resumeState?: string } = state.resumeTask ?? state): PickDecision {
   const now = resources.now ?? Date.parse(state.savedAt ?? state.enteredAt ?? '1970-01-01T00:00:00Z');
-  const pending = backlog.filter(task => task.status !== 'done');
-  if (!pending.length) return { outcome: 'DONE_ALL', reason: '모든 task가 완료되었습니다' };
   const paused = /^paused\(([^)]+)\)$/u.exec(state.state)?.[1] ?? state.lastPaused;
   if (['memory', 'budget'].includes(paused ?? '') || resources.slots === false || resources.slots === 'unavailable') {
     return { outcome: 'WAIT_RESOURCE', reason: '슬롯·메모리·예산 회복 확인이 필요합니다' };
@@ -19,16 +20,25 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
   if (['billing', 'cleanup'].includes(paused ?? '')) {
     return { outcome: 'WAIT_JUDGMENT', reason: '과금 또는 정리 중단 원인의 수동 확인이 필요합니다', exhausted: true };
   }
-  const selected = pending.find(task => task.status === 'ready'
-    && task.depends.every(id => backlog.some(dependency => dependency.id === id && dependency.status === 'done')));
-  if (selected && !(state.retry?.nextAt && Date.parse(state.retry.nextAt) > now)) return { outcome: 'SPEC', task: selected, reason: '표 순서상 첫 실행 가능 task' };
+  if (state.retry?.nextAt && Date.parse(state.retry.nextAt) > now) return { outcome: 'WAIT_RETRY', reason: '백오프 대기 중', retry: state.retry };
   if (['error', 'quota'].includes(paused ?? '')) {
     const retry = state.retry ?? { count: 0 };
-    if (retry.nextAt && Date.parse(retry.nextAt) > now) return { outcome: 'WAIT_RETRY', reason: '백오프 대기 중', retry };
     if (retry.count >= 3) return { outcome: 'WAIT_JUDGMENT', reason: '재시도 3회 소진', exhausted: true };
     return { outcome: 'WAIT_RETRY', reason: '일시 오류 재시도 예약', retry: {
       count: retry.count + 1, nextAt: new Date(now + [5, 15, 60][retry.count] * 60000).toISOString(),
     } };
+  }
+  const pending = backlog.filter(task => task.status !== 'done');
+  const resumable = pending.find(task => task.id === current.taskId && inProgress(task));
+  if (resumable && taskStates.includes(current.resumeState ?? '')) {
+    return { outcome: 'RESUME', task: resumable, next: current.resumeState, reason: '중단된 현재 task의 원래 단계로 복귀' };
+  }
+  const orphans = pending.filter(inProgress);
+  // 고아는 먼저 차단한다. 순수 판정에서는 blocked가 된 후보 집합으로 다음 선택을 계산한다.
+  if (orphans.length) {
+    const remaining = backlog.map(task => inProgress(task) ? { ...task, status: 'blocked(A0)' } : task);
+    const next = decidePick(remaining, { ...state, lastPaused: undefined, resumeTask: undefined }, resources, {});
+    return { ...next, orphans };
   }
   const missing = pending.flatMap(task => task.depends.filter(id => !backlog.some(other => other.id === id)).map(id => `${task.id}→${id}`));
   if (missing.length) return { outcome: 'DEADLOCK', cycle: missing, reason: '존재하지 않는 의존 ID' };
@@ -43,36 +53,49 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
     active.delete(id); visited.add(id);
   }
   for (const task of pending) { const cycle = visit(task.id, []); if (cycle) return { outcome: 'DEADLOCK', cycle, reason: '의존 순환' }; }
-  if (pending.some(task => /^blocked\(A/u.test(task.status)) && pending.every(task => task.status === 'ready' || task.status.startsWith('blocked('))) {
+  const selected = pending.find(task => task.status === 'ready'
+    && task.depends.every(id => backlog.some(dependency => dependency.id === id && dependency.status === 'done')));
+  if (selected) return { outcome: 'SPEC', task: selected, reason: '표 순서상 첫 실행 가능 task' };
+  if (!pending.length) return { outcome: 'DONE_ALL', reason: '모든 task가 완료되었습니다' };
+  if (pending.some(task => /^blocked\(A/u.test(task.status))) {
     return { outcome: 'WAIT_JUDGMENT', reason: '남은 task는 판단 또는 그 의존 task를 기다립니다' };
   }
-  return { outcome: 'DEADLOCK', reason: '실행 가능한 task가 없고 미완료 진행 상태의 확인이 필요합니다', cycle: pending.map(task => task.id) };
+  return { outcome: 'DEADLOCK', reason: '실행 가능한 task의 의존 증거를 확인해야 합니다', cycle: pending.map(task => task.id) };
 }
 export async function runPick(root: string, resources: PickResources = { slots: 'ok' }): Promise<PickDecision> {
   return withFileLock(harnessPath(root, 'harness-pick'), async () => {
     let state = await readState(root);
-    if (state.state !== 'PICK' && !['WAIT_RETRY', 'WAIT_RESOURCE', 'WAIT_JUDGMENT'].includes(state.state)) {
+    const now = resources.now ?? Date.now();
+    if (state.state === 'WAIT_RETRY' && (!state.retry?.nextAt || Date.parse(state.retry.nextAt) <= now)) {
+      state = await transitionState(root, 'PICK', { now });
+    }
+    if (!['PICK', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(state.state)) {
       throw new Error('PICK 상태에서만 작업을 선택할 수 있습니다');
     }
-    if (state.state === 'WAIT_JUDGMENT' && state.resumeState && state.resumeState !== 'PICK') {
-      throw new Error('프로젝트 판단의 resumeState로 먼저 복귀해야 합니다');
-    }
-    const decision = decidePick(await listBacklog(root), state, { ...resources, now: resources.now ?? Date.now() });
+    const decision = decidePick(await listBacklog(root), state, { ...resources, now });
     if (state.state === 'WAIT_RESOURCE' && decision.outcome === 'WAIT_RESOURCE') return decision;
-    if (state.state === decision.outcome && decision.outcome === 'WAIT_RETRY' && decision.retry?.nextAt === state.retry?.nextAt) return decision;
-    if (state.state !== 'PICK') state = await transitionState(root, 'PICK');
-    if (decision.outcome === 'SPEC') {
+    if (state.state === 'WAIT_RETRY' && decision.outcome === 'WAIT_RETRY') return decision;
+    if (state.state !== 'PICK') state = await transitionState(root, 'PICK', { now });
+    for (const orphan of decision.orphans ?? []) {
+      const { item } = await addJudgment(root, { title: `고아 task ${orphan.id}: 재개 / 폐기`,
+        background: '현재 재개 대상이 아닌 진행 중 task입니다. 소유 프로세스와 증거를 확인해야 합니다.',
+        options: ['ready 로 되돌려 재개', 'blocked 유지(보류)'], recommend: '① 증거 확인 후 재개', blocks: orphan.id,
+        resolution: 'resume', dedupeKey: `orphan:${orphan.id}` });
+      await setTask(root, orphan.id, { status: `blocked(${item.id})`, judgment: item.id });
+    }
+    if (decision.outcome === 'RESUME') {
+      await transitionState(root, decision.next!, { taskId: decision.task!.id, resume: true });
+    } else if (decision.outcome === 'SPEC') {
       await transitionState(root, 'SPEC', { taskId: decision.task!.id });
-      await setTask(root, decision.task!.id, { status: 'doing' });
-      await updateState(root, { retry: { count: 0 }, lastPaused: undefined });
+      await updateState(root, { retry: undefined, lastPaused: undefined, resumeTask: undefined });
     } else if (decision.outcome === 'DEADLOCK' || decision.exhausted) {
       const { item } = await addJudgment(root, { title: decision.outcome === 'DEADLOCK' ? '백로그 교착 해소' : decision.reason,
         background: `${decision.reason}: ${(decision.cycle ?? []).join(', ')}`,
         options: ['의존 관계와 작업 증거를 확인해 수정', '현재 상태를 보존하고 재검토'], recommend: '① 의존 관계와 중단 원인을 확인한 후 재개',
-        blocks: '', dedupeKey: `pick:${decision.reason}:${(decision.cycle ?? []).join(',')}` });
+        blocks: '-', dedupeKey: `pick:${decision.reason}:${(decision.cycle ?? []).join(',')}` });
       if (decision.outcome === 'DEADLOCK') await transitionState(root, 'DEADLOCK');
-      await transitionState(root, 'WAIT_JUDGMENT');
       await updateState(root, { pickJudgment: item.id });
+      await transitionState(root, 'WAIT_JUDGMENT');
       return { ...decision, reason: `${decision.reason} (${item.id})` };
     } else {
       if (decision.retry) await updateState(root, { retry: decision.retry });

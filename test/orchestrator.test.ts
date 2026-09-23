@@ -22,7 +22,7 @@ async function setup() {
   const ctx = { cwd: root, ui: { notify: vi.fn() } };
   return { root, commands, handlers, ctx, sendMessage,
     command: (name: string, args = '') => commands.get(name)!.handler(args, ctx),
-    end: (stopReason = 'stop') => handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason }] }, ctx) };
+    end: (stopReason = 'stop', text = '') => handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason, content: [{type:'text',text}] }] }, ctx) };
 }
 
 it('Pi 명령 5종과 orchestrator 확장 등록', async () => {
@@ -57,20 +57,21 @@ it('develop-start에 백로그가 없으면 빈 템플릿 뒤 PLANNING 지시문
   const test = await setup(); await test.command('develop-start');
   expect((await readState(test.root)).state).toBe('PLANNING');
   expect(test.sendMessage.mock.calls[0][0].content).toContain('# PLANNING');
+  for (const name of ['backlog.md', '판단대기.md', '작업일지.md']) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
 });
-it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL', 'paused(error)'])('develop-start는 %s에서 기존 백로그 PICK을 실행한다', async state => {
+it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL'])('develop-start는 %s에서 기존 백로그 PICK을 실행한다', async state => {
   const test = await setup(); const task = await addTask(test.root, { title: '우선 작업', category: 'docs' });
   await updateState(test.root, { state }); await test.command('develop-start');
   expect(await readState(test.root)).toMatchObject({ state: 'SPEC', taskId: task.id });
   expect((await getTask(test.root, task.id)).status).toBe('doing');
   expect(test.sendMessage.mock.calls[0][0].content).toContain(`# SPEC`);
 });
-it('develop-start의 빈 기존 백로그는 완료 표시만 하고 턴을 시작하지 않는다', async () => {
+it('develop-start의 빈 기존 백로그는 PLANNING을 유지하고 반복 호출 알림만 표시한다', async () => {
   const test = await setup(); await test.command('develop-start');
   test.sendMessage.mockClear(); await test.command('develop-start');
-  expect((await readState(test.root)).state).toBe('DONE_ALL');
+  expect((await readState(test.root)).state).toBe('PLANNING');
   expect(test.sendMessage).not.toHaveBeenCalled();
-  expect(test.ctx.ui.notify).toHaveBeenCalled();
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith('백로그가 비어 있습니다. PLANNING 을 계속합니다','info');
 });
 it('develop-start 재실행은 활동 작업을 다른 작업으로 바꾸지 않는다', async () => {
   const test = await setup(); await updateState(test.root, { state: 'VERIFY', taskId: 'T01' });
@@ -119,10 +120,12 @@ it('judged의 프로젝트 재개 지시문은 resumeState 먼저 복귀하도�
   const test = await setup();
   const { item } = await addJudgment(test.root, { title: '목표', background: '', options: ['첫 번째'], recommend: '', blocks: '' });
   await answerJudgment(test.root, item.id, '1');
-  await updateState(test.root, { state: 'WAIT_JUDGMENT', resumeState: 'INTERVIEW', phase: 'project' });
+  await updateState(test.root, { state: 'WAIT_JUDGMENT', resumeState: 'INTERVIEW', phase: 'project', pickJudgment:item.id });
   await test.command('judged');
-  expect(test.sendMessage.mock.calls[0][0].content).toContain('fodh state transition INTERVIEW');
-  expect((await readState(test.root)).state).toBe('WAIT_JUDGMENT');
+  expect(test.sendMessage.mock.calls[0][0].content).toContain('# INTERVIEW');
+  expect(test.sendMessage.mock.calls[0][0].content).not.toContain('# PICK');
+  expect((await readState(test.root)).state).toBe('INTERVIEW');
+  expect((await readState(test.root)).resumeState).toBeUndefined();
 });
 it('judged는 잘못된 ID를 답 적용 전에 거부한다', async () => {
   const test = await setup(); await expect(test.command('judged', 'T01')).rejects.toThrow('판단 번호');
@@ -153,11 +156,13 @@ it('recovering은 확장 재로딩에도 한 진입당 자동 재개 1회만 허
   await test.end(); expect(test.sendMessage).toHaveBeenCalledTimes(2);
 });
 it('기본 3회 자동 턴 정체는 판단 생성 후 WAIT_JUDGMENT로 중단한다', async () => {
-  const test = await setup(); await updateState(test.root, { state: 'SPEC', taskId: 'T01' });
+  const test = await setup(); await addTask(test.root,{title:'정체 task',category:'docs'});
+  await updateState(test.root, { state: 'SPEC', taskId: 'T01' });
   for (let i = 0; i < 4; i++) await test.end();
   expect(test.sendMessage).toHaveBeenCalledTimes(3);
   expect(await readState(test.root)).toMatchObject({ state: 'WAIT_JUDGMENT', resumeState: 'PICK', autoTurns: 0 });
   expect((await readJudgment(test.root)).items[0].title).toBe('진행 정체: SPEC/T01');
+  expect((await getTask(test.root,'T01')).status).toMatch(/^blocked\(A\d+\)$/u);
   await test.end(); expect((await readJudgment(test.root)).items).toHaveLength(1);
 });
 it('겹친 agent_end 이벤트는 자동 턴을 중복 예약하지 않는다', async () => {
@@ -185,4 +190,58 @@ it('지시문은 설정된 판단 문서와 작업 ID를 치환하고 경로 주
   const text = await instruction(test.root, { state: 'IMPLEMENT', taskId: 'T42' });
   expect(text).toContain('docs/결정할것.md'); expect(text).toContain('--blocks T42 --reclaim');
   await expect(instruction(test.root, { state: '../../package' })).rejects.toThrow('자동 진행');
+});
+it('H1 project-start→PROJECT_READY→develop-start는 빈 템플릿을 PLANNING으로 안내한다',async()=>{
+  const test=await setup();await test.command('project-start');
+  await updateState(test.root,{state:'PROJECT_READY'});test.sendMessage.mockClear();await test.command('develop-start');
+  expect((await readState(test.root)).state).toBe('PLANNING');
+  expect(test.sendMessage).toHaveBeenCalledTimes(1);expect(test.sendMessage.mock.calls[0][0].content).toContain('# PLANNING');
+});
+it('M1 INTERVIEW 사용자 대기 표지·awaitingUser는 자동 턴과 정체 횟수를 멈춘다',async()=>{
+  const test=await setup();await updateState(test.root,{state:'INTERVIEW',autoTurns:2});
+  await test.end('stop','어떤 플랫폼인가요?\n대기: 사용자\n상태: INTERVIEW');
+  expect(test.sendMessage).not.toHaveBeenCalled();expect(await readState(test.root)).toMatchObject({awaitingUser:true,autoTurns:0});
+  await test.end();expect(test.sendMessage).not.toHaveBeenCalled();
+  await test.handlers.get('input')!({source:'extension',text:'자동 지시'},test.ctx);
+  expect((await readState(test.root)).awaitingUser).toBe(true);
+  await test.handlers.get('input')!({source:'interactive',text:'웹으로 해줘'},test.ctx);
+  expect(await readState(test.root)).toMatchObject({awaitingUser:false,autoTurns:0});
+  await test.end();expect(test.sendMessage).toHaveBeenCalledTimes(1);
+});
+it('M5 error 후 ready가 있어도 기다리고 WAIT_RETRY 만료 뒤 사용자 명령으로 재개한다',async()=>{
+  const test=await setup();const task=await addTask(test.root,{title:'준비',category:'docs'});
+  await updateState(test.root,{state:'paused(error)'});await test.command('develop-start');
+  expect((await readState(test.root)).state).toBe('WAIT_RETRY');expect((await getTask(test.root,task.id)).status).toBe('ready');
+  await test.command('develop-start');expect(test.ctx.ui.notify.mock.calls.at(-1)![0]).toContain('분 뒤 재시도 예정');
+  expect(test.sendMessage).not.toHaveBeenCalled();
+  await updateState(test.root,{retry:{count:1,nextAt:new Date(Date.now()-1000).toISOString()}});
+  await test.command('develop-start');expect((await readState(test.root)).state).toBe('SPEC');
+  expect((await readState(test.root)).retry).toBeUndefined();
+});
+it('M5 WAIT_RESOURCE 사용자 명령은 오래된 retry도 해제한다',async()=>{
+  const test=await setup();await addTask(test.root,{title:'준비',category:'docs'});
+  await updateState(test.root,{state:'WAIT_RESOURCE',lastPaused:'memory',retry:{count:1,nextAt:new Date(Date.now()+600000).toISOString()}});
+  await test.command('develop-start');expect((await readState(test.root)).state).toBe('SPEC');
+  expect((await readState(test.root)).retry).toBeUndefined();expect((await readState(test.root)).lastPaused).toBeUndefined();
+});
+it('H2 정체 판단①→ready→PICK→SPEC 흐름',async()=>{
+  const test=await setup();const task=await addTask(test.root,{title:'정체',category:'docs'});
+  await updateState(test.root,{state:'IMPLEMENT',taskId:task.id});await setTask(test.root,task.id,{status:'doing'});
+  for(let i=0;i<4;i++)await test.end();const item=(await readJudgment(test.root)).items[0];
+  expect((await getTask(test.root,task.id)).status).toBe(`blocked(${item.id})`);
+  await answerJudgment(test.root,item.id,'1');await test.command('judged',item.id);
+  expect((await getTask(test.root,task.id)).status).toBe('ready');expect((await readState(test.root)).state).toBe('PICK');
+  await test.command('develop-start');expect((await readState(test.root)).state).toBe('SPEC');
+});
+it.each(['WAIT_JUDGMENT','DONE_ALL'])('L10: %s 종료는 알리고 자동 턴을 만들지 않는다',async state=>{
+  const test=await setup();await updateState(test.root,{state});await test.end();
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith(`하네스 상태: ${state}`,'info');
+  expect(test.sendMessage).not.toHaveBeenCalled();
+});
+it('L10: task 정체 회수 뒤 WAIT 판단 문서에 번호와 요약을 쓴다',async()=>{
+  const test=await setup();const task=await addTask(test.root,{title:'정체',category:'docs'});
+  await updateState(test.root,{state:'SPEC',taskId:task.id});await updateState(test.root,{autoTurns:3});await test.end();
+  const item=(await readJudgment(test.root)).items[0];
+  expect(await readFile(join(test.root,'docs/판단대기.md'),'utf8')).toContain(`${item.id} 답 대기 — 진행 정체: SPEC/${task.id}`);
+  expect((await getTask(test.root,task.id)).status).toBe(`blocked(${item.id})`);
 });

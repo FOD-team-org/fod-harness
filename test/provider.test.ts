@@ -194,6 +194,7 @@ describe('doctor와 CLI', () => {
   });
   it('CLI judgment 전체 명령과 inbox ack·proc list 경로', async () => {
     const root = await project(); const cli = resolve('bin/fodh'); const env = environment(root);
+    await addTask(root, { title: 'CLI 판단', category: 'docs' });
     const call = async (...args: string[]) => JSON.parse((await exec(cli, args, { cwd: root, env })).stdout);
     const added = await call('judgment','add','--title','시험 판단','--background','시험 배경','--options','유지|변경','--recommend','유지','--blocks','T01');
     const id = added.item.id;

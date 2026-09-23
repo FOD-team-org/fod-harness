@@ -4,9 +4,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getConfig, loadConfig } from '../../src/core/config.ts';
 import { readState, updateState, transitionState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
+import { listBacklog } from '../../src/core/backlog.ts';
 import { runPick } from '../../src/core/pick.ts';
 import { cleanupReport } from '../../src/core/reclaim.ts';
-import { addJudgment, applyJudgments, readJudgment } from '../../src/core/judgment.ts';
+import { applyJudgments, readJudgment } from '../../src/core/judgment.ts';
 import { listInbox } from '../../src/core/inbox.ts';
 import { unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, withFileLock } from '../../src/core/storage.ts';
@@ -38,9 +39,7 @@ export async function instruction(root: string, state: HarnessState, promptState
     taskId: state.taskId ?? '', judgmentFile: config.judgment.file, backlogFile: 'docs/backlog.md',
   };
   const rendered = prompt.replace(/\{\{(taskId|judgmentFile|backlogFile)\}\}/gu, (_match, key: string) => values[key]!);
-  return state.state === 'WAIT_JUDGMENT' && state.resumeState && state.resumeState !== 'PICK'
-    ? `판단 반영 뒤 프로젝트 단계로 복귀한다. 먼저 fodh state transition ${state.resumeState} 를 실행하고 해당 단계 작업을 이어간다. task 선택은 아직 하지 않는다.\n${rendered}`
-    : rendered;
+  return rendered;
 }
 
 export default function orchestrator(pi: ExtensionAPI): void {
@@ -50,13 +49,17 @@ export default function orchestrator(pi: ExtensionAPI): void {
       display: true, details: { state: state.state, taskId: state.taskId } },
     { triggerTurn: true, ...(automatic ? { deliverAs: 'followUp' as const } : {}) });
   };
+  pi.on('input', async (event, ctx) => {
+    if (event.source !== 'extension') await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+    return { action: 'continue' };
+  });
   pi.registerCommand('project-start', {
     description: '프로젝트 인터뷰 시작',
     handler: async (args, ctx) => {
       if ((await readState(ctx.cwd)).state !== 'IDLE') throw new Error('project-start는 IDLE에서만 시작할 수 있습니다');
       await initialize(ctx.cwd);
       const state = await transitionState(ctx.cwd, 'INTERVIEW');
-      if (args.trim()) await updateState(ctx.cwd, { projectName: args.trim() });
+      await updateState(ctx.cwd, { awaitingUser: false, ...(args.trim() ? { projectName: args.trim() } : {}) });
       await send(ctx.cwd, state);
     },
   });
@@ -64,12 +67,20 @@ export default function orchestrator(pi: ExtensionAPI): void {
     description: '백로그 계획 또는 작업 선택 시작',
     handler: async (_args, ctx) => {
       let state = await readState(ctx.cwd);
-      const hadBacklog = await exists(join(ctx.cwd, 'docs/backlog.md'));
-      if (!['IDLE', 'PROJECT_READY', 'DONE_ALL', 'PLANNING', 'PICK'].includes(state.state)
+      if (!['IDLE', 'PROJECT_READY', 'DONE_ALL', 'PLANNING', 'PICK', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(state.state)
         && !state.state.startsWith('paused(')) throw new Error('현재 상태에서 develop-start를 시작할 수 없습니다');
-      if (!hadBacklog) await initialize(ctx.cwd);
+      if (state.state === 'WAIT_RETRY' && state.retry?.nextAt && Date.parse(state.retry.nextAt) > Date.now()) {
+        ctx.ui.notify(`${Math.ceil((Date.parse(state.retry.nextAt) - Date.now()) / 60000)}분 뒤 재시도 예정`, 'info'); return;
+      }
+      const missingBacklog = !await exists(join(ctx.cwd, 'docs/backlog.md'));
+      const tasks = await listBacklog(ctx.cwd);
+      if (missingBacklog) await initialize(ctx.cwd);
+      await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+      if (!tasks.length && state.state === 'PLANNING') {
+        ctx.ui.notify('백로그가 비어 있습니다. PLANNING 을 계속합니다', 'info'); return;
+      }
       if (['IDLE', 'PROJECT_READY', 'DONE_ALL'].includes(state.state)) state = await transitionState(ctx.cwd, 'PLANNING');
-      if (!hadBacklog) {
+      if (!tasks.length) {
         if (state.state !== 'PLANNING') throw new Error('백로그 계획은 PLANNING 상태가 필요합니다');
         await send(ctx.cwd, state); return;
       }
@@ -93,10 +104,14 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const ids = args.trim() ? args.trim().split(/\s+/u) : undefined;
       if (ids?.some(id => !/^A\d+(?:-\d+)?$/u.test(id))) throw new Error('판단 번호가 올바르지 않습니다');
+      const before = await readState(ctx.cwd);
       const result = await applyJudgments(ctx.cwd, ids);
       ctx.ui.notify(JSON.stringify(result), 'info');
       const state = await readState(ctx.cwd);
-      if (state.state === 'WAIT_JUDGMENT' && result.applied.length) await send(ctx.cwd, state, 'PICK');
+      if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
+        await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+        await send(ctx.cwd, state, state.state);
+      }
     },
   });
   pi.registerCommand('cleanup', {
@@ -110,23 +125,26 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const last = [...event.messages].reverse().find(message => message.role === 'assistant');
       if (last?.role === 'assistant' && ['error', 'aborted'].includes(last.stopReason)) return;
       let state = await readState(ctx.cwd);
-      if (!active.has(state.state)) return;
+      if (last?.role === 'assistant' && last.content?.some(block => block.type === 'text' && /^대기: 사용자[ \t]*$/mu.test(block.text))) {
+        await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
+      }
+      if (state.awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
+      if (!active.has(state.state)) {
+        if (['WAIT_JUDGMENT', 'DONE_ALL', 'paused(cleanup)'].includes(state.state)) ctx.ui.notify(`하네스 상태: ${state.state}`, 'info');
+        return;
+      }
       if (state.state === 'recovering' && state.recoveryAutoResumed === true) return;
       const config = await getConfig(ctx.cwd) as { maxAutoTurns?: unknown };
       const maxAutoTurns = config.maxAutoTurns ?? 3;
       if (!Number.isSafeInteger(maxAutoTurns) || Number(maxAutoTurns) < 1) throw new Error('maxAutoTurns는 1 이상의 정수여야 합니다');
       if (Number(state.autoTurns ?? 0) >= Number(maxAutoTurns)) {
-        await addJudgment(ctx.cwd, { title: `진행 정체: ${state.state}/${state.taskId ?? '-'}`,
-          background: `상태와 작업이 바뀌지 않은 자동 턴 ${state.autoTurns}회. 진행 증거와 다음 행동을 확인해야 합니다.`,
-          options: ['증거·소유 프로세스와 백로그 상태를 확인한 뒤 재개', '계획 재검토'],
-          recommend: '진행이 막힌 원인을 확인한다. 진행 중 task를 회수 증거 없이 ready로 바꾸지 않는다.', blocks: state.taskId ?? '',
-          dedupeKey: `stall:${state.state}:${state.taskId ?? ''}:${state.enteredAt ?? ''}` });
         await stopForJudgment(ctx.cwd);
         ctx.ui.notify('진행 정체를 판단대기에 등록했습니다.', 'warning');
         return;
       }
       state = await updateState(ctx.cwd, current => ({ autoTurns: Number(current.autoTurns ?? 0) + 1,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) }));
+      await new Promise(resolve => setTimeout(resolve, 0));
       await send(ctx.cwd, state, state.state, true);
     } finally { resuming = false; }
   });

@@ -139,3 +139,8 @@ it('FODH_NODE가 있으면 PATH와 무관하게 그 실행 파일을 사용한�
     env: { PATH: '/nonexistent', FODH_NODE: process.execPath },
   })).code).toBe(0);
 });
+it.each(['PLANNING','INTERVIEW','RESEARCH','PRD_DRAFT','ARCH','REVIEW'])('L9 %s 문서 commit 허용, push·merge는 거부',async state=>{
+  expect((await invoke('Bash',{command:'git commit -m docs'},state)).code).toBe(0);
+  expect((await invoke('Bash',{command:'git push origin feature'},state)).code).toBe(2);
+  expect((await invoke('Bash',{command:'git merge feature'},state)).code).toBe(2);
+});

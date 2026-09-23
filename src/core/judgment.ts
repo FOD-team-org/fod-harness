@@ -1,20 +1,20 @@
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { loadConfig } from './config.ts';
-import { readState, updateState } from './state.ts';
+import { readState, updateState, transitionState } from './state.ts';
 import { listBacklog, setTask } from './backlog.ts';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 
 export interface JudgmentItem {
   id: string; title: string; rev: number; background: string; options: string[]; recommend: string;
   blocks: string; answer: string; answerRev?: number; classification?: AnswerClassification;
-  requiresApproval?: boolean; reaskOf?: string; followup?: string; dedupeKey?: string; raw: string; start: number; end: number;
+  resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string; followup?: string; dedupeKey?: string; raw: string; start: number; end: number;
 }
 export interface CompletedJudgment { id: string; rev?: number; answer: string; interpretation: string; commit: string; date: string }
 export interface JudgmentDocument { items: JudgmentItem[]; completed: CompletedJudgment[] }
 export interface JudgmentInput {
   title: string; background: string; options: string | string[]; recommend: string;
-  blocks: string | string[]; dedupeKey?: string; requiresApproval?: boolean; reaskOf?: string;
+  blocks: string | string[]; dedupeKey?: string; resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string;
 }
 export interface AnswerClassification {
   kind: 'choice' | 'conditional' | 'freeform' | 'ambiguous' | 'revision-mismatch' | 'empty';
@@ -57,6 +57,7 @@ export function parseJudgment(text: string): JudgmentDocument {
       id: heading[1]!, title: heading[2]!, rev: Number(heading[3]), background: field(raw, '배경'),
       options: optionsOf(field(raw, '선택지')), recommend: field(raw, '추천'), blocks: field(raw, '막힌 작업'),
       answer: field(raw, '답'), requiresApproval: field(raw, '승인 필수') === 'true',
+      resolution: ['resume', 'cleanup'].includes(field(raw, '적용 정책')) ? field(raw, '적용 정책') as 'resume' | 'cleanup' : undefined,
       reaskOf: field(raw, '재질문 원본') || undefined, followup: field(raw, '후속 질문') || undefined, ...(answerRev ? { answerRev: Number(answerRev) } : {}),
       dedupeKey: raw.match(/<!-- fodh-dedupe: ([a-f0-9]+) -->/u)?.[1], raw, start, end,
     });
@@ -114,7 +115,7 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
       ? { kind: 'conditional', applicable: true, selection, condition, interpretation: `${interpretation}; 조건: ${condition}` }
       : { kind: 'choice', applicable: true, selection, interpretation };
   }
-  const approved = /(?:^|[\s,.:;])(승인|진행)(?=$|[\s,.:;])/u.test(answer);
+  const approved = /(?:^|[\s,.:;])(승인(?:합니다|해요|해|함)?|진행(?:합니다|해요|해)?)(?=$|[\s,.:;])/u.test(answer);
   return {
     kind: 'freeform', applicable: !requiresApproval || approved,
     ...(!requiresApproval || approved ? {} : { reason: '승인 필수 동작에는 선택 번호 또는 승인/진행 토큰이 필요합니다' }),
@@ -194,6 +195,7 @@ export async function addJudgment(root: string, input: JudgmentInput): Promise<{
       `- 추천: ${oneLine(input.recommend)}\n`,
       `- 막힌 작업: ${oneLine(Array.isArray(input.blocks) ? input.blocks.join(', ') : input.blocks)}\n`,
       '- 회신: 번호 하나 또는 자유 서술. 승인이 필요한 동작이면 번호 또는 승인/진행 토큰을 포함.\n- 답:\n',
+      `${input.resolution ? `- 적용 정책: ${input.resolution}\n` : ''}`,
       `${input.requiresApproval ? '- 승인 필수: true\n' : ''}${input.reaskOf ? `- 재질문 원본: ${oneLine(input.reaskOf)}\n` : ''}`,
       `${dedupeKey ? `<!-- fodh-dedupe: ${dedupeKey} -->\n` : ''}\n`,
     ].join('');
@@ -239,7 +241,7 @@ export async function writeJudgmentStatus(root: string, status: string): Promise
 const tableValue = (value: string): string => value.replace(/\|/gu, '\\|').replace(/\r?\n/gu, '<br>');
 export async function completeJudgment(
   root: string, id: string,
-  input: { interpretation: string; commit: string; answerRev?: number; requiresApproval?: boolean; expectedRaw?: string },
+  input: { interpretation: string; commit: string; answerRev?: number; requiresApproval?: boolean; expectedRaw?: string; resolveChain?: boolean },
 ): Promise<{ expectedHash: string; completed: CompletedJudgment }> {
   const path = await location(root);
   return withFileLock(path, async () => {
@@ -257,14 +259,16 @@ export async function completeJudgment(
         timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
       }).format(new Date()),
     };
-    text = text.slice(0, item.start) + text.slice(item.end);
+    const chain = input.resolveChain ? relatedChain(parseJudgment(text).items, item) : [item];
+    for (const member of [...chain].sort((a, b) => b.start - a.start)) text = text.slice(0, member.start) + text.slice(member.end);
     if (!/^## 결정 완료\s*$/mu.test(text)) text += '\n## 결정 완료\n';
     // 구형 완료 표도 보존하고 현재 규격 표를 별도로 덧붙인다.
     if (!text.includes('| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |')) {
       text += '\n| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |\n|---|---|---|---|---|---|\n';
     }
-    text = text.trimEnd() + `\n| ${[
-      id, String(item.rev), item.answer, input.interpretation, input.commit, completed.date,
+    for (const member of chain) text = text.trimEnd() + `\n| ${[
+      member.id, String(member.rev), member.id === id ? item.answer : `모호: ${member.answer} → ${id}: ${item.answer}`,
+      input.interpretation, input.commit, completed.date,
     ].map(tableValue).join(' | ')} |\n`;
     return { expectedHash: await save(root, path, text), completed };
   });
@@ -275,8 +279,17 @@ function approvalRequired(item: JudgmentItem, configured: string[] = []): boolea
   return item.requiresApproval === true || configured.some(name => text.includes(name))
     || /승인|훅.*거부|프로덕션|운영.*배포|결제|스토어|심사|push|환경변수|비밀값|외부.*발송|약관|개인정보|DNS|키체인/iu.test(text);
 }
+function relatedChain(items: JudgmentItem[], last: JudgmentItem): JudgmentItem[] {
+  const chain = [last], seen = new Set([last.id]);
+  for (let at = 0; at < chain.length; at++) {
+    for (const item of items) if (!seen.has(item.id) && (item.id === chain[at].reaskOf || item.followup === chain[at].id)) {
+      seen.add(item.id); chain.push(item);
+    }
+  }
+  return chain;
+}
 interface ApplyEntry { id: string; interpretation: string }
-interface ApplyJournal { id: string; rev: number; answer: string; interpretation: string; releases: string[] }
+interface ApplyJournal { id: string; rev: number; answer: string; interpretation: string; releases: string[]; hold?: boolean; resolution?: string; relevant?: boolean }
 async function markFollowup(root: string, original: JudgmentItem, followup: string): Promise<void> {
   const path = await location(root);
   await withFileLock(path, async () => {
@@ -298,17 +311,36 @@ export async function applyJudgments(root: string, ids?: string[]): Promise<{
     const finish = async (entry: ApplyJournal) => {
       const document = await readJudgment(root);
       if (!document.completed.some(item => item.id === entry.id && item.rev === entry.rev && item.answer === entry.answer)) return;
+      let relevant = entry.relevant ?? false;
       for (const task of await listBacklog(root)) {
         if (!entry.releases.some(id => task.status === `blocked(${id})`)) continue;
+        relevant = true;
         const other = document.items.find(item => !item.followup && !entry.releases.includes(item.id)
           && item.blocks.split(/[,\s]+/u).includes(task.id));
-        await setTask(root, task.id, { status: other ? `blocked(${other.id})` : 'ready', judgment: other?.id ?? '',
+        const status = entry.hold ? task.status : other ? `blocked(${other.id})` : 'ready';
+        await setTask(root, task.id, { status, judgment: entry.hold ? task.judgment : other?.id ?? '',
           notes: [task.notes, `${entry.id}: ${entry.interpretation}`].filter(Boolean).join('\n') });
       }
       const state = await readState(root);
-      if (typeof state.pickJudgment === 'string' && entry.releases.includes(state.pickJudgment)) {
-        await updateState(root, { retry: { count: 0 }, lastPaused: undefined, pickJudgment: undefined });
+      relevant ||= typeof state.pickJudgment === 'string' && entry.releases.includes(state.pickJudgment);
+      if (!entry.hold && relevant) {
+        await updateState(root, { retry: undefined, lastPaused: undefined });
+        if (state.state === 'WAIT_JUDGMENT') await transitionState(root, state.resumeState ?? 'PICK', { judgmentApplied: true });
+        else if (state.state === 'paused(cleanup)' && entry.resolution === 'cleanup') {
+          const { cleanupReport } = await import('./reclaim.ts');
+          if ((await cleanupReport(root)).ok) {
+            const pending = state.pendingReclaim as { taskId: string; judgmentId: string } | undefined;
+            if (pending) {
+              const blocking = document.items.find(item => item.id === pending.judgmentId);
+              await setTask(root, pending.taskId, { status: blocking ? `blocked(${blocking.id})` : 'ready', judgment: blocking?.id ?? '' });
+            }
+            await updateState(root, { pendingReclaim: undefined });
+            await transitionState(root, 'PICK');
+            await updateState(root, { pickJudgment: undefined });
+          }
+        }
       }
+      if (entry.hold) await writeJudgmentStatus(root, `${entry.id} 보류 — ${entry.interpretation}`);
       applied.push({ id: entry.id, interpretation: entry.interpretation });
       journal = journal.filter(item => item.id !== entry.id); await persist();
     };
@@ -330,17 +362,32 @@ export async function applyJudgments(root: string, ids?: string[]): Promise<{
         if (classification.kind === 'empty') continue;
         const next = await addJudgment(root, { title: `${item.id} 재질문: ${item.title}`, background: `${reason}. 이전 답: ${item.answer}`,
           options: item.options, recommend: item.recommend, blocks: item.blocks, requiresApproval,
-          reaskOf: item.reaskOf ?? item.id, dedupeKey: `reask:${item.id}:${item.rev}:${hash(item.answer)}` });
+          reaskOf: item.id, resolution: item.resolution, dedupeKey: `reask:${item.id}:${item.rev}:${hash(item.answer)}` });
         await markFollowup(root, item, next.item.id);
         continue;
       }
+      if (item.resolution && !classification.selection) {
+        unapplied.push({ id: item.id, reason: '재개 또는 보류의 선택 번호가 필요합니다' }); continue;
+      }
+      if (item.resolution === 'cleanup' && classification.selection === 1) {
+        const { cleanupReport } = await import('./reclaim.ts');
+        if (!(await cleanupReport(root)).ok) {
+          unapplied.push({ id: item.id, reason: '프로세스 레지스트리 잔존이 있습니다' }); continue;
+        }
+      }
       const interpretation = classification.interpretation ?? `사용자 지시: ${item.answer}`;
+      const stateBefore = await readState(root);
       const entry: ApplyJournal = { id: item.id, rev: item.rev, answer: item.answer, interpretation,
-        releases: [item.id, ...(item.reaskOf ? [item.reaskOf] : [])] };
+        releases: relatedChain(document.items, item).map(member => member.id),
+        hold: !!item.resolution && classification.selection === 2, resolution: item.resolution,
+        relevant: (await listBacklog(root)).some(task => relatedChain(document.items, item).some(member => task.status === `blocked(${member.id})`))
+          || relatedChain(document.items, item).some(member => stateBefore.pickJudgment === member.id),
+      };
       journal = [...journal.filter(record => record.id !== item.id), entry]; await persist();
-      await completeJudgment(root, item.id, { interpretation, commit: '판단 적용; 코드 커밋 없음', requiresApproval, expectedRaw: item.raw });
+      await completeJudgment(root, item.id, { interpretation, commit: '판단 적용; 코드 커밋 없음', requiresApproval, expectedRaw: item.raw, resolveChain: true });
       await finish(entry);
     }
-    return { applied, unapplied };
+    const remaining = new Set((await readJudgment(root)).items.map(item => item.id));
+    return { applied, unapplied: unapplied.filter(item => remaining.has(item.id) || !document.items.some(open => open.id === item.id)) };
   });
 }

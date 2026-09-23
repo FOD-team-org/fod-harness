@@ -28,7 +28,7 @@ it('설정 기본값은 fable, 회전 끔, Opus 수행자, astra/sol xhigh 및 �
   expect(await getConfig(root)).toMatchObject({
     brain: { model: 'fable', rotateAtTokens: 0, doctorTtlHours: 12 },
     delegate: { claude: { subagentModel: 'opus' }, codex: {
-      brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', maxChildAgents: 1,
+      brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-5.6-sol', workerEffort: 'xhigh', maxChildAgents: 1,
     } },
   });
   await expect(readFile(join(root, '.pi/harness.json'))).rejects.toMatchObject({ code: 'ENOENT' });

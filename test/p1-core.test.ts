@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { addTask, getTask, listBacklog, setTask, missingDoD, type Task } from '../src/core/backlog.ts';
+import { addTask, getTask, listBacklog, readBacklog, setTask, missingDoD, type Task } from '../src/core/backlog.ts';
 import { allowedTransition, readState, updateState, transitionState } from '../src/core/state.ts';
 import { decidePick, runPick } from '../src/core/pick.ts';
 import { addJudgment, answerJudgment, applyJudgments, readJudgment } from '../src/core/judgment.ts';
@@ -21,7 +21,7 @@ const graph: Record<string, string[]> = {
   REVIEW: ['PROJECT_READY', 'INTERVIEW', 'WAIT_JUDGMENT', 'MERGE', 'FIX', 'RECLAIM'], PROJECT_READY: ['PLANNING'], READY: [],
   PLANNING: ['PICK'], PICK: ['SPEC', 'DONE_ALL', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'DEADLOCK'],
   SPEC: ['IMPLEMENT', 'RECLAIM'], IMPLEMENT: ['VERIFY', 'RECLAIM'], VERIFY: ['REVIEW', 'FIX', 'RECLAIM'],
-  FIX: ['VERIFY', 'RECLAIM'], MERGE: ['DOCS', 'RECLAIM'], DOCS: ['CLEANUP'], CLEANUP: ['PICK', 'CLEANUP_FAILED'],
+  FIX: ['VERIFY', 'RECLAIM'], MERGE: ['DOCS', 'RECLAIM'], DOCS: ['CLEANUP', 'RECLAIM'], CLEANUP: ['PICK', 'CLEANUP_FAILED'],
   CLEANUP_FAILED: ['CLEANUP'], RECLAIM: ['PICK', 'CLEANUP_FAILED'],
   WAIT_JUDGMENT: ['PICK', 'INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'], WAIT_RETRY: ['PICK'], WAIT_RESOURCE: ['PICK'],
   DEADLOCK: ['WAIT_JUDGMENT'], DONE_ALL: ['IDLE', 'PLANNING'], recovering: ['PICK', 'IDLE'],
@@ -40,7 +40,8 @@ it.each(Object.entries(graph).flatMap(([from, next]) => next.map(to => [from, to
   await updateState(root, { state: from, phase: projectReview || projectResume ? 'project' : 'task',
     taskId: projectReview || projectResume ? undefined : t.id, resumeState: from === 'WAIT_JUDGMENT' ? to : undefined,
     doctor: { ok: true, checkedAt: new Date().toISOString() }, autoTurns: 2 });
-  const result = await transitionState(root, to, { taskId: t.id, commit: 'sha1' });
+  if (from === 'CLEANUP' && to === 'PICK') await setTask(root, t.id, { status: 'done' });
+  const result = await transitionState(root, to, { taskId: t.id, commit: 'sha1', system: from === 'WAIT_JUDGMENT' });
   expect(result.state).toBe(to); expect(result.autoTurns).toBe(0); expect(result.enteredAt).toBeTruthy();
   expect((await readLedger(root)).at(-1)).toMatchObject({ action: `state:${from}→${to}`, status: 'ok' });
 });
@@ -84,7 +85,9 @@ it('프로젝트 REVIEW와 task REVIEW는 서로의 출구를 쓸 수 없다', a
   await updateState(root,{state:'ARCH'}); await transitionState(root,'REVIEW');
   await expect(transitionState(root,'MERGE',t.id)).rejects.toThrow('프로젝트 검수');
   await transitionState(root,'WAIT_JUDGMENT'); expect((await readState(root)).resumeState).toBe('REVIEW');
-  await expect(transitionState(root,'PICK')).rejects.toThrow('resumeState'); await transitionState(root,'REVIEW');
+  await expect(transitionState(root,'PICK')).rejects.toThrow('답이 필요');
+  await expect(transitionState(root,'PICK',{system:true})).rejects.toThrow('resumeState');
+  await transitionState(root,'REVIEW',{system:true});
   await updateState(root,{state:'REVIEW',taskId:t.id,phase:'task'});
   await expect(transitionState(root,'PROJECT_READY')).rejects.toThrow('프로젝트 검수');
 });
@@ -120,7 +123,8 @@ it('DoD 충족 done과 spec 개정시 증거 무효화·repair 리셋', async ()
 it('잘못된 사람 편집 done은 증거를 만들어내지 않으며 JSON 내용을 보존한다', async () => {
   const root=await project();await addTask(root,input); const md=join(root,'docs/backlog.md'),json=join(root,'.pi/harness-backlog.json');
   const before=await readFile(json,'utf8'); await writeFile(md,(await readFile(md,'utf8')).replace('| ready |','| done |'));
-  await expect(listBacklog(root)).rejects.toThrow('DoD'); expect(await readFile(json,'utf8')).toBe(before);
+  const loaded=await readBacklog(root);expect(loaded.warnings[0]).toContain('DoD');
+  expect(loaded.tasks[0].status).toBe('ready');expect(await readFile(json,'utf8')).toBe(before);
 });
 const now=Date.parse('2026-09-24T00:00:00Z');
 it.each([
@@ -185,6 +189,8 @@ it('승인 토큰 없는 필수 항목은 재질문하고 새 답으로 원 task
   await applyJudgments(root);expect((await readJudgment(root)).items).toHaveLength(2);
   await answerJudgment(root,followup.id,'승인 검수 후 처리해');expect((await applyJudgments(root,[followup.id])).applied).toHaveLength(1);
   expect((await getTask(root,t.id)).status).toBe('ready');expect((await getTask(root,t.id)).notes).toContain('검수 후');
+  const closed=await readJudgment(root);expect(closed.items).toHaveLength(0);expect(closed.completed).toHaveLength(2);
+  expect(closed.completed.find(row=>row.id===item.id)?.answer).toBe(`모호: 검수 후 처리해 → ${followup.id}: 승인 검수 후 처리해`);
 });
 it('ID 한정 apply는 미선택 답과 다른 열린 차단 판단을 보존한다',async()=>{
   const root=await project(),t=await addTask(root,input),items=[];
@@ -196,10 +202,14 @@ it('ID 한정 apply는 미선택 답과 다른 열린 차단 판단을 보존한
 async function cli(root:string,args:string[]){let output='';const spy=vi.spyOn(process.stdout,'write').mockImplementation(chunk=>{output+=chunk;return true;});process.exitCode=0;try{await main(args,root);return {code:process.exitCode,value:JSON.parse(output)};}finally{spy.mockRestore();}}
 it('CLI 새 명령은 JSON·오류 상세·DoD 누락·repair action을 반환한다',async()=>{
   const root=await project();const t=(await cli(root,['backlog','add','--title','CLI','--category','docs'])).value;
-  expect((await cli(root,['backlog','list','--json'])).value).toHaveLength(1);
+  expect((await cli(root,['backlog','list','--json'])).value.tasks).toHaveLength(1);
   expect((await cli(root,['backlog','get',t.id])).value.id).toBe(t.id);
+  expect((await cli(root,['backlog','set',t.id,'--status','done'])).value.error).toBe('상태는 전이로만 바뀝니다');
+  await updateState(root,{state:'CLEANUP',taskId:t.id});
   expect((await cli(root,['backlog','set',t.id,'--status','done'])).value.missing).toHaveLength(6);
-  await cli(root,['backlog','set',t.id,'--repair','3']);await updateState(root,{state:'VERIFY',taskId:t.id});
+  expect((await cli(root,['backlog','set',t.id,'--repair','3'])).code).toBe(1);
+  for(let n=0;n<3;n++){await updateState(root,{state:'VERIFY',taskId:t.id});await transitionState(root,'FIX',t.id);}
+  await transitionState(root,'VERIFY',t.id);
   expect(await cli(root,['state','transition','FIX','--task',t.id])).toMatchObject({code:1,value:{error:'repair 초과',action:'reclaim'}});
   expect((await cli(root,['cleanup','report'])).value.ok).toBe(true);
 });
@@ -207,8 +217,10 @@ it('재시도 소진 판단 적용은 재시도 이력을 초기화하고 회수
   const root=await project(),t=await addTask(root,input);await setTask(root,t.id,{status:'doing'});
   await updateState(root,{state:'PICK',lastPaused:'quota',retry:{count:3}});
   await runPick(root);const {items}=await readJudgment(root);await answerJudgment(root,items[0].id,'1');
-  await applyJudgments(root);expect((await readState(root)).retry).toEqual({count:0});
-  expect((await getTask(root,t.id)).status).toBe('doing');
+  await applyJudgments(root);expect((await readState(root)).retry).toBeUndefined();
+  expect((await readState(root)).state).toBe('PICK');
+  await runPick(root);expect((await getTask(root,t.id)).status).toMatch(/^blocked\(A\d+\)$/u);
+  expect((await readJudgment(root)).items[0].title).toContain(`고아 task ${t.id}`);
 });
 it('별도 Node fodh 프로세스에서 새 CLI 흐름을 실제 실행한다',async()=>{
   const {execFile}=await import('node:child_process');const {promisify}=await import('node:util');const {resolve}=await import('node:path');
@@ -243,7 +255,7 @@ it('CLI 빈 수치로 repair 또는 review.high=0을 만들 수 없다',async()=
 });
 it('과거 phase 없는 프로젝트 REVIEW도 WAIT에서 동일 REVIEW로만 복귀한다',async()=>{
   const root=await project();await updateState(root,{state:'REVIEW'});await transitionState(root,'WAIT_JUDGMENT');
-  expect((await transitionState(root,'REVIEW')).state).toBe('REVIEW');
+  expect((await transitionState(root,'REVIEW',{system:true})).state).toBe('REVIEW');
 });
 it('설정된 승인 필수 동작은 read --answered와 apply가 같은 불가 판정을 쓴다',async()=>{
   const root=await project();const {setConfig}=await import('../src/core/config.ts');await setConfig(root,'requiresApproval','["custom-sensitive-action"]');

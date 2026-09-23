@@ -7,6 +7,7 @@ import { readState, updateState } from '../core/state.ts';
 import { acquireLock } from '../core/lock.ts';
 import { appendLedger, unknownEntries } from '../core/ledger.ts';
 import { listInbox, deliverInbox } from '../core/inbox.ts';
+import { reclaimTask } from '../core/reclaim.ts';
 import { addJudgment } from '../core/judgment.ts';
 import { runProcess, type ProcessResult } from './runner.ts';
 import { checkBillingEnvironment } from './preflight.ts';
@@ -51,6 +52,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
   const { root } = options;
   const runId = randomUUID();
   let release: (() => Promise<void>) | undefined;
+  const pendingDenials: (() => Promise<void>)[] = [];
   const patchState = (patch: Parameters<typeof updateState>[1]) =>
     options.doctor ? Promise.resolve(undefined) : updateState(root, patch);
   try {
@@ -79,16 +81,24 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       };
       const persistDenials = async () => {
         if (options.doctor) return;
+        const state = await readState(root);
+        let firstId: string | undefined;
         for (const [key, safe] of denials) {
           const dedupeKey = createHash('sha256').update(key).digest('hex');
-          await addJudgment(root, {
+          const { item } = await addJudgment(root, {
             title: `${safe.tool_name}: ${safe.tool_input?.command ?? JSON.stringify(safe.tool_input)}`,
             background: 'Claude Code 훅이 실행을 거부했습니다. 승인이 필요한지 판단하세요.',
             options: ['해당 동작 승인', '보류'], recommend: '승인 범위를 확인한 뒤 결정',
-            blocks: initial.taskId ?? '', dedupeKey, requiresApproval: true,
+            blocks: state.taskId ?? '', dedupeKey: `${dedupeKey}:${state.taskId ?? ''}`, requiresApproval: true,
           });
+          firstId ??= item.id;
+        }
+        if (state.taskId && firstId) {
+          await reclaimTask(root, state.taskId, firstId, { suspended: true });
+          if (state.state === 'paused(billing)') await patchState({ state: 'paused(billing)' });
         }
       };
+      pendingDenials.push(persistDenials);
       const text = (value: string) => options.onText?.(redact(value));
       let outcome: ProcessResult;
       try {
@@ -167,7 +177,6 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         });
       } finally {
         if (lastEventAt) await patchState({ lastEventAt, runId });
-        await persistDenials();
       }
       const configError = outcome.abortKind === 'configError'
         || /requires --verbose|unknown (?:option|model)|invalid (?:settings|model)/i.test(outcome.stderr);
@@ -236,7 +245,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       await patchState({ state: 'recovering' });
     }
     throw error;
-  } finally { await release?.(); }
+  } finally {
+    try { for (const persist of pendingDenials) await persist(); } finally { await release?.(); }
+  }
 }
 export function latestMessage<T extends {
   messages: { role: string; content: string | { type: string; text?: string }[] }[];

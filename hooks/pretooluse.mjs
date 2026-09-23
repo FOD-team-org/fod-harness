@@ -133,7 +133,9 @@ try {
       let state;
       try { state = JSON.parse(readFileSync(resolve(root, '.pi/harness-state.json'), 'utf8')).state; }
       catch { deny('상태를 확인할 수 없어 git 변경을 거부합니다.'); }
-      if (!['MERGE', 'DOCS'].includes(state)) deny('git commit·push·merge는 MERGE 또는 DOCS 상태에서만 허용됩니다.');
+      const allowed = gitAction(words) === 'commit'
+        ? ['MERGE', 'DOCS', 'PLANNING', 'INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'] : ['MERGE', 'DOCS'];
+      if (!allowed.includes(state)) deny('현재 상태에서는 해당 git 변경을 허용하지 않습니다.');
     }
   }
   let configured = [

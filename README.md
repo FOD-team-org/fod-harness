@@ -34,7 +34,7 @@ Pi가 잠금을 보유한 동안 `fodh doctor`는 즉시 오류를 반환합니�
 `fodh config get`은 기본값을 포함한 설정 전체, `fodh config get brain.model`은 해당 값을 보여줍니다.
 `config set`은 값을 JSON으로 파싱하고, JSON이 아니면 문자열로 취급합니다. 검증에 실패하면 저장하지 않습니다.
 
-수행자는 Claude **Opus 5.5**(`delegate.claude.subagentModel=opus`)와 **gpt-6-sol xhigh**,
+수행자는 Claude **Opus 5.5**(`delegate.claude.subagentModel=opus`)와 **gpt-5.6-sol xhigh**,
 GPT 두뇌는 **gpt-6-astra xhigh**입니다. Codex 자식 에이전트 기본 상한은 1입니다.
 위임 설정은 현재 로드·검증·조회까지만 지원하며 실제 `fodh codex` 실행은 P2 범위입니다.
 
@@ -42,3 +42,5 @@ Claude Code autocompact는 사용자 `~/.claude/settings.json` 설정을 따릅�
 (설계 기준 `autoCompactWindow: 250000`). 하네스는 압축 인자·프로젝트 settings 키를 추가하지 않고,
 관련 환경변수도 추가·삭제하지 않습니다. Pi 자동 컴팩션 설정과는 별개입니다.
 하네스 보조 회전 임계값 `brain.rotateAtTokens`의 기본값은 0(회전 끔)이며, 이번 단계는 설정 로드·검증까지만 제공합니다.
+
+Codex 수행자 기본값 `gpt-5.6-sol`은 판단 A11 확정 전의 임시값입니다. 답이 오면 `fodh config set delegate.codex.workerModel <ID>`로 교체합니다.

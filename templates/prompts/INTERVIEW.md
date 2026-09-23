@@ -4,4 +4,6 @@
 영역: 문제·목적, 사용자·시나리오, 범위·MVP, 플랫폼, 스택·기존 자산, 데이터·개인정보, 인증, 결제·광고, 인프라·비용, 외부 API, 디자인·브랜드, 일정, 지표, 비기능, 운영, 법무·심사, 팀 규칙(역할·모델·검수·정리·승인 목록), 리스크·가정.
 산출물: `docs/결정기록/YYYY-MM-DD-인터뷰.md`에 답과 미결 사항을 기록한다.
 끝내는 조건: 18 영역 모두 답이 있거나 판단대기로 이관되어 있다. 답을 임의로 추정하지 않는다.
-다음 fodh 명령: 답을 기다리면 `fodh state transition WAIT_JUDGMENT`, 인터뷰가 충족되면 `fodh state transition RESEARCH`.
+다음 fodh 명령: 판단대기에 등록한 유한 선택지의 답을 기다리면 `fodh state transition WAIT_JUDGMENT`, 인터뷰가 충족되면 `fodh state transition RESEARCH`.
+
+서술형 질문을 던지고 답을 기다릴 때는 `대기: 사용자` 를 적고 턴을 끝낸다. 필요하면 `fodh state await-user`로 대기를 기록한다.

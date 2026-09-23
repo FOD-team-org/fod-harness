@@ -67,3 +67,54 @@ it('다른 task 잔존은 종료하지 않고 성공을 막는다',async()=>{
   expect(reclaimOwnedGroup).toHaveBeenCalledTimes(1);expect(reclaimOwnedGroup).toHaveBeenCalledWith(record.pgid);
   expect((await listProcs(root))[0].taskId).toBe('T99');
 });
+it('M4: cleanup report는 죽은 그룹만 제거하고 재사용 PID·brain을 보존한다',async()=>{
+  const {root,record}=await setup();vi.mocked(groupAlive).mockReturnValue(false);
+  await registerProc(root,{...record,pid:987655,pgid:987655,kind:'brain'});
+  await registerProc(root,{...record,pid:987656,pgid:987656});
+  vi.mocked(processStartedAt).mockImplementation(async pid=>pid===987656?'Thu Sep 24 00:05:00 2026':undefined);
+  const report=await cleanupReport(root);
+  expect(report.removed.map(proc=>proc.pid)).toEqual([record.pid]);expect(report.residual.map(proc=>proc.pid)).toEqual([987656]);
+  expect(report.protected.map(proc=>proc.pid)).toEqual([987655]);expect(reclaimOwnedGroup).not.toHaveBeenCalled();
+});
+it.each(['1','2'])('M4: 연속 2회 실패는 paused(cleanup), 사용자 선택 %s 처리',async answer=>{
+  const {root,task,item,record}=await setup();vi.mocked(reclaimOwnedGroup).mockResolvedValue(false);
+  const {transitionState}=await import('../src/core/state.ts');
+  const {readJudgment,answerJudgment,applyJudgments}=await import('../src/core/judgment.ts');
+  expect((await reclaimTask(root,task.id,item.id)).next).toBe('CLEANUP_FAILED');
+  await transitionState(root,'CLEANUP');
+  expect((await reclaimTask(root,task.id,item.id)).next).toBe('paused(cleanup)');
+  expect((await readState(root)).cleanupFailures).toBe(2);
+  const decision=(await readJudgment(root)).items.find(item=>item.resolution==='cleanup')!;
+  expect(decision.title).toBe(`정리 실패: 잔존 프로세스 ${record.pid}`);
+  await answerJudgment(root,decision.id,answer);
+  if(answer==='1')vi.mocked(groupAlive).mockReturnValue(false);
+  expect((await applyJudgments(root,[decision.id])).applied).toHaveLength(1);
+  expect((await readState(root)).state).toBe(answer==='1'?'PICK':'paused(cleanup)');
+  expect((await readState(root)).cleanupFailures).toBe(answer==='1'?0:2);
+  if(answer==='1') {
+    expect((await readState(root)).pendingReclaim).toBeUndefined();
+    expect((await getTask(root,task.id)).status).toBe(`blocked(${item.id})`);
+  }
+});
+it('L4: add 이후 회수 실패 JSON은 생성된 판단 번호를 유지한다',async()=>{
+  const {root,task}=await setup();vi.mocked(reclaimOwnedGroup).mockResolvedValue(false);
+  const {main}=await import('../src/cli/index.ts');
+  const output=vi.spyOn(process.stdout,'write').mockImplementation(()=>true);
+  try {
+    await main(['judgment','add','--title','실패 판단','--background','','--options','유지|변경','--recommend','1','--blocks',task.id,'--reclaim'],root);
+    const value=JSON.parse(String(output.mock.calls.at(-1)?.[0]));
+    expect(value).toMatchObject({error:'프로세스 회수 실패',judgment:'A2',reclaimed:false,next:'CLEANUP_FAILED'});
+    expect(process.exitCode).toBe(1);
+  } finally {output.mockRestore();process.exitCode=0;}
+});
+it('M4: 정리했다고 답해도 살아 있는 잔존은 적용·PICK을 막고 답을 보존한다',async()=>{
+  const {root,task,item}=await setup();vi.mocked(reclaimOwnedGroup).mockResolvedValue(false);
+  const {transitionState}=await import('../src/core/state.ts');
+  const {readJudgment,answerJudgment,applyJudgments}=await import('../src/core/judgment.ts');
+  await reclaimTask(root,task.id,item.id);await transitionState(root,'CLEANUP');await reclaimTask(root,task.id,item.id);
+  const decision=(await readJudgment(root)).items.find(item=>item.resolution==='cleanup')!;
+  await answerJudgment(root,decision.id,'1');
+  expect(await applyJudgments(root,[decision.id])).toEqual({applied:[],unapplied:[{id:decision.id,reason:'프로세스 레지스트리 잔존이 있습니다'}]});
+  expect((await readState(root)).state).toBe('paused(cleanup)');
+  expect((await readJudgment(root)).items.find(item=>item.id===decision.id)?.answer).toBe('1');
+});

@@ -1,9 +1,9 @@
-import { getConfig, setConfig } from '../core/config.ts';
-import { addTask, getTask, listBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
+import { getConfig, setConfig, loadConfig } from '../core/config.ts';
+import { addTask, getTask, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
 import { runPick } from '../core/pick.ts';
 import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
-import { readState, transitionState, doctorFresh, TransitionError } from '../core/state.ts';
+import { readState, updateState, transitionState, doctorFresh, TransitionError } from '../core/state.ts';
 import { readJudgment, addJudgment, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
 import { listProcs } from '../core/procs.ts';
@@ -12,11 +12,12 @@ import { safeValue } from '../provider/privacy.ts';
 import { doctor } from './doctor.ts';
 import { redact } from '../provider/privacy.ts';
 export async function main(args = process.argv.slice(2), root = process.cwd()): Promise<void> {
+  let createdJudgment: string | undefined;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
       unknown: { type: 'boolean' }, json: { type: 'boolean' }, system: { type: 'boolean' }, reclaim: { type: 'boolean' },
       commit: { type: 'string' }, status: { type: 'string' }, depends: { type: 'string' }, category: { type: 'string' },
-      repair: { type: 'string' }, judgment: { type: 'string' }, worktree: { type: 'string' },
+      judgment: { type: 'string' }, worktree: { type: 'string' },
       'review-commit': { type: 'string' }, 'review-high': { type: 'string' }, 'verify-ok': { type: 'boolean' },
       'merge-commit': { type: 'string' }, 'docs-ok': { type: 'boolean' }, 'cleanup-ok': { type: 'boolean' },
       'spec-rev': { type: 'string' }, 'requires-approval': { type: 'boolean' }, evidence: { type: 'string' },
@@ -38,13 +39,15 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
       exact(2); result = await setConfig(root, rest[0], rest[1]);
     }
     else if (group === 'state' && action === 'get') { exact(0); result = await readState(root); }
+    else if (group === 'state' && action === 'await-user') { exact(0); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
       exact(1);
-      if (['IMPLEMENT', 'MERGE'].includes(rest[0]) && !doctorFresh(await readState(root))) {
+      if (['IMPLEMENT', 'MERGE'].includes(rest[0]) && !doctorFresh(await readState(root), (await loadConfig(root)).brain.doctorTtlHours)) {
         throw new Error('doctor 검증이 없거나 오래되었습니다. Pi 세션을 재시작하거나 fodh doctor 를 실행하세요.');
       }
       result = await transitionState(root, rest[0], { taskId: values.task, commit: values.commit, system: values.system });
-    } else if (group === 'backlog' && action === 'list') { exact(0); result = await listBacklog(root); }
+    } else if (group === 'backlog' && action === 'list') { exact(0); result = await readBacklog(root); }
+    else if (group === 'backlog' && action === 'sync') { exact(0); result = await syncBacklog(root); }
     else if (group === 'backlog' && action === 'get') { exact(1); result = await getTask(root, rest[0]); }
     else if (group === 'backlog' && action === 'add') {
       exact(0);
@@ -53,11 +56,17 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
         depends: values.depends?.split(',').map(value => value.trim()).filter(Boolean) });
     } else if (group === 'backlog' && action === 'set') {
       exact(1); const patch: Partial<Task> = {};
+      if (values.status !== undefined) {
+        const state = await readState(root);
+        if (values.status !== 'done' || state.state !== 'CLEANUP' || state.taskId !== rest[0]) {
+          throw new Error('상태는 전이로만 바뀝니다');
+        }
+      }
       for (const key of ['title', 'category', 'status', 'judgment', 'worktree'] as const) {
         if (values[key] !== undefined) patch[key] = values[key];
       }
       if (values.depends !== undefined) patch.depends = values.depends.split(',').map(value => value.trim()).filter(Boolean);
-      if (values.repair !== undefined) patch.repair = integer(values.repair, 'repair');
+
       if (values['review-commit'] !== undefined || values['review-high'] !== undefined) patch.review = {
         ...(values['review-commit'] !== undefined ? { commit: values['review-commit'] } : {}),
         ...(values['review-high'] !== undefined ? { high: integer(values['review-high'], 'review.high') } : {}),
@@ -87,11 +96,24 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
       try { choices = JSON.parse(values.options!); if (!Array.isArray(choices)) throw new Error(); }
       catch { choices = values.options!.split('|').map(value => value.trim()); }
       if (values.reclaim && !/^T\d+$/u.test(values.blocks!)) throw new Error('--reclaim은 단일 task가 필요합니다');
+      if (/^T\d+$/u.test(values.blocks!)) {
+        const task = await getTask(root, values.blocks!);
+        if (task.status === 'done') throw new Error('완료 task는 새 작업으로 등록해야 합니다');
+        if (values.reclaim && (await readState(root)).taskId !== task.id) throw new Error('현재 task만 회수할 수 있습니다');
+      }
       const added = await addJudgment(root, {
         title: values.title!, background: values.background!, options: choices,
         recommend: values.recommend!, blocks: values.blocks!, requiresApproval: values['requires-approval'],
+        dedupeKey: JSON.stringify([values.title, values.blocks]),
       });
-      result = values.reclaim ? await reclaimTask(root, values.blocks!, added.item.id) : added;
+      createdJudgment = added.item.id;
+      if (values.reclaim) {
+        result = await reclaimTask(root, values.blocks!, added.item.id);
+        if (!(result as { reclaimed: boolean }).reclaimed) process.exitCode = 1;
+      } else {
+        if (/^T\d+$/u.test(values.blocks!)) await setTask(root, values.blocks!, { status: `blocked(${added.item.id})`, judgment: added.item.id });
+        result = added;
+      }
     } else if (group === 'judgment' && action === 'answer') { exact(2); result = await answerJudgment(root, rest[0], rest[1]); }
     else if (group === 'judgment' && action === 'write-status') { exact(1); result = await writeJudgmentStatus(root, rest[0]); }
     else if (group === 'inbox' && action === 'list') { exact(0); result = await listInbox(root); }
@@ -106,6 +128,7 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
     process.stdout.write(JSON.stringify(safeValue(result === undefined ? { ok: true } : result)) + '\n');
   } catch (error) {
     process.stdout.write(JSON.stringify({ error: redact(error instanceof Error ? error.message : '하네스 명령 실행 실패'),
+      ...(createdJudgment ? { judgment: createdJudgment } : {}),
       ...(error instanceof TransitionError && error.action ? { action: error.action } : {}),
       ...(error instanceof BacklogError && error.missing ? { missing: error.missing } : {}),
     }) + '\n');
