@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, test } from 'vitest';
+import { addTask } from '../src/core/backlog.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { ackInbox, addInbox, deliverInbox, listInbox, queueInbox } from '../src/core/inbox.ts';
 import { addJudgment, answerJudgment, classifyAnswer, completeJudgment, parseJudgment, readJudgment, writeJudgmentStatus } from '../src/core/judgment.ts';
@@ -49,7 +50,10 @@ describe('원자 상태와 잠금', () => {
 
   test('상태 전이와 task를 저장하고 잘못된 상태는 거부한다', async () => {
     const path = await root();
-    expect(await transitionState(path, 'IMPLEMENT', 'T1')).toMatchObject({ state: 'IMPLEMENT', taskId: 'T1' });
+    const task = await addTask(path, { title: '상태 검증', category: 'docs' });
+    await updateState(path, { state: 'SPEC', taskId: task.id, doctor: { ok: true, checkedAt: new Date().toISOString() } });
+    expect(await transitionState(path, 'IMPLEMENT', task.id)).toMatchObject({ state: 'IMPLEMENT', taskId: task.id });
+    await expect(transitionState(path, 'MERGE', task.id)).rejects.toThrow('허용되지 않는 전이');
     await expect(transitionState(path, 'INVALID')).rejects.toThrow('상태');
   });
 });

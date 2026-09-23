@@ -1,3 +1,4 @@
+import { addTask } from '../src/core/backlog.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -207,7 +208,9 @@ describe('doctor와 CLI', () => {
   });
   it('CLI는 성공·실패에서 stdout JSON 한 덩어리', async () => {
     const root = await project(); const cli = resolve('bin/fodh'); const env = environment(root);
-    expect(JSON.parse((await exec(cli, ['state','get'], { cwd: root, env })).stdout)).toEqual({ state: 'IDLE' });
+    expect(JSON.parse((await exec(cli, ['state','get'], { cwd: root, env })).stdout)).toEqual({ state: 'IDLE', autoTurns: 0 });
+    await addTask(root, { title: 'CLI 상태', category: 'docs' });
+    await updateState(root, { state: 'PICK' });
     expect(JSON.parse((await exec(cli, ['state','transition','SPEC','--task','T01'], { cwd: root, env })).stdout)).toMatchObject({ state: 'SPEC', taskId: 'T01' });
     expect(JSON.parse((await exec(cli, ['doctor'], { cwd: root, env })).stdout)).toMatchObject({ ok: true });
     await expect(exec(cli, ['doctor'], { cwd: root, env: { ...env, ANTHROPIC_API_KEY: '' } })).rejects.toMatchObject({ code: 1, stdout: expect.stringMatching(/^\{"error":.*\}\n$/) });

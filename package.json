@@ -14,7 +14,8 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/provider/index.ts"
+      "./extensions/provider/index.ts",
+      "./extensions/orchestrator/index.ts"
     ]
   },
   "scripts": {

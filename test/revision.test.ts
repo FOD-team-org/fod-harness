@@ -1,3 +1,4 @@
+import { addTask } from '../src/core/backlog.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -44,10 +45,11 @@ async function cli(root: string, args: string[]) {
 it('잠금 중 IMPLEMENT/MERGE는 저장된 doctor만 확인하고 doctor CLI는 즉시 실패한다', async () => {
   const root = await project(), release = await acquireLock(join(root, '.pi/harness.lock'));
   try {
+    const task = await addTask(root, { title: 'doctor 검증', category: 'docs' });
     for (const target of ['IMPLEMENT', 'MERGE']) {
       for (const hours of [0, 13]) {
-        await state.updateState(root, { doctor: { ok: true, checkedAt: new Date(Date.now() - hours * 3600000).toISOString() } });
-        const start = Date.now(), result = await cli(root, ['state', 'transition', target]);
+        await state.updateState(root, { state: target === 'IMPLEMENT' ? 'SPEC' : 'REVIEW', taskId: task.id, phase: 'task', doctor: { ok: true, checkedAt: new Date(Date.now() - hours * 3600000).toISOString() } });
+        const start = Date.now(), result = await cli(root, ['state', 'transition', target, '--task', task.id]);
         expect(Date.now() - start).toBeLessThan(1000);
         expect(result.code).toBe(hours ? 1 : 0);
         if (hours) expect(result.value.error).toBe('doctor 검증이 없거나 오래되었습니다. Pi 세션을 재시작하거나 fodh doctor 를 실행하세요.');

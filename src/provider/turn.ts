@@ -85,7 +85,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
             title: `${safe.tool_name}: ${safe.tool_input?.command ?? JSON.stringify(safe.tool_input)}`,
             background: 'Claude Code 훅이 실행을 거부했습니다. 승인이 필요한지 판단하세요.',
             options: ['해당 동작 승인', '보류'], recommend: '승인 범위를 확인한 뒤 결정',
-            blocks: initial.taskId ?? '', dedupeKey,
+            blocks: initial.taskId ?? '', dedupeKey, requiresApproval: true,
           });
         }
       };
