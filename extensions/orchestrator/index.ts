@@ -119,7 +119,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => { ctx.ui.notify(JSON.stringify(await cleanupReport(ctx.cwd)), 'info'); },
   });
   pi.on('agent_end', async (event, ctx) => {
-    if (resuming) return;
+    if (ctx.hasUI === false || resuming) return;
     resuming = true;
     try {
       const last = [...event.messages].reverse().find(message => message.role === 'assistant');
@@ -142,10 +142,22 @@ export default function orchestrator(pi: ExtensionAPI): void {
         ctx.ui.notify('진행 정체를 판단대기에 등록했습니다.', 'warning');
         return;
       }
-      state = await updateState(ctx.cwd, current => ({ autoTurns: Number(current.autoTurns ?? 0) + 1,
-        ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) }));
+      let beforeSend: Partial<HarnessState> = {};
+      state = await updateState(ctx.cwd, current => {
+        beforeSend = { autoTurns: current.autoTurns,
+          ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
+        return { autoTurns: Number(current.autoTurns ?? 0) + 1,
+          ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
+      });
       await new Promise(resolve => setTimeout(resolve, 0));
-      await send(ctx.cwd, state, state.state, true);
+      try {
+        await send(ctx.cwd, state, state.state, true);
+      } catch {
+        await updateState(ctx.cwd, beforeSend);
+        try {
+          ctx.ui?.notify?.('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning');
+        } catch { /* 세션 폐기 뒤에는 warning 알림도 사용할 수 없다. */ }
+      }
     } finally { resuming = false; }
   });
 }

@@ -19,7 +19,7 @@ async function setup() {
   const sendMessage = vi.fn();
   orchestrator({ registerCommand: (name: string, command: any) => commands.set(name, command),
     on: (name: string, handler: any) => handlers.set(name, handler), sendMessage } as unknown as ExtensionAPI);
-  const ctx = { cwd: root, ui: { notify: vi.fn() } };
+  const ctx = { cwd: root, hasUI: true, ui: { notify: vi.fn() } };
   return { root, commands, handlers, ctx, sendMessage,
     command: (name: string, args = '') => commands.get(name)!.handler(args, ctx),
     end: (stopReason = 'stop', text = '') => handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason, content: [{type:'text',text}] }] }, ctx) };
@@ -244,4 +244,49 @@ it('L10: task 정체 회수 뒤 WAIT 판단 문서에 번호와 요약을 쓴다
   const item=(await readJudgment(test.root)).items[0];
   expect(await readFile(join(test.root,'docs/판단대기.md'),'utf8')).toContain(`${item.id} 답 대기 — 진행 정체: SPEC/${task.id}`);
   expect((await getTask(test.root,task.id)).status).toBe(`blocked(${item.id})`);
+});
+it.each([
+  { state: 'SPEC', autoTurns: 2, awaitingUser: false, text: '' },
+  { state: 'SPEC', autoTurns: 3, awaitingUser: false, text: '' },
+  { state: 'INTERVIEW', autoTurns: 2, awaitingUser: true, text: '' },
+  { state: 'INTERVIEW', autoTurns: 2, awaitingUser: false, text: '질문\n대기: 사용자\n상태: INTERVIEW' },
+  { state: 'recovering', autoTurns: 2, awaitingUser: false, text: '' },
+])('F7: hasUI:false는 상태 파일을 바꾸지 않고 자동 재개를 건너뛴다 (%#)', async input => {
+  const test = await setup(); test.ctx.hasUI = false;
+  await updateState(test.root, { state: input.state });
+  await updateState(test.root, { autoTurns: input.autoTurns, awaitingUser: input.awaitingUser });
+  const path = join(test.root, '.pi/harness-state.json'), before = await readFile(path, 'utf8');
+  await expect(test.end('stop', input.text)).resolves.toBeUndefined();
+  expect(test.sendMessage).not.toHaveBeenCalled(); expect(test.ctx.ui.notify).not.toHaveBeenCalled();
+  expect(await readFile(path, 'utf8')).toBe(before);
+});
+it.each(['SPEC', 'recovering'])('F7: %s followUp 전송 실패는 카운터를 원복하고 이후 재개를 허용한다', async state => {
+  const test = await setup(); await updateState(test.root, { state });
+  await updateState(test.root, { autoTurns: 2 });
+  const before = await readState(test.root);
+  test.sendMessage.mockImplementationOnce(() => { throw new Error('This extension ctx is stale'); });
+  await expect(test.end()).resolves.toBeUndefined();
+  const after = await readState(test.root);
+  expect(after.autoTurns).toBe(2); expect(after.state).toBe(state);
+  expect(after.recoveryAutoResumed).toBe(before.recoveryAutoResumed);
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning');
+  await test.end();
+  expect(test.sendMessage).toHaveBeenCalledTimes(2); expect((await readState(test.root)).autoTurns).toBe(3);
+  if (state === 'recovering') expect((await readState(test.root)).recoveryAutoResumed).toBe(true);
+});
+it('F7: 전송과 warning 알림 모두 stale 예외여도 핸들러는 reject하지 않는다', async () => {
+  const test = await setup(); await updateState(test.root, { state: 'INTERVIEW' });
+  await updateState(test.root, { autoTurns: 1 });
+  test.sendMessage.mockImplementationOnce(() => { throw new Error('stale send'); });
+  test.ctx.ui.notify.mockImplementationOnce(() => { throw new Error('stale notify'); });
+  await expect(test.end()).resolves.toBeUndefined();
+  expect((await readState(test.root)).autoTurns).toBe(1);
+  expect(test.ctx.ui.notify).toHaveBeenCalledTimes(1);
+  await test.end(); expect(test.sendMessage).toHaveBeenCalledTimes(2);
+});
+it('F7: warning UI가 없어도 전송 실패 카운터를 원복한다', async () => {
+  const test = await setup(); await updateState(test.root, { state: 'INTERVIEW' });
+  test.sendMessage.mockImplementationOnce(() => { throw new Error('stale send'); });
+  await expect(test.handlers.get('agent_end')!({ messages: [] }, { cwd: test.root, hasUI: true })).resolves.toBeUndefined();
+  expect((await readState(test.root)).autoTurns).toBe(0); expect(test.sendMessage).toHaveBeenCalledTimes(1);
 });
