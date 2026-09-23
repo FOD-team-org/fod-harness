@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { atomicWrite, harnessPath, parseJsonLines, readText, withFileLock } from './storage.ts';
 
-export interface InboxRecord { id: string; kind: string; status: 'detected' | 'queued' | 'delivered' | 'applied'; at: string; runId?: string; [key: string]: unknown }
-export async function listInbox(root: string): Promise<InboxRecord[]> { return parseJsonLines<InboxRecord>(await readText(harnessPath(root, 'harness-inbox.jsonl'))); }
+export interface InboxRecord {
+  id: string; kind: string; status: 'detected' | 'queued' | 'delivered' | 'applied';
+  at: string; runId?: string; [key: string]: unknown;
+}
+export async function listInbox(root: string): Promise<InboxRecord[]> {
+  return parseJsonLines<InboxRecord>(await readText(harnessPath(root, 'harness-inbox.jsonl')));
+}
 
 async function mutate(root: string, action: (records: InboxRecord[]) => InboxRecord[]): Promise<InboxRecord[]> {
   const path = harnessPath(root, 'harness-inbox.jsonl');
@@ -35,5 +40,9 @@ async function change(root: string, ids: string[], status: InboxRecord['status']
 }
 
 export async function queueInbox(root: string, id: string): Promise<InboxRecord> { return (await change(root, [id], 'queued'))[0]!; }
-export async function deliverInbox(root: string, ids: string[], runId: string): Promise<InboxRecord[]> { return change(root, ids, 'delivered', runId); }
-export async function ackInbox(root: string, ids: string[], runId?: string): Promise<InboxRecord[]> { return change(root, ids, 'applied', runId); }
+export async function deliverInbox(root: string, ids: string[], runId: string): Promise<InboxRecord[]> {
+  return change(root, ids, 'delivered', runId);
+}
+export async function ackInbox(root: string, ids: string[], runId?: string): Promise<InboxRecord[]> {
+  return change(root, ids, 'applied', runId);
+}

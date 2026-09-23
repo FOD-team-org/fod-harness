@@ -5,7 +5,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { Model, AssistantMessageEvent } from '@mariozechner/pi-ai';
-import { runTurn, streamClaude, buildPrompt, latestMessage, packageRoot } from '../extensions/provider/stream.ts';
+import { streamClaude } from '../extensions/provider/stream.ts';
+import { runTurn, buildPrompt, latestMessage, packageRoot } from '../src/provider/turn.ts';
 import { groupAlive, commandParts, childEnv } from '../extensions/provider/runner.ts';
 import { readState, updateState } from '../src/core/state.ts';
 import { readLedger, appendLedger, unknownEntries } from '../src/core/ledger.ts';
@@ -85,18 +86,22 @@ describe('프로바이더 실물 픽스처', () => {
     expect((await readState(root)).state).toBe('paused(billing)'); expect(notices).toHaveLength(1);
     expect((await readState(root)).rateLimitInfo).toBeTruthy();
   });
-  it.each(['rate-limited', 'stderr-limit'])('%s: switch 1회·재시도 1회 후 quota', async scenario => {
+  it.each(['rate-limited', 'stderr-limit', 'rate-limited-text', 'rate-rejected'])('%s: switch 1회·재시도 1회 후 quota', async scenario => {
     const root = await project();
     expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, scenario) })).toMatchObject({ reason: 'error', classification: 'quota' });
     expect((await readState(root)).state).toBe('paused(quota)');
     expect(await records(root, 'fake-switch.jsonl')).toHaveLength(1); expect(await records(root, 'fake-calls.jsonl')).toHaveLength(2);
     expect(await unknownEntries(root)).toHaveLength(0);
   });
-  it('unknown 원장이 있으면 계정 전환 없이 recovering', async () => {
+  it('이전 run unknown은 복구 안내에만 포함하고 이번 quota 전환을 허용', async () => {
     const root = await project(); await appendLedger(root, { runId: '이전실행', action: 'side-effect', status: 'pre' });
-    expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, 'rate-limited') })).toMatchObject({ classification: 'unknown' });
-    expect((await readState(root)).state).toBe('recovering'); expect(await records(root, 'fake-calls.jsonl')).toHaveLength(1);
-    await expect(readFile(join(root, '.pi/fake-switch.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, 'rate-limited') })).toMatchObject({ classification: 'quota' });
+    expect((await readState(root)).state).toBe('paused(quota)');
+    expect(await records(root, 'fake-calls.jsonl')).toHaveLength(2);
+    expect(await records(root, 'fake-switch.jsonl')).toHaveLength(1);
+    const prompt = (await records(root, 'fake-calls.jsonl'))[0].prompt;
+    expect(prompt).toContain('이전실행'); expect(prompt).toContain('side-effect');
+    expect(prompt).toContain('fodh ledger resolve');
   });
   it('deadline은 손자까지 회수하고 다음 프롬프트를 복구 모드로 시작', async () => {
     const root = await project(0.015);

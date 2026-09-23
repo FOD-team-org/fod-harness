@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { processStartedAt } from './process-time.ts';
 
 export interface LockOwner { pid: number; startedAt: string; token: string }
 
@@ -11,7 +12,7 @@ export function isProcessAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-async function ownerAt(path: string): Promise<LockOwner | undefined> {
+export async function ownerAt(path: string): Promise<LockOwner | undefined> {
   try { return JSON.parse(await readFile(path, 'utf8')) as LockOwner; }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -19,9 +20,24 @@ async function ownerAt(path: string): Promise<LockOwner | undefined> {
   }
 }
 
+export async function lockOwnerAlive(owner: LockOwner): Promise<boolean> {
+  if (!isProcessAlive(owner.pid)) return false;
+  try {
+    const actualText = await processStartedAt(owner.pid);
+    const expectedText = typeof owner.startedAt === 'string' ? owner.startedAt.trim() : '';
+    if (!actualText || !expectedText) return true;
+    const actual = Date.parse(actualText), expected = Date.parse(expectedText);
+    if (Number.isFinite(actual) && Number.isFinite(expected)) return Math.abs(actual - expected) <= 2000;
+    return actualText === expectedText;
+  } catch { /* ps가 제한되면 signal 0의 생존 결과를 유지한다. */ }
+  return true;
+}
+
 export async function acquireLock(path: string, options: { waitMs?: number } = {}): Promise<() => Promise<void>> {
   await mkdir(dirname(path), { recursive: true });
-  const owner: LockOwner = { pid: process.pid, startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), token: randomUUID() };
+  const owner: LockOwner = {
+    pid: process.pid, startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), token: randomUUID(),
+  };
   const temporary = `${path}.${owner.token}.tmp`;
   const reclaim = `${path}.reclaim`;
   const deadline = Date.now() + (options.waitMs ?? 10_000);
@@ -31,15 +47,14 @@ export async function acquireLock(path: string, options: { waitMs?: number } = {
     for (;;) {
       try { await link(temporary, path); break; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-      if (Date.now() > deadline) throw new Error('다른 하네스가 잠금을 사용 중입니다');
       const current = await ownerAt(path);
-      if (current && !isProcessAlive(current.pid)) {
+      if (current && !(await lockOwnerAlive(current))) {
         let claimed = false;
         try {
           await mkdir(reclaim); claimed = true;
           // 회수자끼리 직렬화한 뒤 다시 읽어 새 소유자의 잠금을 지우지 않는다.
           const latest = await ownerAt(path);
-          if (latest && !isProcessAlive(latest.pid)) await unlink(path);
+          if (latest && !(await lockOwnerAlive(latest))) await unlink(path);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST' && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
           // 회수자가 비정상 종료한 경우만 오래된 회수 표식을 제거한다.
