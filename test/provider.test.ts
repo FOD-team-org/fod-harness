@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -86,6 +86,20 @@ describe('프로바이더 실물 픽스처', () => {
     expect((await readState(root)).state).toBe('paused(billing)'); expect(notices).toHaveLength(1);
     expect((await readState(root)).rateLimitInfo).toBeTruthy();
   });
+  it('가짜 두뇌가 PATH로 fodh inbox ack 및 state get을 실행하고 인박스를 applied로 바꾼다', async () => {
+    const root = await project();
+    const items = [await addInbox(root, { kind: '사실', fact: '첫 사실' }), await addInbox(root, { kind: '사실', fact: '둘째 사실' })];
+    // 부모 테스트가 미리 fodh 경로를 넣지 않아도 실제 runner에서 추가해야 한다.
+    const env = { ...environment(root, 'ack'), PATH: dirname(process.execPath) };
+    expect(await runTurn('인박스 반영', { root, model: 'haiku', env })).toMatchObject({ reason: 'stop' });
+    const ids = items.map(item => item.id);
+    expect((await listInbox(root)).map(item => ({ id: item.id, status: item.status })))
+      .toEqual(ids.map(id => ({ id, status: 'applied' })));
+    const calls = await records(root, 'fake-ack.jsonl');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ids, ack: ids.map(id => ({ id, status: 'applied' })), state: { state: 'IDLE' } });
+    expect(await buildPrompt(root, '다음 턴', randomUUID())).not.toContain('[인박스 ');
+  });
   it.each(['rate-limited', 'stderr-limit', 'rate-limited-text', 'rate-rejected'])('%s: switch 1회·재시도 1회 후 quota', async scenario => {
     const root = await project();
     expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, scenario) })).toMatchObject({ reason: 'error', classification: 'quota' });
@@ -145,7 +159,18 @@ describe('프로바이더 실물 픽스처', () => {
   });
   it('5종 환경변수 제거와 shell 없는 명령 인자 처리', () => {
     const env = childEnv({ CLAUDECODE: '시험', CLAUDE_CODE_ENTRYPOINT: '시험', ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_BASE_URL: '', KEEP: '유지' });
-    expect(env).toEqual({ KEEP: '유지' }); expect(commandParts('"/a b/command" switch')).toEqual(['/a b/command','switch']);
+    expect(env).toEqual({ KEEP: '유지', PATH: join(packageRoot, 'bin') }); expect(commandParts('"/a b/command" switch')).toEqual(['/a b/command','switch']);
+  });
+  it('childEnv는 패키지 bin을 PATH 선두에 넣고 기존 경로와 입력을 보존한다', () => {
+    const bin = join(packageRoot, 'bin');
+    const original = { PATH: ['/a path/bin', '/usr/bin', bin].join(delimiter), KEEP: '유지' };
+    const before = { ...original };
+    const env = childEnv(original);
+    expect(env).toEqual({ ...original, PATH: bin + delimiter + original.PATH });
+    expect(original).toEqual(before);
+    expect(childEnv(env)).toEqual(env);
+    expect(childEnv({ PATH: '' }).PATH).toBe(bin);
+    expect(childEnv().PATH?.split(delimiter)[0]).toBe(bin);
   });
   it('마지막 user만 전달하고 이전 대화는 반복하지 않음', () => {
     expect(latestMessage({ messages: [{ role: 'user', content: '이전', timestamp: 0 }, { role: 'user', content: [{ type: 'text', text: '마지막' }], timestamp: 1 }] })).toBe('마지막');

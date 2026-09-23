@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { getConfig, loadConfig, setConfig } from '../src/core/config.ts';
 import { main } from '../src/cli/index.ts';
-import { claudeArgs, matchesModel } from '../src/provider/turn.ts';
+import { claudeArgs, matchesModel, packageRoot } from '../src/provider/turn.ts';
 import { childEnv } from '../src/provider/runner.ts';
 
 const execute = promisify(execFile), roots: string[] = [];
@@ -111,7 +111,7 @@ it('Claude autocompact 인자/settings 불간섭과 env 원본 그대로 전달'
   const args = claudeArgs('/project', 'fable', 'sid', true);
   expect(args.join(' ')).not.toMatch(/compact|autocompact/i);
   const original = { KEEP: 'keep', CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '80', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '250000' };
-  expect(childEnv(original)).toEqual(original);
-  expect(childEnv({ KEEP: 'keep' })).toEqual({ KEEP: 'keep' });
+  expect(childEnv(original)).toEqual({ ...original, PATH: join(packageRoot, 'bin') });
+  expect(childEnv({ KEEP: 'keep' })).toEqual({ KEEP: 'keep', PATH: join(packageRoot, 'bin') });
   expect(await readFile('templates/claude-settings.json', 'utf8')).not.toMatch(/compact/i);
 });

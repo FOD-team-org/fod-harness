@@ -92,6 +92,19 @@ if (args.includes('--hang-orphan-child')) {
       emit({ type: 'result', is_error: false, permission_denials: denied
         ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] : [], usage: {} });
     } else {
+      if (scenario === 'ack') {
+        const ids = [...prompt.matchAll(/^\[인박스 ([^\]]+)\]/gm)].map(match => match[1]);
+        if (!ids.length) throw new Error('ack 시나리오에는 인박스 항목이 필요합니다.');
+        const call = args => {
+          // 절대 경로를 쓰지 않고 두뇌 자식이 상속한 PATH에서 fodh를 찾는다.
+          const result = spawnSync('fodh', args, { encoding: 'utf8', timeout: 5000 });
+          if (result.error || result.status !== 0) throw new Error('PATH의 fodh 실행 실패', { cause: result.error });
+          return JSON.parse(result.stdout);
+        };
+        const ack = call(['inbox', 'ack', ...ids]);
+        const state = call(['state', 'get']);
+        appendFileSync('.pi/fake-ack.jsonl', JSON.stringify({ ids, ack, state }) + '\n');
+      }
       if (scenario === 'inherited-pipe') {
         recordPid();
         spawn(process.execPath, [self, '--hang-child'], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();

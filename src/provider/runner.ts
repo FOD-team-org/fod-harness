@@ -1,16 +1,23 @@
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
+import { delimiter } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { billingEnvKeys } from './preflight.ts';
 import { registerProc, removeProc } from '../core/procs.ts';
 import { processStartedAt } from '../core/process-time.ts';
 
 const execFileAsync = promisify(execFile);
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+// turn.ts의 packageRoot와 같은 패키지 위치를 기준으로 하며 호출자의 cwd에 의존하지 않는다.
+const packageBin = fileURLToPath(new URL('../../bin', import.meta.url));
 export const strippedEnvKeys = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', ...billingEnvKeys];
 export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const clean = { ...env };
   for (const key of strippedEnvKeys) delete clean[key];
+  if (clean.PATH?.split(delimiter)[0] !== packageBin) {
+    clean.PATH = packageBin + (clean.PATH ? delimiter + clean.PATH : '');
+  }
   return clean;
 }
 export function commandParts(command: string | string[]): string[] {

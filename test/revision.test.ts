@@ -11,7 +11,7 @@ import { addJudgment, answerJudgment, readJudgment, completeJudgment, classifyAn
 import { childEnv } from '../src/provider/runner.ts';
 import { checkBillingEnvironment, billingEnvKeys } from '../src/provider/preflight.ts';
 import { redact, safeValue } from '../src/provider/privacy.ts';
-import { runTurn, lastCallUsage, turnDeadlineMs } from '../src/provider/turn.ts';
+import { runTurn, lastCallUsage, turnDeadlineMs, packageRoot } from '../src/provider/turn.ts';
 import { streamClaude } from '../extensions/provider/stream.ts';
 import { listProcs } from '../src/core/procs.ts';
 
@@ -73,7 +73,7 @@ it('ledger CLI는 unknown을 나열하고 원문을 보존하며 증거와 함�
 it.each(billingEnvKeys)('과금 변수 %s는 프로세스와 settings.env 모두 거부하고 자식에서 제거', async key => {
   const root = await project();
   await expect(checkBillingEnvironment(root, { ...env(root), [key]: '' })).rejects.toThrow('configError');
-  expect(childEnv({ [key]: '' })).toEqual({});
+  expect(childEnv({ [key]: '' })).toEqual({ PATH: join(packageRoot, 'bin') });
   for (const path of ['settings.json', 'settings.local.json']) {
     await writeFile(join(root, '.claude', path), JSON.stringify({ env: { [key]: '' } }));
     await expect(checkBillingEnvironment(root, env(root))).rejects.toThrow('settings.env');
