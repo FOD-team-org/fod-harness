@@ -1,3 +1,5 @@
+import { acquireLock, ownerAt } from '../src/core/lock.ts';
+import { harnessPath } from '../src/core/storage.ts';
 import { reclaimCodexTree } from '../src/core/proc-tree.ts';
 vi.mock('../src/core/proc-tree.ts', () => ({ reclaimCodexTree: vi.fn() }));
 vi.mock('../src/core/lock.ts', async original => ({ ...await original<typeof import('../src/core/lock.ts')>(), isProcessAlive: (pid: number) => pid === process.pid || groupAlive(pid) }));
@@ -12,14 +14,20 @@ import { groupAlive } from '../src/provider/runner.ts';
 import { reclaimTask, cleanupReport } from '../src/core/reclaim.ts';
 vi.mock('../src/core/process-time.ts',()=>({processStartedAt:vi.fn()}));
 vi.mock('../src/provider/runner.ts',async original=>({...await original<typeof import('../src/provider/runner.ts')>(),groupAlive:vi.fn()}));
-const roots:string[]=[];
-afterEach(async()=>{vi.resetAllMocks();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
-async function setup(){const root=await mkdtemp('/private/tmp/fodh-reclaim-');roots.push(root);const task=await addTask(root,{title:'회수',category:'docs'});
+const roots:string[]=[], releases:(() => Promise<void>)[]=[];
+afterEach(async()=>{for(const release of releases.splice(0))await release();vi.resetAllMocks();for(const root of roots.splice(0))await rm(root,{recursive:true,force:true});});
+async function setup(protectBrain=false){const root=await mkdtemp('/private/tmp/fodh-reclaim-');roots.push(root);const task=await addTask(root,{title:'회수',category:'docs'});
   await setTask(root,task.id,{worktree:'wt-preserved',review:{commit:'review-sha',high:0}});
   const {item}=await addJudgment(root,{title:'범위',background:'',options:['유지'],recommend:'①',blocks:task.id});
   await updateState(root,{state:'IMPLEMENT',taskId:task.id});
   const record={pid:987654,pgid:987654,startedAt:'Thu Sep 24 00:00:00 2026',runId:'task-run',kind:'worker',taskId:task.id};
   await registerProc(root,record);vi.mocked(groupAlive).mockReturnValue(true);vi.mocked(processStartedAt).mockResolvedValue(record.startedAt);vi.mocked(reclaimCodexTree).mockResolvedValue(true);
+  if(protectBrain){
+    const path=harnessPath(root,'harness.lock');releases.push(await acquireLock(path));
+    const owner=(await ownerAt(path))!;
+    vi.mocked(processStartedAt).mockImplementation(async pid=>pid===process.pid?owner.startedAt:record.startedAt);
+    await updateState(root,{brainTurn:{runId:record.runId,startedAt:new Date().toISOString()}});
+  }
   return{root,task,item,record};}
 it('소유 시각 검증→그룹 회수→레지스트리 0→blocked, 워크트리·검수 증거 보존',async()=>{
   const {root,task,item,record}=await setup();expect(await reclaimTask(root,task.id,item.id)).toEqual({judgment:item.id,reclaimed:true,next:'PICK'});
@@ -46,7 +54,7 @@ it.each(['unknown','failure','exception'])('회수 %s는 레지스트리·task�
   if(kind==='unknown')expect(reclaimCodexTree).not.toHaveBeenCalled();
 });
 it('brain과 같은 그룹은 신호하지 않고 다른 task 프로세스는 보존한다',async()=>{
-  const {root,task,item,record}=await setup();await registerProc(root,{...record,pid:987655,kind:'brain'});
+  const {root,task,item,record}=await setup(true);await registerProc(root,{...record,pid:987655,kind:'brain'});
   await registerProc(root,{...record,pid:987656,pgid:987656,taskId:'T99'});
   expect((await reclaimTask(root,task.id,item.id)).reclaimed).toBe(false);expect(reclaimCodexTree).not.toHaveBeenCalled();
   const report=await cleanupReport(root);
@@ -56,7 +64,7 @@ it('brain과 같은 그룹은 신호하지 않고 다른 task 프로세스는 �
   expect(await listProcs(root)).toHaveLength(3);
 });
 it('죽은 소유 그룹은 신호 없이 등록 제거, brain은 보고에서 보호로 분리',async()=>{
-  const {root,task,item,record}=await setup();vi.mocked(groupAlive).mockReturnValue(false);
+  const {root,task,item,record}=await setup(true);vi.mocked(groupAlive).mockReturnValue(false);
   await registerProc(root,{...record,pid:987655,pgid:987655,kind:'brain'});
   await reclaimTask(root,task.id,item.id);expect(reclaimCodexTree).not.toHaveBeenCalled();
   expect(await cleanupReport(root)).toMatchObject({ok:true,remaining:0,protected:[{kind:'brain'}]});
@@ -83,7 +91,7 @@ it('다른 task 잔존은 종료하지 않고 성공을 막는다',async()=>{
   expect((await listProcs(root))[0].taskId).toBe('T99');
 });
 it('M4·M1: cleanup report는 죽은 그룹과 재사용 PID를 stale로 제거, brain 보존',async()=>{
-  const {root,record}=await setup();vi.mocked(groupAlive).mockImplementation(pgid=>pgid===987656);
+  const {root,record}=await setup(true);vi.mocked(groupAlive).mockImplementation(pgid=>pgid===987656);
   await registerProc(root,{...record,pid:987655,pgid:987655,kind:'brain'});
   await registerProc(root,{...record,pid:987656,pgid:987656});
   vi.mocked(processStartedAt).mockImplementation(async pid=>pid===987656?'Thu Sep 24 00:05:00 2026':undefined);
@@ -134,4 +142,16 @@ it('M4: 정리했다고 답해도 살아 있는 잔존은 적용·PICK을 막고
   expect(await applyJudgments(root,[decision.id])).toEqual({applied:[],unapplied:[{id:decision.id,reason:'프로세스 레지스트리 잔존이 있습니다'}]});
   expect((await readState(root)).state).toBe('paused(cleanup)');
   expect((await readJudgment(root)).items.find(item=>item.id===decision.id)?.answer).toBe('1');
+});
+
+it('F30-4 잠금 소유자가 없으면 일치하는 brain도 보고에서 보호하지 않고 stale로 제거한다',async()=>{
+  const {root,record}=await setup();
+  const brain={...record,kind:'brain'};
+  await registerProc(root,brain);
+  await updateState(root,{brainTurn:{runId:brain.runId,startedAt:new Date().toISOString()}});
+  expect(await ownerAt(harnessPath(root,'harness.lock'))).toBeUndefined();
+  vi.mocked(groupAlive).mockReturnValue(false);
+  const report=await cleanupReport(root);
+  expect(report).toMatchObject({ok:true,remaining:0,protected:[],residual:[],stale:[brain],removed:[brain]});
+  expect(await listProcs(root)).toEqual([]);expect(reclaimCodexTree).not.toHaveBeenCalled();
 });

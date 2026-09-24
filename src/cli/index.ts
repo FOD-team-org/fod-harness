@@ -20,7 +20,7 @@ import { runPick, decidePick } from '../core/pick.ts';
 import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
 import { readState, updateState, transitionState, doctorFresh, TransitionError, userOnlyTransitions } from '../core/state.ts';
-import { assertNotBrain } from '../core/brain-guard.ts';
+import { assertNotBrain, assertHarnessAlive, HarnessNotAliveError } from '../core/brain-guard.ts';
 import { readJudgment, addJudgment, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
 import { tick, watcherStatus } from '../core/watcher.ts';
@@ -53,6 +53,11 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       const choices = commandTable.filter(c => c.group === group);
       throw new Error('지원하지 않는 fodh 명령입니다. 가능한 명령: '+(choices.length ? choices : commandTable).map(c => `fodh ${c.group}${c.action ? ' '+c.action : ''}`).join(', '));
     }
+    const readOnly = new Set(['state get', 'backlog list', 'backlog get', 'codex status', 'codex result',
+      'judgment read', 'ledger list', 'worktree list', 'config get', 'slots status', 'memory status',
+      'watch status', 'interview status', 'skills status', 'inbox list', 'proc list']);
+    if (!readOnly.has(`${group} ${action ?? ''}`) && !(group === 'pick' && values.dry)
+      && !(group === 'claude-md' && values.check)) await assertHarnessAlive(root);
     const exact = (count: number) => { if (rest.length !== count) throw new Error('명령 인자 수를 확인하세요.'); };
     const integer = (value: string, name: string): number => {
       if (!/^(0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name}는 0 이상의 정수여야 합니다`);
@@ -210,6 +215,6 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       ...(error instanceof TransitionError && error.action ? { action: error.action } : {}),
       ...(error instanceof BacklogError && error.missing ? { missing: error.missing } : {}),
     }) + '\n');
-    process.exitCode = 1;
+    process.exitCode = error instanceof HarnessNotAliveError ? 2 : 1;
   }
 }

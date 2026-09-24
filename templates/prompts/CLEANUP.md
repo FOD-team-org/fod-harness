@@ -11,7 +11,7 @@
 ## 다음 fodh 명령
 - 성공 → `fodh backlog set {{taskId}} --status done` 후 `fodh state transition PICK`
 - 첫 실패가 processes → `fodh state transition CLEANUP_FAILED` → `fodh state transition CLEANUP --task {{taskId}}` 후 `fodh cleanup run --task {{taskId}} --scope processes` 1회 재시도; 성공하면 `fodh cleanup run --task {{taskId}} --scope all`로 전체 증거를 갱신한다.
-- processes 재실패 → `fodh state transition CLEANUP_FAILED`(paused(cleanup)); 자동 판단에 맡기고 `대기: 사용자`
+- processes 재실패 → `fodh state transition CLEANUP_FAILED`(paused(cleanup)); `fodh judgment add … --blocks {{taskId}} --reclaim`으로 판단을 등록한다
 - 첫 실패가 storage·worktrees였으면 processes 재시도 없이 원인을 `fodh judgment add --title "<정리 실패>" --background "<원인>" --options "재시도|보류" --recommend "<추천>" --blocks {{taskId}}`로 등록하고 `fodh state transition CLEANUP_FAILED` 후 `대기: 사용자`.
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.

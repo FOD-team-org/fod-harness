@@ -65,7 +65,7 @@ it('M4/F3/L7/L11 운영 지시·필수 플래그·scaffold path 회귀',async()=
   expect(cleanup).toContain('`fodh cleanup run --task {{taskId}} --scope processes` 1회 재시도');expect(cleanup).toContain('첫 실패가 storage·worktrees였으면');expect(cleanup).toContain('등록하고 `fodh state transition CLEANUP_FAILED` 후 `대기: 사용자`');
   for (const file of await files('templates/prompts')) {
     // F28's required advisory names the command; executable examples still require every flag.
-    const examples = (await readFile(file, 'utf8')).replace(/^(?:`대기: 사용자` 는 쓰지 않는다|task REVIEW 에서는 `대기: 사용자` 를 쓰지 않는다)\. 사용자 결정은 `fodh judgment add … --blocks \{\{taskId\}\} --reclaim`$/mu, '');
+    const examples = (await readFile(file, 'utf8')).replace(/^(?:`대기: 사용자` 는 쓰지 않는다|task REVIEW 에서는 `대기: 사용자` 를 쓰지 않는다)\. 사용자 결정은 `fodh judgment add … --blocks \{\{taskId\}\} --reclaim`$/mu, '').replaceAll('`fodh judgment add … --blocks {{taskId}} --reclaim`', '');
     for (const command of examples.matchAll(/`(fodh judgment add[^`]*)`/gu)) {
       for (const flag of ['--title', '--background', '--options', '--recommend', '--blocks']) expect(command[1], file).toContain(flag);
     }
@@ -95,12 +95,12 @@ it('L4 storage 첫 실패 지시는 판단 1회·CLEANUP_FAILED 1회, processes 
   expect(storage).not.toContain('fodh cleanup run');
   expect(text).toContain('- 첫 실패가 processes →'); expect(text).toContain('- processes 재실패 →');
 });
-it('N4 processes 재실패는 자동 판단에 맡기고 사용자 대기한다', async () => {
+it('L4 processes 재실패는 reclaim 판단을 등록한다', async () => {
   const text = await readFile('templates/prompts/CLEANUP.md', 'utf8');
   const retryFailure = text.split('\n').find(line => line.startsWith('- processes 재실패'))!;
   expect(retryFailure.match(/fodh state transition CLEANUP_FAILED/g)).toHaveLength(1);
-  expect(retryFailure).toContain('(paused(cleanup)); 자동 판단에 맡기고 `대기: 사용자`');
-  expect(retryFailure).not.toMatch(/원인 판단 등록|fodh judgment add/);
+  expect(retryFailure).toContain('fodh judgment add … --blocks {{taskId}} --reclaim');
+  expect(retryFailure).not.toContain('대기: 사용자');
 });
 
 it('F12/F15 자기 보고 플래그 대신 하네스 증거를 안내한다', async () => {
@@ -154,7 +154,7 @@ it('F27·F28 흐름표에 정식 위임과 판단 등록 경로를 명시한다'
   for (const state of ['IMPLEMENT', 'FIX', 'REVIEW', 'RESEARCH']) {
     expect(await readFile(`templates/prompts/${state}.md`, 'utf8')).toContain('위임은 `fodh codex task` 또는 Claude Agent 로만 한다. `codex`·companion 스크립트·플러그인 도구 직접 호출 금지');
   }
-  for (const state of ['IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP']) {
+  for (const state of ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP']) {
     expect(await readFile(`templates/prompts/${state}.md`, 'utf8')).toContain(state === 'REVIEW' ? 'task REVIEW 에서는 `대기: 사용자` 를 쓰지 않는다. 사용자 결정은 `fodh judgment add … --blocks {{taskId}} --reclaim`' : '`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add … --blocks {{taskId}} --reclaim`');
   }
 });

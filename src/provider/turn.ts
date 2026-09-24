@@ -10,7 +10,7 @@ import { acquireLock } from '../core/lock.ts';
 import { appendLedger, unknownEntries } from '../core/ledger.ts';
 import { listInbox, deliverInbox } from '../core/inbox.ts';
 import { reclaimTask } from '../core/reclaim.ts';
-import { addJudgment, beginJudgmentSnapshot, finishJudgmentSnapshot } from '../core/judgment.ts';
+import { addJudgment, beginJudgmentSnapshot, finishJudgmentSnapshot, recoverJudgmentSnapshot } from '../core/judgment.ts';
 import { runProcess, type ProcessResult } from './runner.ts';
 import { checkBillingEnvironment } from './preflight.ts';
 import { redact, safeValue } from './privacy.ts';
@@ -54,7 +54,9 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
-const turnsInProgress = new Set<string>();
+const turnsKey = Symbol.for('fodh.turnsInProgress');
+const sharedTurns = globalThis as typeof globalThis & { [turnsKey]?: Set<string> };
+const turnsInProgress = sharedTurns[turnsKey] ??= new Set<string>();
 export const isTurnInProgress = (root: string): boolean => turnsInProgress.has(resolve(root));
 const canonicalTool = (name: unknown): unknown => name === 'Task' ? 'Agent' : name;
 export async function runTurn(latest: string, options: TurnOptions): Promise<TurnResult> {
@@ -231,6 +233,13 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           try { await appendLedger(root, { runId, action: 'judgment:snapshot-finish', status: 'fail',
             evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
           catch { /* Preserve the runner result even when diagnostic storage fails. */ }
+          turnsInProgress.delete(resolve(root));
+          try { await recoverJudgmentSnapshot(root); }
+          catch {
+            // A failed comparison must not leave the completed turn active indefinitely.
+            await updateState(root, current => current.brainTurn?.runId === runId && !current.brainTurn.endedAt
+              ? { brainTurn: { ...current.brainTurn, endedAt: new Date().toISOString() } } : {});
+          }
         }
         if (lastEventAt) await patchState({ lastEventAt, runId });
       }

@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import { expect, it, vi } from 'vitest';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ it('P6 승인 전용 네 키는 사용자 CLI --approve 필요, 상위 객체도
 });
 it('P6 두뇌는 --approve로 verify·delegate·승인 키를 포함한 어떤 설정도 변경 못한다', async () => {
   const root = await project(), before = await readFile(join(root, '.pi/harness.json'));
-  vi.stubEnv('FODH_BRAIN', '1');
+  await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
   for (const key of ['verify.commands', 'delegate.codex.workerModel', ...approvalConfigKeys, 'custom'])
     expect(await cli(root, ['config', 'set', key, '["true"]', '--approve'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('사용자 터미널') } });
   expect(await readFile(join(root, '.pi/harness.json'))).toEqual(before);

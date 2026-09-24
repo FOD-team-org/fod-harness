@@ -1,3 +1,4 @@
+import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { randomUUID } from 'node:crypto';
 import { redact } from '../../src/provider/privacy.ts';
 import { scaffoldDoc } from '../../src/core/docs.ts';
@@ -53,6 +54,7 @@ async function prepareProject(root: string, ctx: ExtensionContext, reportChanges
 export default function orchestrator(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     setNotifyContext(ctx.cwd, resumeContext(ctx));
+    await recoverOrphanBrain(ctx.cwd);
     await recoverJudgmentSnapshot(ctx.cwd);
     try { await ensureHarnessGitignore(ctx.cwd); }
     catch (error) {
@@ -83,8 +85,20 @@ export default function orchestrator(pi: ExtensionAPI): void {
   });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {
-    if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0, userTurn: true });
+    if (event.source !== 'extension') {
+      const hold = /(?:^|[^\p{L}\p{N}_])(?:멈춰|멈추|기다려|잠깐|보류|확인할게|확인하고|(?:stop|hold|wait|pause)(?![\p{L}\p{N}_]))/iu.test(event.text);
+      await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0, userHold: hold, userHoldSource: hold ? 'input' : undefined });
+    } else if ((await readState(ctx.cwd)).userHoldSource !== 'command') {
+      await updateState(ctx.cwd, { userHold: false, userHoldSource: undefined });
+    }
     return { action: 'continue' };
+  });
+  pi.registerCommand('hold', {
+    description: '다음 두뇌 턴의 사용자 대기 허용',
+    handler: async (_args, ctx) => {
+      await updateState(ctx.cwd, { userHold: true, userHoldSource: 'command' });
+      ctx.ui.notify('다음 두뇌 턴의 대기: 사용자 를 받습니다', 'info');
+    },
   });
   pi.registerCommand('project-start', {
     description: '프로젝트 인터뷰 시작',
@@ -158,7 +172,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const released = held.filter(item => ids?.includes(item.id)).map(({ id, answer }) => ({ id, answer }));
       await updateState(ctx.cwd, { userAborted: false });
       const before = await readState(ctx.cwd);
-      const result = await applyJudgments(ctx.cwd, ids, undefined, { releaseHeld: true });
+      const result = await applyJudgments(ctx.cwd, ids, undefined, { releaseHeld: !!ids?.length });
       ctx.ui.notify(JSON.stringify({ ...result, released }), 'info');
       const state = await readState(ctx.cwd);
       if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
@@ -218,13 +232,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
         if (waiting) return;
       }
       const waitingState = await readState(ctx.cwd);
-      if (awaitingUser && waitingState.userTurn) {
-        await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-accepted', status: 'ok',
-          evidence: { state: waitingState.state, taskId: waitingState.taskId, userTurn: true } });
-        await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 });
-        return;
-      }
-      if (awaitingUser && waitingState.state === 'PICK') {
+      if (awaitingUser && !waitingState.userHold && waitingState.state === 'PICK') {
         const state = await readState(ctx.cwd), tasks = await listBacklog(ctx.cwd);
         const decision = decidePick(tasks, state, { slots: 'ok', now: Date.now() });
         const open = (await readJudgment(ctx.cwd)).items;
@@ -241,7 +249,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       }
       if (awaitingUser) {
         const state = await readState(ctx.cwd);
-        if (state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
+        if (!state.userHold && state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
           const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
           const blocking = (await readJudgment(ctx.cwd)).items.some(item => !item.followup
             && (item.blocks.split(/[\s,]+/u).includes(state.taskId!) || task?.status === `blocked(${item.id})`));
@@ -252,12 +260,14 @@ export default function orchestrator(pi: ExtensionAPI): void {
             return;
           }
         }
+        if (state.userHold) await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-accepted', status: 'ok',
+          evidence: { state: state.state, taskId: state.taskId, hold: state.userHoldSource ?? 'input' } });
         await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
       }
       if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
       await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end');
     } finally {
-      if ((await readState(ctx.cwd)).userTurn) await updateState(ctx.cwd, { userTurn: false });
+      if ((await readState(ctx.cwd)).userHold) await updateState(ctx.cwd, { userHold: false, userHoldSource: undefined });
     }
   });
 }

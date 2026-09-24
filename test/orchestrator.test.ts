@@ -1,3 +1,4 @@
+import * as judgmentModule from '../src/core/judgment.ts';
 import { todayKst } from '../src/core/template-values.ts';
 import * as cleanupModule from '../src/core/cleanup.ts';
 import * as notifyModule from '../src/core/notify.ts';
@@ -36,9 +37,9 @@ async function setup() {
     end: (stopReason = 'stop', text = '') => handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason, content: [{type:'text',text}] }] }, ctx) };
 }
 
-it('Pi 명령 5종과 orchestrator 확장 등록', async () => {
+it('Pi 명령 6종과 orchestrator 확장 등록', async () => {
   const test = await setup();
-  expect([...test.commands.keys()]).toEqual(['project-start', 'develop-start', 'status', 'judged', 'cleanup']);
+  expect([...test.commands.keys()]).toEqual(['hold', 'project-start', 'develop-start', 'status', 'judged', 'cleanup']);
   expect(JSON.parse(await readFile('package.json', 'utf8')).pi.extensions).toContain('./extensions/orchestrator/index.ts');
 });
 it('project-start는 없는 문서 생성·INTERVIEW 전이·프로젝트 이름 저장·턴 시작', async () => {
@@ -876,27 +877,68 @@ it.each(['IMPLEMENT', 'PICK'])('N4 사용자 입력 %s 대기는 수용하고 �
   const t = await setup(), task = await addTask(t.root, { title: '작업', category: 'docs' });
   await updateState(t.root, { state, taskId: task.id });
   await t.handlers.get('input')!({ source: 'interactive', text: '잠깐' }, t.ctx);
-  expect((await readState(t.root)).userTurn).toBe(true);
+  expect((await readState(t.root)).userHold).toBe(true);
   await t.end('stop', '대기: 사용자');
-  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userTurn: false });
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userHold: false });
   expect(t.sendMessage).not.toHaveBeenCalled();
   expect((await readLedger(t.root)).filter(e => e.action === 'turn:user-wait-accepted')).toEqual([
-    expect.objectContaining({ evidence: { state, taskId: task.id, userTurn: true } }),
+    expect.objectContaining({ evidence: { state, taskId: task.id, hold: 'input' } }),
   ]);
 });
-it('N4 자동 재개는 userTurn을 지우고 extension 턴의 무판단 대기는 거부', async () => {
+it('M2 /hold 뒤 extension 턴은 명시적 대기를 수락한다', async () => {
   const t = await setup(), task = await addTask(t.root, { title: '작업', category: 'docs' });
-  await updateState(t.root, { state: 'IMPLEMENT', taskId: task.id, userTurn: true });
-  const { autoResume } = await import('../extensions/orchestrator/resume.ts');
-  await autoResume({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.root, { cwd: t.root, hasUI: true, isIdle: () => true, notify: t.ctx.ui.notify }, 'test');
-  expect((await readState(t.root)).userTurn).toBe(false);
+  await updateState(t.root, { state: 'IMPLEMENT', taskId: task.id });
+  await t.command('hold');
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith('다음 두뇌 턴의 대기: 사용자 를 받습니다', 'info');
   await t.handlers.get('input')!({ source: 'extension', text: '자동' }, t.ctx);
   await t.end('stop', '대기: 사용자');
-  expect((await readState(t.root)).awaitingUser).toBe(false);
-  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-rejected' }));
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userHold: false });
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-accepted', evidence: { state: 'IMPLEMENT', taskId: task.id, hold: 'command' } }));
 });
-it.each(['error', 'aborted'])('N4 %s로 끝나도 userTurn 잔존 없음', async stop => {
-  const t = await setup(); await t.handlers.get('input')!({ source: 'interactive', text: '시작' }, t.ctx);
+it.each([['IMPLEMENT', '진행해', 'turn:user-wait-rejected'], ['PICK', '계속', 'pick:user-wait-rejected']])('M2 %s 진행 넛지 %s는 무판단 대기를 거부한다', async (state, text, action) => {
+  const t = await setup(), task = await addTask(t.root, { title: '작업', category: 'docs' });
+  await updateState(t.root, { state, taskId: task.id });
+  await t.handlers.get('input')!({ source: 'interactive', text }, t.ctx);
+  await t.end('stop', '대기: 사용자');
+  expect((await readState(t.root)).awaitingUser).toBe(false);
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action }));
+  expect(t.sendMessage).toHaveBeenCalled();
+});
+it.each(['잠깐 멈춰, 내가 확인할게', '진행해, 잠깐 확인하고', 'WAIT', 'pause please'])('M2 멈춤 어휘 %s는 진행보다 우선한다', async text => {
+  const t = await setup(); await updateState(t.root, { state: 'IMPLEMENT', taskId: 'T01' });
+  await t.handlers.get('input')!({ source: 'interactive', text }, t.ctx);
+  await t.end('stop', '대기: 사용자');
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userHold: false });
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-accepted', evidence: { state: 'IMPLEMENT', taskId: 'T01', hold: 'input' } }));
+});
+it('M2 다음 입력은 잔존 hold를 지우고 정상 종료도 hold를 소비한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'PROJECT_READY' });
+  await t.command('hold');
+  await t.handlers.get('input')!({ source: 'interactive', text: 'go' }, t.ctx);
+  expect((await readState(t.root)).userHold).toBe(false);
+  await t.command('hold'); await t.end('stop', '대기: 없음');
+  expect((await readState(t.root)).userHold).toBe(false);
+  expect((await readLedger(t.root)).some(e => e.action === 'turn:user-wait-accepted')).toBe(false);
+});
+it.each(['error', 'aborted'])('N4 %s로 끝나도 userHold 잔존 없음', async stop => {
+  const t = await setup(); await t.handlers.get('input')!({ source: 'interactive', text: '멈춰' }, t.ctx);
   await t.end(stop);
-  expect((await readState(t.root)).userTurn).toBe(false);
+  expect((await readState(t.root)).userHold).toBe(false);
+});
+
+it('참고 무인자 /judged 검사 직후 held가 생겨도 해제하지 않는다', async () => {
+  const t = await setup();
+  const {item} = await addJudgment(t.root,{title:'경합',background:'',options:['진행'],recommend:'',blocks:'-'});
+  await beginJudgmentSnapshot(t.root,{runId:'racing',startedAt:new Date().toISOString()});
+  await answerJudgment(t.root,item.id,'1');
+  const apply = judgmentModule.applyJudgments;
+  vi.spyOn(judgmentModule,'applyJudgments').mockImplementationOnce(async (...args) => {
+    await finishJudgmentSnapshot(t.root);
+    return apply(...args);
+  });
+  await t.command('judged');
+  expect((await readJudgment(t.root)).items[0]).toMatchObject({id:item.id,held:{runId:'racing'}});
+  expect((await readJudgment(t.root)).completed).toEqual([]);
+  await t.command('judged',item.id);
+  expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
 });

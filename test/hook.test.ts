@@ -528,3 +528,26 @@ it.each(['tar xf a.tar', 'bsdtar -xf a.tar', 'unzip a.zip'])('N5 .pi cwd 추출 
   expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, cwdRelative: '.pi/scratch' }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('.pi 아래에는 아카이브를 풀 수 없습니다') });
 });
+
+it.each([
+  'fodh codex task --title "codex 위임 확인?"',
+  'fodh judgment add --title "codex 슬롯이 부족한가?"',
+  'grep "codex.*task" README.md',
+  'find . -name "*codex*"',
+  'find scripts -name "*.mjs" -exec node {} task \\;',
+])('M1 정상 인자 glob 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});
+it.each([
+  'node ~/.claude/plugins/cache/*/codex/*/scripts/codex-comp*.mjs task',
+  'find ~/.claude/plugins -name "*companion.mjs" -exec node {} task \\;',
+  'bun --no-warnings ~/.claude/plugins/cache/*/worker.mjs task',
+])('M1 실행 위치 companion glob 거부: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(2);
+});
+it.each(['cp --recursive /var/tmp/없는경로 docs/', 'cd /var/tmp && cp -a README.md docs/'])('L1 확인 불가 소스는 재귀: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => writeFile(join(root, 'README.md'), 'existing') })).code).toBe(2);
+});
+it('L1 존재하는 비디렉터리 cp -a는 허용', async () => {
+  expect((await invoke('Bash', { command: 'cp -a README.md docs/' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => writeFile(join(root, 'README.md'), 'existing') })).code).toBe(0);
+});

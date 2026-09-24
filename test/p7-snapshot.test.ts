@@ -1,4 +1,5 @@
-import { expect, it } from 'vitest';
+import * as processTime from '../src/core/process-time.ts';
+import { expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { addJudgment, answerJudgment, beginJudgmentSnapshot, recoverJudgmentSnap
 import { readState } from '../src/core/state.ts';
 import { readLedger } from '../src/core/ledger.ts';
 
-it.each(['live', 'dead', 'legacy'])('N2 다른 pid %s 스냅숏은 생존 여부에 따라 보호·정산', async kind => {
+it.each(['live', 'dead', 'legacy', 'reused'])('N2 다른 pid %s 스냅숏은 생존 여부에 따라 보호·정산', async kind => {
   const root = await project();
   const { item } = await addJudgment(root, { title: '잔존', background: '', options: ['진행'], recommend: '', blocks: '-' });
   await beginJudgmentSnapshot(root, { runId: 'other', startedAt: new Date().toISOString() });
@@ -16,10 +17,11 @@ it.each(['live', 'dead', 'legacy'])('N2 다른 pid %s 스냅숏은 생존 여부
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const closed = once(child, 'close'); await once(child, 'spawn');
   try {
-    if (kind !== 'live') { child.kill(); await closed; }
+    if (kind !== 'live' && kind !== 'reused') { child.kill(); await closed; }
     const path = join(root, '.pi/harness-judgment-snapshot.json');
     const snapshot = JSON.parse(await readFile(path, 'utf8'));
-    if (kind === 'legacy') delete snapshot.pid; else snapshot.pid = child.pid;
+    if (kind === 'legacy') delete snapshot.pid; else { snapshot.pid = child.pid; snapshot.startedAt = await processTime.processStartedAt(child.pid!) ?? ''; }
+    if (kind === 'reused') { snapshot.startedAt = 'old-process'; vi.spyOn(processTime, 'processStartedAt').mockResolvedValue('new-process'); }
     await writeFile(path, JSON.stringify(snapshot)); const before = await readFile(path, 'utf8');
     await recoverJudgmentSnapshot(root); await recoverJudgmentSnapshot(root);
     if (kind === 'live') {

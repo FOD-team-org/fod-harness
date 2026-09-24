@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import { expect, it, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ it.each([['PROJECT_READY', 'PLANNING'], ['DONE_ALL', 'PLANNING'], ['DONE_ALL', '
     const root = await project(from);
     const message = from === 'PROJECT_READY' ? 'PROJECT_READY 는 사용자가 /develop-start 로 시작합니다'
       : 'DONE_ALL 은 사용자가 /develop-start 또는 IDLE 전이로 이어갑니다';
-    vi.stubEnv('FODH_BRAIN', '1');
+    await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
     expect(await cli(root, ['state', 'transition', to])).toEqual({ code: 1, value: { error: message } });
     vi.stubEnv('FODH_BRAIN', '');
     await writeFile(join(root, '.pi/harness.lock'), JSON.stringify({ pid: process.ppid, startedAt: 'owner-start', token: 'fixture' }));
@@ -36,7 +37,7 @@ it.each([['PROJECT_READY', 'PLANNING'], ['DONE_ALL', 'PLANNING'], ['DONE_ALL', '
 
 it('N9 --system은 두뇌 CLI만 거부하고 사용자 CLI·내부 전이는 허용한다', async () => {
   const root = await project('WAIT_JUDGMENT'); await updateState(root, { resumeState: 'REVIEW', phase: 'project' });
-  vi.stubEnv('FODH_BRAIN', '1');
+  await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
   expect(await cli(root, ['state', 'transition', 'REVIEW', '--system'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('두뇌 세션') } });
   expect((await readState(root)).state).toBe('WAIT_JUDGMENT');
   expect((await transitionState(root, 'REVIEW', { system: true })).state).toBe('REVIEW');

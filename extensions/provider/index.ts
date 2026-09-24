@@ -1,3 +1,6 @@
+import { installShutdownReclaim } from '../../src/provider/shutdown.ts';
+import { getCurrentBrainGroup } from '../../src/provider/runner.ts';
+import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { setNotifyContext } from '../../src/core/notify.ts';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@mariozechner/pi-ai';
@@ -9,6 +12,7 @@ import { streamClaude } from './stream.ts';
 import { doctor } from '../../src/cli/doctor.ts';
 export default function provider(pi: ExtensionAPI) {
   let root = process.cwd();
+  let uninstallShutdownReclaim: (() => void) | undefined = installShutdownReclaim(getCurrentBrainGroup, () => root);
   let restoreTools: string[] | undefined;
   let release: (() => Promise<void>) | undefined;
   let controller = new AbortController();
@@ -56,11 +60,15 @@ export default function provider(pi: ExtensionAPI) {
     ready = true;
   };
   pi.on('session_start', async (_event, ctx) => {
-    root = ctx.cwd; controller = new AbortController(); ready = false;
+    root = ctx.cwd;
+    uninstallShutdownReclaim?.();
+    uninstallShutdownReclaim = installShutdownReclaim(getCurrentBrainGroup, () => root);
+    controller = new AbortController(); ready = false;
     setNotifyContext(root, { hasUI: ctx.hasUI, notify: (body, level) => ctx.ui.notify(body, level) });
     notify = message => ctx.ui.notify(message, 'warning');
     notify('Pi 자동 컴팩션을 꺼 주세요: .pi/settings.json 또는 ~/.pi/agent/settings.json의 compaction.enabled=false');
     release = await acquireLock(join(root, '.pi/harness.lock'));
+    await recoverOrphanBrain(root, true);
     selectTools(ctx.model?.provider === 'claude-code');
     if (ctx.model?.provider === 'claude-code') {
       await ensureDoctor();
@@ -79,6 +87,7 @@ export default function provider(pi: ExtensionAPI) {
   });
   pi.on('session_shutdown', async () => {
     controller.abort();
+    uninstallShutdownReclaim?.(); uninstallShutdownReclaim = undefined;
     setNotifyContext(root);
     try { await pending; } finally { await release?.(); release = undefined; ready = false; selectTools(false); }
   });

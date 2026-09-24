@@ -273,11 +273,36 @@ try {
     if (assignment || unset || clearedEnv || nestedEnv) deny('하네스 환경변수는 바꿀 수 없습니다.');
   }
   const commands = groups.filter(words => words.length).map(commandWords);
-  if (brain && commands.some(words => ['codex', 'claude', 'cswap'].includes(basename(words[0] ?? ''))
-    || words.some(word => basename(word).startsWith('codex-companion') || word.includes('/plugins/cache/openai-codex/')
-      || /[*?\[]/.test(word) && /plugins\/cache|codex/.test(word))
-    || basename(words[0] ?? '') === 'find' && words.some((word, i) => ['-exec', '-execdir', '-ok'].includes(word)
-      && ['codex', 'claude', 'cswap', 'node'].includes(basename(words[i + 1] ?? ''))))) deny(delegationMessage, 'boundary');
+  const globCompanion = word => /[*?\[]/.test(word ?? '') && /plugins\/cache|codex-companion/.test(word);
+  const interpreter = executable => /^(?:node|bun|deno|python[\w.]*)$/.test(executable);
+  const firstScript = args => {
+    for (let i = 1; i < args.length; i++) {
+      const word = args[i];
+      if (['-e', '--eval', '-c', '-m', '-p', '--print'].includes(word) || /^(?:--eval|--print)=/.test(word)) return undefined;
+      if (['-r', '--require', '--loader', '--import'].includes(word)) { i++; continue; }
+      if (word === '--') return args[i + 1];
+      if (!word.startsWith('-')) return word;
+    }
+  };
+  const directDelegation = words => {
+    const executable = basename(words[0] ?? '');
+    if (['codex', 'claude', 'cswap'].includes(executable) || globCompanion(words[0])) return true;
+    if (interpreter(executable) && globCompanion(firstScript(words))) return true;
+    if (words.some(word => !/[*?\[]/.test(word) && (basename(word).startsWith('codex-companion') || word.includes('/plugins/cache/openai-codex/')))) return true;
+    if (executable !== 'find') return false;
+    const names = words.flatMap((word, i) => ['-name', '-iname', '-path', '-ipath'].includes(word) ? [words[i + 1] ?? ''] : []);
+    return words.some((word, i) => {
+      if (!['-exec', '-execdir', '-ok'].includes(word)) return false;
+      const target = words.slice(i + 1), command = basename(target[0] ?? '');
+      if (['codex', 'claude', 'cswap'].includes(command) || globCompanion(target[0])) return true;
+      const script = interpreter(command) ? firstScript(target) : target[1];
+      if (globCompanion(script)) return true;
+      // {} resolves to the paths selected by find, rather than a literal script name.
+      return interpreter(command) && script === '{}' && (names.some(globCompanion)
+        || words.slice(1, i).some(value => value.includes('/plugins')) && names.some(value => /companion|codex-comp/.test(value)));
+    });
+  };
+  if (brain && commands.some(directDelegation)) deny(delegationMessage, 'boundary');
   if (input.run_in_background === true && commands.some(words => basename(words[0] ?? '') === 'fodh' && words[1] === 'codex' && words.includes('--wait'))) {
     deny('--wait 를 백그라운드로 돌리지 마라. 포그라운드로 실행하거나 --wait 없이 시작한 뒤 `대기: 위임 <runId>` 로 턴을 끝내라', 'boundary');
   }
@@ -292,9 +317,9 @@ try {
       const targetDirectory = destinations.filter(Boolean).some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))));
       const sources = operands.slice(1).filter((word, i) => !word.startsWith('-') && !destinations.includes(word)
         && !['-t', '--target-directory'].includes(operands[i]));
-      const sourceDirectory = sources.some(word => {
+      const sourceDirectory = commands.some(command => basename(command[0] ?? '') === 'cd') || sources.some(word => {
         if (word.endsWith('/')) return true;
-        try { return statSync(resolve(cwd, word)).isDirectory(); } catch { return false; }
+        try { return statSync(resolve(cwd, word)).isDirectory(); } catch { return true; }
       });
       const recursive = sourceDirectory && operands.some(word => /^-[^-]*[rRa]/.test(word) || ['--recursive', '--archive'].includes(word));
       const matchingSource = operands.slice(1).some(word => !destinations.includes(word) && basename(word) === basename(judgmentFile));

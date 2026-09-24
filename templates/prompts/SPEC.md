@@ -13,3 +13,5 @@ scaffold 결과의 `path`에 위임스펙을 채우고 구현 위임의 `--spec`
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 수행자에게 git·전체 테스트/빌드·비밀값·범위 밖 쓰기를 금지한다.
+
+`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add … --blocks {{taskId}} --reclaim`

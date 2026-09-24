@@ -1,3 +1,5 @@
+import { processStartedAt } from './process-time.ts';
+import { lockOwnerAlive } from './lock.ts';
 import { unlink } from 'node:fs/promises';
 import { notify } from './notify.ts';
 import { assertNotBrain } from './brain-guard.ts';
@@ -479,7 +481,7 @@ export async function beginJudgmentSnapshot(root: string, turn: BrainTurn): Prom
     const path = await location(root);
     await withFileLock(path, async () => {
       const answers = Object.fromEntries(parseJudgment(await readText(path)).items.map(item => [item.id, rawAnswer(item)]));
-      await atomicWrite(snapshotPath(root), JSON.stringify({ pid: process.pid, runId: turn.runId, startedAt: turn.startedAt, answers }) + '\n');
+      await atomicWrite(snapshotPath(root), JSON.stringify({ pid: process.pid, runId: turn.runId, startedAt: await processStartedAt(process.pid) ?? new Date(Date.now() - process.uptime() * 1000).toISOString(), answers }) + '\n');
       await updateState(root, { brainTurn: turn });
     });
   });
@@ -524,9 +526,7 @@ export async function recoverJudgmentSnapshot(root: string): Promise<void> {
       const { isTurnInProgress } = await import('../provider/turn.ts');
       if (isTurnInProgress(root)) return [];
     } else if (snapshot?.pid && snapshot.pid > 0) {
-      let alive = false;
-      try { process.kill(snapshot.pid, 0); alive = true; } catch { /* No live owner confirmed. */ }
-      if (alive) {
+      if (await lockOwnerAlive({ pid: snapshot.pid, startedAt: snapshot.startedAt, token: snapshot.runId })) {
         const key = JSON.stringify([resolve(root), snapshot.runId, snapshot.startedAt, snapshot.pid]);
         if (!snapshotSkips.has(key)) {
           await appendLedger(root, { runId: snapshot.runId, action: 'judgment:snapshot-skip', status: 'skip', evidence: { pid: snapshot.pid } });

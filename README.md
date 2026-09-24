@@ -47,6 +47,8 @@ Codex 수행자 기본값 `gpt-6-sol`은 판단 A11 로 확정되었습니다.
 
 `/status`는 워처의 마지막 tick·판단 해시/안정 시간·정체 시작·초과 자식 수를 표시합니다. `fodh watch tick`은 감지·인박스 기록만 하며 결정하지 않습니다. Pi 워처가 시작 시와 매 tick에 미결정 항목을 재처리합니다. `fodh watch status`는 워처 요약을 조회하며 같은 프로세스의 최신 tick 시각은 메모리 값을 우선합니다.
 
+`/hold`는 다음 두뇌 턴의 `대기: 사용자`를 수락합니다. 직접 입력에 `멈춰|멈추|기다려|잠깐|보류|확인할게|확인하고|stop|hold|wait|pause`가 단어 경계·한글 어절 시작에 있으면 같은 효과이며 대소문자를 구분하지 않습니다. `진행|계속|해줘|go|continue`만으로는 멈추지 않고, 두 부류가 섞이면 멈춤이 우선합니다. 수락 원장은 `turn:user-wait-accepted`에 `hold: command|input`을 기록합니다. 표지는 턴 종료(대기 없는 정상 진행·오류 포함) 또는 다음 입력에서 지웁니다. `/hold` 직후 extension 재개 입력은 명령 표지를 유지합니다.
+
 번호·승인 토큰 답은 기본 10초 안정화 후 자동 적용하고, 자유 서술 답은 `watch.freeTextStableSeconds`(기본 60초) 이상 안정된 뒤 적용합니다. 대기 중 문서를 다시 편집하면 안정화 시간을 다시 셉니다. `/judged`는 수동 즉시 적용 경로입니다. 두뇌·doctor 턴 시작 직전의 `id → raw 답 줄` 스냅숏과 종료 시 내용을 비교하여 바뀌거나 새로 생긴 비어 있지 않은 답은 held로 보류합니다. 진행 중 인박스는 적용을 지연하며, 재시작·recovering 때 잔존 스냅숏도 처리합니다. held가 있으면 인자 없는 `/judged`는 목록만 표시하고, `/judged A5`처럼 번호를 명시해야 그 답을 해제·적용합니다.
 
 - `fodh codex task|review|research --spec <파일> [--task T01] [--resume last] [--wait]`: 비동기 위임. `status [runId]`, `result <runId>`, `cancel <runId>`로 조회·회수한다. 완료는 `codex-done` 인박스로 전달된다.
@@ -116,7 +118,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 | 4. 쓰기 경계 | 두뇌는 docs.root·.pi(보호 파일 제외)·CLAUDE.md·AGENTS.md·README.md와 등록 워크트리만 쓰기 허용. Write/Edit 루트 밖은 .pi/scratch 안내. .claude/skills는 fodh skills install 전용. Bash는 루트 안 소스 쓰기를 검사하며 디바이스·외부 리다이렉트·인터프리터 실행 인자는 제외. heredoc 본문은 명령으로 해석하지 않음. git apply/patch 실제 적용은 대상 워크트리에서만 허용 |
 | 5. 상태·직접 실행 | commit의 기존 문서 상태 예외 유지, push/merge는 MERGE·DOCS만. 직접 codex 금지. 두뇌의 claude/cswap 직접 실행·codex-companion 인자·openai-codex 플러그인 경로·mcp__*codex* 도구·codex:* Agent/Task도 거부하며 위임은 fodh codex task 또는 Claude Agent로만 허용. 두뇌의 git worktree add/remove/prune는 fodh worktree 안내, branch -D/reset --hard/force push는 승인 설정과 무관하게 거부 |
 | 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
-| 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 디렉터리일 때만 해당한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
+| 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 존재하는 비디렉터리라고 확인될 때만 비재귀로 본다. 조회 실패(ENOENT·EACCES)나 같은 체인의 cd는 재귀로 간주한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
 
 `fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
 
@@ -144,12 +146,13 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령, heredoc으로 셸에 넘긴 문자열·스크립트 파일 실행의 내부 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). `sh -c`·eval 문자열은 재파싱한다. 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
 | 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다 |
 | MCP 도구 쓰기 | 기본 MCP 제한 옵션과 Codex MCP 도구 차단이 있지만 그 외 MCP 고유 입력 형식은 경로 가드와 감사의 일반 Write/Bash 판정 밖이다. brain.allowPlugins=true도 위임 훅을 해제하지 않는다. 변수 경유(`P=codex; $P …`)·`$(which codex)`·python subprocess 호출은 리터럴 명령 검사로 차단하지 못한다 |
-| 판단 답 보류 | mtime을 사용하지 않는다. 사용자가 두뇌 턴 중 쓴 답도 held가 되므로 /judged <번호>로 확인한다. 턴 종료 후 분리된 자식이 늦게 쓴 답은 종료 스냅숏 비교로 잡지 못한다. 비정상 종료 뒤 잔존 스냅숏은 다음 begin/recover에서 먼저 정산된다. 복구 시 살아 있는 다른 Pi 인스턴스의 스냅숏은 건드리지 않는다. 턴 중 무인자 적용은 스냅숏과 달라진 답을 미적용으로 남기며 번호 명시 적용은 유지한다 |
+| 판단 답 보류 | mtime을 사용하지 않는다. 사용자가 두뇌 턴 중 쓴 답도 held가 되므로 /judged <번호>로 확인한다. 턴 종료 후 분리된 자식이 늦게 쓴 답은 종료 스냅숏 비교로 잡지 못한다. 비정상 종료 뒤 잔존 스냅숏은 다음 begin/recover에서 먼저 정산된다. finish 실패는 진행 표지를 지우고 recover를 한 번 재시도하며, 재실패해도 brainTurn.endedAt을 기록해 활성 턴을 끝낸다. 복구는 pid와 processStartedAt 시작 시각을 대조하므로 재사용 pid는 종료된 것으로 보고, EPERM은 생존으로 취급한다. 살아 있는 다른 Pi 인스턴스의 스냅숏은 건드리지 않는다. 턴 중 무인자 적용은 스냅숏과 달라진 답을 미적용으로 남기며 번호 명시 적용은 유지한다 |
 | 변수·인용·경로 확장 | 토큰을 cwd 기준으로 resolve하며 셸 변수·glob·치환·cd 효과는 실행/추적하지 않는다. 훅은 기존 조상과 symlink를 realpath로 확인하지만 사후 감사는 리터럴 경로 기준이다. 인용된 인라인 코드는 일부만 감사한다 |
 | Codex 자식 | Codex는 Claude 훅 밖이다. FODH_CODEX_CHILD=1의 훅 거부는 보조이며 실제 방어는 CLI 진입 거부다 |
 | 100개 이상 삭제 | 훅은 삭제 개수를 세지 않는다. 대량 삭제 판정은 사후 검수 몫이며 자동 100개 임계 감사는 구현하지 않는다 |
 | 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다 |
 | 부모 프로세스 확인 | 살아 있는 Pi 잠금 중 ps 조회가 막히면 사용자 CLI의 설정 변경·memory reset도 거부될 수 있다. 이중 fork로 부모 체인에서 벗어난 자식은 이 판정만으로 막지 못한다. 실제 부모 체인 실기는 별도 확인이 필요하다 |
+| Pi 종료와 고아 두뇌 | Pi가 SIGHUP·SIGTERM으로 죽으면 두뇌 그룹을 동기 TERM→KILL로 회수하고 orphan 파일을 다음 session_start 원장으로 옮긴다. SIGINT는 Pi 기존 처리에 맡긴다. SIGKILL로 죽은 Pi의 두뇌는 다음 session_start가 회수하며, 그 사이 FODH_BRAIN=1인 두뇌의 fodh 쓰기는 잠금 소유자 부재·사망·읽기 실패로 코드 2 거부된다. 읽기 조회는 허용한다. 다음 세션 전까지 프로세스 자체가 남는 지연은 있다 |
 | 위임 감독 신호 | 취소 표지 없는 `kill <감독 pid>`(SIGTERM)는 무시된다 — `fodh codex cancel <runId>`를 쓴다. SIGKILL은 막을 수 없다. 감독은 CLI→런처→감독의 2단 분리로 시작한다 |
 | Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다 |
 
@@ -158,10 +161,11 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 | 전이·명령 | 하네스가 확인·기록하는 증거 |
 |---|---|
+| Pi 수명 → 두뇌 수명 | 살아 있는 잠금 소유자가 두뇌 쓰기의 조건. 새 잠금 획득 뒤 열린 brainTurn과 일치하는 등록 brain pgid를 회수하고 recovering으로 전이. cleanup은 살아 있는 소유자와 현재 runId가 일치하는 두뇌만 보호 |
 | 판단 변경 → 적용 | 턴 밖 안정화된 비held 답 자동 적용. 턴 중에는 지연 후 내용 스냅숏 비교로 held 처리, /judged <번호>로만 해제 |
-| PICK | `fodh pick --dry`로 후보를 보고 `fodh pick`으로 outcome을 확정. 자동 턴에서 후보가 있으면 사용자 대기를 거부하며, 사용자 입력 턴·후보 없는 DONE_ALL/WAIT_*·EMPTY는 기존 대기 유지 |
-| task 진행 중 사용자 대기 | SPEC·IMPLEMENT·VERIFY·FIX·REVIEW·MERGE·DOCS·CLEANUP에서 현재 task를 막는 열린 판단이 없으면 자동 턴의 대기를 거부·재개. 사용자 입력으로 시작한 턴의 명시적 대기는 수용한다(PICK도 동일). 사용자 결정은 `fodh judgment add … --blocks <taskId> --reclaim`으로 등록하고 RECLAIM→PICK 경로를 따른다. `fodh state await-user`는 사용자 전용이다. 위임·슬롯 대기가 우선하며 재개 3회 후 정체 판단으로 중단 |
-| 위임 | `fodh codex task` 또는 Claude Agent만 사용. 직접 codex/claude/cswap·companion·Codex 플러그인 도구·Skill은 훅 거부. npx/bunx/pnpm dlx/yarn dlx의 Codex 패키지·glob 경로·find 실행 우회도 거부 |
+| PICK | `fodh pick --dry`로 후보를 보고 `fodh pick`으로 outcome을 확정. 자동 턴에서 후보가 있으면 사용자 대기를 거부하며, 명시적 멈춤(/hold·멈춤 어휘)·후보 없는 DONE_ALL/WAIT_*·EMPTY는 대기 유지 |
+| task 진행 중 사용자 대기 | SPEC·IMPLEMENT·VERIFY·FIX·REVIEW·MERGE·DOCS·CLEANUP에서 현재 task를 막는 열린 판단이 없으면 자동 턴의 대기를 거부·재개. 사용자 입력만으로는 수락하지 않으며 /hold 또는 멈춤 어휘가 있을 때만 대기를 수락한다(PICK도 동일). 사용자 결정은 `fodh judgment add … --blocks <taskId> --reclaim`으로 등록하고 RECLAIM→PICK 경로를 따른다. `fodh state await-user`는 사용자 전용이다. 위임·슬롯 대기가 우선하며 재개 3회 후 정체 판단으로 중단 |
+| 위임 | `fodh codex task` 또는 Claude Agent만 사용. 직접 codex/claude/cswap·companion·Codex 플러그인 도구·Skill은 훅 거부. npx/bunx/pnpm dlx/yarn dlx의 Codex 패키지는 거부. glob은 실행 파일·인터프리터의 첫 스크립트 인자·find -exec/-execdir/-ok의 명령과 첫 인자에 plugins/cache 또는 codex-companion이 있을 때만 거부. 제목·grep·find 이름의 codex 패턴과 일반 find -exec node는 허용 |
 | VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd, git worktree의 검증 당시 clean=true. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
 | DOCS → CLEANUP | `${docs.root}/작업일지/YYYY-MM-DD.md`의 오늘 또는 어제(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
 | `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 scope all 성공 보고서(processes·storage·worktrees 성공, 잔존 0). task.cleanup.ok 자동 기록(dry-run 제외) |

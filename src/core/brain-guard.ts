@@ -12,3 +12,15 @@ export async function assertNotBrain(root: string, what: string): Promise<void> 
     throw new Error(`두뇌 세션은 ${what} 을 실행할 수 없습니다. 사용자 터미널에서 실행하세요`);
   }
 }
+
+export class HarnessNotAliveError extends Error {
+  constructor() { super('하네스가 실행 중이 아닙니다(잠금 소유자 없음). 두뇌 명령을 거부합니다'); }
+}
+export async function assertHarnessAlive(root: string): Promise<void> {
+  if (process.env.FODH_BRAIN !== '1') return;
+  try {
+    const owner = await ownerAt(harnessPath(root, 'harness.lock'));
+    if (owner && await lockOwnerAlive(owner)) return;
+  } catch { /* Unreadable or malformed ownership is not proof of a live harness. */ }
+  throw new HarnessNotAliveError();
+}

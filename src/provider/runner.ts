@@ -7,6 +7,10 @@ import { billingEnvKeys } from './preflight.ts';
 import { registerProc, removeProc } from '../core/procs.ts';
 import { processStartedAt } from '../core/process-time.ts';
 
+const brainGroupKey = Symbol.for('fodh.currentBrainGroup');
+const sharedBrain = globalThis as typeof globalThis & { [brainGroupKey]?: { pgid?: number } };
+const currentBrainGroup = sharedBrain[brainGroupKey] ??= {};
+export const getCurrentBrainGroup = (): number | undefined => currentBrainGroup.pgid;
 const execFileAsync = promisify(execFile);
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 // turn.ts의 packageRoot와 같은 패키지 위치를 기준으로 하며 호출자의 cwd에 의존하지 않는다.
@@ -112,6 +116,8 @@ export async function runProcess(options: RunOptions): Promise<ProcessResult> {
   const child = spawn(command, [...prefix, ...options.args ?? []], {
     cwd: options.root, env: childEnv(options.env), detached: true, stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const isBrain = (options.kind ?? 'brain') === 'brain';
+  if (isBrain && child.pid) currentBrainGroup.pgid = child.pid;
   let stderr = '', abortKind: AbortKind | undefined;
   let spawnError = false;
   type Cleanup = { code: number | null; cleaned: boolean };
@@ -186,6 +192,7 @@ export async function runProcess(options: RunOptions): Promise<ProcessResult> {
     if (cleaned && child.pid) await removeProc(options.root, child.pid, options.runId);
     throw error;
   } finally {
+    if (isBrain && currentBrainGroup.pgid === child.pid) currentBrainGroup.pgid = undefined;
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onAbort);
   }

@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import * as processes from '../src/core/process-time.ts';
 import { generateClaudeMd } from '../src/core/claude-md.ts';
 import { expect, it, vi } from 'vitest';
@@ -54,7 +55,7 @@ it.each(['env', 'ancestor'] as const)('M4 %s 두뇌 memory reset 거부는 워�
   const root = await project();
   const path = join(root, '.pi/harness-watcher.json'), before = '{"watch":{"memory":{"critical":true,"over":true}}}\n';
   await writeFile(path, before);
-  if (source === 'env') vi.stubEnv('FODH_BRAIN', '1');
+  if (source === 'env') { await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1'); }
   else {
     await writeFile(join(root, '.pi/harness.lock'), JSON.stringify({ pid: process.ppid, startedAt: 'fixture', token: 'fixture' }));
     vi.spyOn(processes, 'processStartedAt').mockResolvedValue('fixture');

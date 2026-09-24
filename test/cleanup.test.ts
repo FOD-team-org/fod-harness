@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import * as processTime from '../src/core/process-time.ts';
 import * as lock from '../src/core/lock.ts';
 import * as runner from '../src/provider/runner.ts';
@@ -49,7 +50,8 @@ it('neverKill·brain·활성 위임 보호, task/session 필터, spawn 미검증
     { pid: 100005, kind: 'verify', taskId: 'T02' }, { pid: 100006, kind: 'verify', sessionId: 'other' },
   ];
   for (const p of records) await registerProc(root, { pgid: p.pid, startedAt: '2026-09-24', runId: String(p.pid), taskId: 'T01', sessionId: 'self', ...p });
-  await updateState(root, { delegation: { runId: 'active', taskId: 'T01', kind: 'task', startedAt: 'now' } });
+  await liveHarness(root);
+  await updateState(root, { brainTurn: { runId: '100002', startedAt: 'now' }, delegation: { runId: 'active', taskId: 'T01', kind: 'task', startedAt: 'now' } });
   const reap = vi.spyOn(reclaim, 'reclaimCodexOwner');
   const report = await runCleanup(root, { scope: 'processes', taskId: 'T01', sessionId: 'self' });
   expect(report.processes?.protected).toHaveLength(3); expect(report.processes?.unverified).toHaveLength(1);

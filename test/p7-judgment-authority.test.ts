@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import { expect, it, vi } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,7 +9,7 @@ import * as processes from '../src/core/process-time.ts';
 it.each(['env', 'ancestor'])('F24 %s 두뇌는 일반 판단의 answer/apply 불가, 사용자 허용', async mode => {
   const root = await project('RESEARCH');
   const { item } = await addJudgment(root, { title: '사용자 판단', background: '', options: ['진행', '보류'], recommend: '①', blocks: '-' });
-  if (mode === 'env') vi.stubEnv('FODH_BRAIN', '1');
+  if (mode === 'env') { await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1'); }
   else {
     await writeFile(join(root, '.pi/harness.lock'), JSON.stringify({ pid: process.ppid, startedAt: 'owner-start', token: 'fixture' }));
     vi.spyOn(processes, 'processStartedAt').mockResolvedValue('owner-start');
@@ -38,7 +39,7 @@ it('R1 Pi 잠금 소유자 자신은 코어 답변·적용 가능', async () => 
 it('R5 CLI·코어 거부 문구는 설정 판단 경로를 안내한다', async () => {
   const root = await project('RESEARCH');
   await setConfig(root, 'judgment.file', 'notes/사용자결정.md');
-  vi.stubEnv('FODH_BRAIN', '1');
+  await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
   await expect(answerJudgment(root, 'A1', '1')).rejects.toThrow('notes/사용자결정.md');
   await expect(applyJudgments(root)).rejects.toThrow('notes/사용자결정.md');
   expect(await cli(root, ['judgment', 'apply'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('notes/사용자결정.md') } });
@@ -46,7 +47,7 @@ it('R5 CLI·코어 거부 문구는 설정 판단 경로를 안내한다', async
 
 it('N4 state await-user는 두뇌 거부·사용자 허용', async () => {
   const root = await project('IMPLEMENT');
-  vi.stubEnv('FODH_BRAIN', '1');
+  await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
   expect(await cli(root, ['state', 'await-user'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('사용자 대기 표시') } });
   vi.stubEnv('FODH_BRAIN', '');
   expect(await cli(root, ['state', 'await-user'])).toMatchObject({ code: 0, value: { awaitingUser: true } });

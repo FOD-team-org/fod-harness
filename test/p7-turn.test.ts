@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import * as judgments from '../src/core/judgment.ts';
 import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
@@ -173,4 +174,40 @@ it.each([false, true])('N2 finish 예외는 runner 결과(throw=%s)를 덮지 �
   else expect(await result).toMatchObject({ reason: 'stop' });
   expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'judgment:snapshot-finish', status: 'fail', evidence: { error: 'snapshot compare failure' } }));
   expect(isTurnInProgress(root)).toBe(false);
+});
+
+it.each([false, true])('L2 finish 실패 뒤 recover 재시도 실패=%s도 활성 턴을 끝낸다', async retryFails => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  vi.spyOn(judgments, 'finishJudgmentSnapshot').mockRejectedValue(new Error('finish failed'));
+  const recover = vi.spyOn(judgments, 'recoverJudgmentSnapshot');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
+    if (retryFails) recover.mockRejectedValue(new Error('recover failed'));
+    const args = options.args!, sid = args[args.indexOf('--session-id') + 1];
+    await options.onEvent?.({ type: 'system', subtype: 'init', session_id: sid, apiKeySource: 'none', permissionMode: 'bypassPermissions', model: 'haiku' });
+    await options.onEvent?.({ type: 'result', is_error: false });
+    return { code: 0, cleaned: true, stderr: '' };
+  });
+  await runTurn('fixture', { root, env: { HOME: root } });
+  expect(recover).toHaveBeenCalled();
+  expect(isTurnInProgress(root)).toBe(false);
+  expect((await readState(root)).brainTurn?.endedAt).toBeTruthy();
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'judgment:snapshot-finish', status: 'fail' }));
+  const { item } = await addJudgment(root, { title: '턴 밖 사용자 답', background: '', options: ['진행'], recommend: '', blocks: '-' });
+  await answerJudgment(root, item.id, '1');
+  expect((await judgments.applyJudgments(root)).applied.map(item => item.id)).toContain(item.id);
+});
+it('참고 jiti 모듈 재평가도 global Symbol의 진행 턴을 공유한다', async () => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  const piRequire = createRequire(new URL('../node_modules/@mariozechner/pi-coding-agent/package.json', import.meta.url));
+  const { createJiti } = piRequire('jiti');
+  const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false });
+  const other = await jiti.import('../src/provider/turn.ts') as typeof import('../src/provider/turn.ts');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async () => {
+    expect(isTurnInProgress(root)).toBe(true); expect(other.isTurnInProgress(root)).toBe(true);
+    return { code: 1, cleaned: true, stderr: '' };
+  });
+  await runTurn('fixture', { root, env: { HOME: root } });
+  expect(other.isTurnInProgress(root)).toBe(false);
 });

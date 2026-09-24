@@ -1,3 +1,4 @@
+import { liveHarness } from './p7-brain-helpers.ts';
 import { expect, it, vi } from 'vitest';
 import { project, cli } from './p5-helpers.ts';
 import { readState, transitionState, updateState } from '../src/core/state.ts';
@@ -83,7 +84,7 @@ it('F5 등록 task가 있으면 PICK 허용, done 1개만 있으면 DONE_ALL', a
 
 it('F4 CLI 두뇌 전이는 실패 원장을 남기고 사용자 전이는 허용한다', async () => {
   const root = await project('PROJECT_READY');
-  vi.stubEnv('FODH_BRAIN', '1');
+  await liveHarness(root); vi.stubEnv('FODH_BRAIN', '1');
   expect(await cli(root, ['state', 'transition', 'PLANNING'])).toEqual({ code: 1,
     value: { error: 'PROJECT_READY 는 사용자가 /develop-start 로 시작합니다' } });
   expect((await readState(root)).state).toBe('PROJECT_READY');

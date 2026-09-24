@@ -14,7 +14,8 @@ import { atomicWrite, harnessPath, withFileLock } from './storage.ts';
 import { redact } from '../provider/privacy.ts';
 import { removeWorktree } from './worktree.ts';
 import { processIdentity } from './process-identity.ts';
-import { groupAlive } from '../provider/runner.ts';
+import { ownerAt, lockOwnerAlive, isProcessAlive } from './lock.ts';
+import { groupAlive, reclaimOwnedGroup } from '../provider/runner.ts';
 import { sampleMemory } from './memory.ts';
 const execute = promisify(execFile);
 export type CleanupScope = 'processes' | 'storage' | 'worktrees' | 'all';
@@ -23,7 +24,9 @@ const inside = (root: string, path: string) => { const rel = relative(root, path
 const summary = (p: ProcRecord) => ({ pid: p.pid, kind: p.kind, taskId: p.taskId, ...(p.cmd ? { cmd: redact(p.cmd).slice(0, 200) } : {}) });
 export async function protectedProcessGroups(root: string, records: ProcRecord[]) {
   const config = await loadConfig(root), state = await readState(root);
-  const groups = new Set(records.filter(p => p.kind === 'brain'
+  const owner = await ownerAt(harnessPath(root, 'harness.lock'));
+  const harnessAlive = !!owner && await lockOwnerAlive(owner);
+  const groups = new Set(records.filter(p => p.kind === 'brain' && harnessAlive && state.brainTurn?.runId === p.runId
     || config.cleanup.processes.neverKill.some(pattern => p.cmd?.includes(pattern))
     || state.delegation?.runId === p.runId || Date.parse(p.protectedUntil ?? '') > Date.now()).map(p => p.pgid));
   for (const p of records) {
@@ -65,6 +68,15 @@ async function processes(root: string, options: CleanupOptions) {
     if (protectedGroups.has(record.pgid)) { result.protected.push(item); continue; }
     if (options.dryRun) { result.planned.push(item); continue; }
     try {
+      if (record.kind === 'brain') {
+        if (!groupAlive(record.pgid) || isProcessAlive(record.pid) && !await lockOwnerAlive({ pid: record.pid, startedAt: record.startedAt.startsWith('spawn:') ? '' : record.startedAt, token: record.runId })) {
+          await retireStaleProcess(root, record); result.stale.push(item); continue;
+        }
+        if (await reclaimOwnedGroup(record.pgid)) {
+          await removeProc(root, record.pid, record.runId); result.reclaimed.push(item);
+        } else result.residual.push(item);
+        continue;
+      }
       const stale = await cleanupStaleProcess(root, record);
       if (stale) { result[stale].push(item); continue; }
       if (record.startedAt.startsWith('spawn:') || record.kind === 'verify' && await processIdentity(record.pid, record.startedAt) !== 'owned') { result.unverified.push(item); continue; }
