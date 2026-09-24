@@ -1,3 +1,4 @@
+import { setNotifyContext } from '../../src/core/notify.ts';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@mariozechner/pi-ai';
 import { readState, doctorFresh, updateState } from '../../src/core/state.ts';
@@ -56,6 +57,7 @@ export default function provider(pi: ExtensionAPI) {
   };
   pi.on('session_start', async (_event, ctx) => {
     root = ctx.cwd; controller = new AbortController(); ready = false;
+    setNotifyContext(root, { hasUI: ctx.hasUI, notify: (body, level) => ctx.ui.notify(body, level) });
     notify = message => ctx.ui.notify(message, 'warning');
     notify('Pi 자동 컴팩션을 꺼 주세요: .pi/settings.json 또는 ~/.pi/agent/settings.json의 compaction.enabled=false');
     release = await acquireLock(join(root, '.pi/harness.lock'));
@@ -77,6 +79,7 @@ export default function provider(pi: ExtensionAPI) {
   });
   pi.on('session_shutdown', async () => {
     controller.abort();
+    setNotifyContext(root);
     try { await pending; } finally { await release?.(); release = undefined; ready = false; selectTools(false); }
   });
 }

@@ -26,8 +26,8 @@ export function parseGroupRssMB(stdout: string, excludePids: readonly (number | 
 // The supervisor remains alive to finalize meta; processTree excludes it and the querying ps.
 async function stopChildren(child: ChildProcess, toolGroups: readonly ToolGroup[], context: ReclaimContext): Promise<void> {
   try {
-    const { groups } = await verifiedToolGroups(toolGroups, context);
-    if (!await reclaimCodexTree(process.pid, child.pid && child.exitCode === null && child.signalCode === null ? [child.pid] : [], groups)) throw new Error('Codex 자손 프로세스가 남아 있습니다');
+    const { groups, skippedGroups } = await verifiedToolGroups(toolGroups, context);
+    if (!await reclaimCodexTree(process.pid, child.pid && child.exitCode === null && child.signalCode === null ? [child.pid] : [], groups) || skippedGroups.length) throw new Error('Codex 자손 프로세스가 남아 있습니다');
   } catch (error) {
     // If ps is unavailable, still terminate our direct child, but do not claim tree cleanup.
     child.kill('SIGTERM');
@@ -120,7 +120,7 @@ export async function supervise(root: string, runId: string): Promise<void> {
     }
     await ending;
     await finishRun(root, runId, { status: stopping ?? (exit === 0 && !failure ? 'ok' : 'fail'), exit, peakRssMB,
-      ...(failure ? { error: failure } : {}) });
+      ...(failure ? { error: failure, reason: 'residual' } : {}) });
   } catch (error) {
     if (child) { ending ??= stopChildren(child, toolGroups, context).catch(() => undefined); await ending; }
     // Errors may contain arguments or paths: record only a bounded, credential-free diagnostic.

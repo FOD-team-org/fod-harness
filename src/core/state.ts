@@ -1,3 +1,6 @@
+import { runCleanup } from './cleanup.ts';
+import { notify } from './notify.ts';
+import { redact } from '../provider/privacy.ts';
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -28,7 +31,8 @@ export async function updateState(
   patch: Partial<HarnessState> | ((current: HarnessState) => Partial<HarnessState> | Promise<Partial<HarnessState>>),
 ): Promise<HarnessState> {
   const path = harnessPath(root, 'harness-state.json');
-  return withFileLock(path, async () => {
+  let committedState: HarnessState | undefined, stateChanged = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
     const current = await readState(root);
     const next: HarnessState = { ...current, ...(typeof patch === 'function' ? await patch(current) : patch), savedAt: new Date().toISOString() };
     if (typeof next.state !== 'string' || !next.state.trim()) throw new Error('상태 값이 올바르지 않습니다');
@@ -42,12 +46,38 @@ export async function updateState(
     }
     if (changed && isPaused(next.state)) next.lastPaused = next.state.slice(7, -1);
     if (changed && next.state === 'recovering') next.recoveryAutoResumed = false;
-    await atomicWrite(path, `${JSON.stringify(next, null, 2)}\n`);
-    if (changed) await appendLedger(root, { runId: typeof next.runId === 'string' ? next.runId : randomUUID(),
-      action: `state:${current.state}→${next.state}`, status: 'ok', taskId: next.taskId, state: next.state });
-    return next;
-  });
+    const committed = await withFileLock(path, async () => {
+      if (JSON.stringify(await readState(root)) !== JSON.stringify(current)) return false;
+      await atomicWrite(path, `${JSON.stringify(next, null, 2)}\n`);
+      if (changed) await appendLedger(root, { runId: typeof next.runId === 'string' ? next.runId : randomUUID(),
+        action: `state:${current.state}→${next.state}`, status: 'ok', taskId: next.taskId, state: next.state });
+      return true;
+    });
+    if (!committed) continue;
+    committedState = next; stateChanged = changed; break;
+  }
+  if (!committedState) throw new Error('상태 갱신 경합이 계속됩니다');
+  const next = committedState;
+  const recordFailure = async (action: string, error: unknown) => {
+    try { await appendLedger(root, { runId: typeof next.runId === 'string' ? next.runId : randomUUID(), action, status: 'fail',
+      evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
+    catch { /* A storage failure cannot undo the committed transition. */ }
+  };
+  let cleanupLine = '';
+  if (stateChanged && (next.state.startsWith('WAIT_') || isPaused(next.state))) {
+    try {
+      const report = await runCleanup(root, { scope: 'processes' });
+      cleanupLine = ` — 프로세스 ${report.processes?.reclaimed.length ?? 0}개 회수, 잔존 ${(report.processes?.residual.length ?? 0) + (report.processes?.unverified.length ?? 0)}개`;
+    } catch (error) { await recordFailure('cleanup:processes', error); }
+  }
+  if (stateChanged && (next.state.startsWith('WAIT_') || isPaused(next.state) || ['DONE_ALL', 'CLEANUP_FAILED'].includes(next.state))) {
+    try { await notify(root, { key: `state:${next.state}`, title: '하네스 상태', body: `하네스 상태: ${next.state}${cleanupLine}`,
+      level: isPaused(next.state) || next.state === 'CLEANUP_FAILED' ? 'warning' : 'info' }); }
+    catch (error) { await recordFailure(`notify:state:${next.state}`, error); }
+  }
+  return next;
 }
+
 export const states = new Set([
   'IDLE', 'INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW', 'PROJECT_READY', 'READY', 'WAIT_JUDGMENT',
   'PLANNING', 'PICK', 'SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'MERGE', 'DOCS', 'CLEANUP', 'CLEANUP_FAILED',

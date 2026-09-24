@@ -1,3 +1,6 @@
+import * as cleanupModule from '../src/core/cleanup.ts';
+import * as notifyModule from '../src/core/notify.ts';
+import { runPick } from '../src/core/pick.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -13,15 +16,17 @@ import { tick } from '../src/core/watcher.ts';
 import { setConfig } from '../src/core/config.ts';
 
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'fodh-orchestrator-')); roots.push(root);
+  await setConfig(root, 'notify.channels', '["tui","ledger"]');
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
   const sendMessage = vi.fn();
   orchestrator({ registerCommand: (name: string, command: any) => commands.set(name, command),
     on: (name: string, handler: any) => handlers.set(name, handler), sendMessage } as unknown as ExtensionAPI);
   const ctx = { cwd: root, hasUI: true, isIdle: vi.fn(() => true), ui: { notify: vi.fn() } };
+  await handlers.get('session_start')!({}, ctx);
   return { root, commands, handlers, ctx, sendMessage,
     decide: async (kinds: string[]) => decideInbox({ sendMessage } as unknown as ExtensionAPI, ctx as any, root,
       await Promise.all(kinds.map(kind => addInbox(root, { kind, pid: 201 })))),
@@ -93,7 +98,7 @@ it('status는 상태·task·인박스 미적용·원장 unknown·최근 rateLimi
   expect(status.inbox).toHaveLength(1); expect(status.unknown).toHaveLength(1);
   expect(test.sendMessage).not.toHaveBeenCalled();
 });
-it('cleanup은 보고만 표시하며 두뇌 턴을 시작하지 않는다', async () => {
+it('cleanup은 실제 정리 결과를 표시하며 두뇌 턴을 시작하지 않는다', async () => {
   const test = await setup(); await test.command('cleanup');
   expect(JSON.parse(test.ctx.ui.notify.mock.calls[0][0])).toMatchObject({ ok: true, remaining: 0 });
   expect(test.sendMessage).not.toHaveBeenCalled();
@@ -107,7 +112,7 @@ it('judged는 답 적용·blocked 해제 후 WAIT_JUDGMENT에서 PICK 지시문�
   await test.command('judged', item.id);
   expect((await getTask(test.root, task.id)).status).toBe('ready');
   expect(test.sendMessage.mock.calls[0][0].content).toContain('# PICK');
-  expect(JSON.parse(test.ctx.ui.notify.mock.calls[0][0]).applied).toHaveLength(1);
+  expect(JSON.parse(test.ctx.ui.notify.mock.calls.at(-1)![0]).applied).toHaveLength(1);
 });
 it('judged는 적용 항목이 없으면 WAIT_JUDGMENT에서도 보내지 않는다', async () => {
   const test = await setup(); await updateState(test.root, { state: 'WAIT_JUDGMENT' });
@@ -117,7 +122,7 @@ it('judged는 WAIT_JUDGMENT 밖에서 답을 적용해도 자동으로 시작하
   const test = await setup();
   const { item } = await addJudgment(test.root, { title: '진행 방식', background: '', options: ['첫 번째'], recommend: '첫 번째', blocks: '' });
   await answerJudgment(test.root, item.id, '1'); await test.command('judged');
-  expect(JSON.parse(test.ctx.ui.notify.mock.calls[0][0]).applied).toHaveLength(1);
+  expect(JSON.parse(test.ctx.ui.notify.mock.calls.at(-1)![0]).applied).toHaveLength(1);
   expect(test.sendMessage).not.toHaveBeenCalled();
 });
 it('judged의 프로젝트 재개 지시문은 resumeState 먼저 복귀하도록 안내한다', async () => {
@@ -240,7 +245,7 @@ it('H2 정체 판단①→ready→PICK→SPEC 흐름',async()=>{
 });
 it.each(['WAIT_JUDGMENT','DONE_ALL'])('L10: %s 종료는 알리고 자동 턴을 만들지 않는다',async state=>{
   const test=await setup();await updateState(test.root,{state});await test.end();
-  expect(test.ctx.ui.notify).toHaveBeenCalledWith(`하네스 상태: ${state}`,'info');
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith(`하네스 상태: ${state}${state === 'WAIT_JUDGMENT' ? ' — 프로세스 0개 회수, 잔존 0개' : ''}`,'info');
   expect(test.sendMessage).not.toHaveBeenCalled();
 });
 it('L10: task 정체 회수 뒤 WAIT 판단 문서에 번호와 요약을 쓴다',async()=>{
@@ -330,7 +335,7 @@ it('P2: 부정·모호 답은 /judged 경로로 재질문하며 결과 알림에
   const document = await readJudgment(t.root);
   expect(document.items).toHaveLength(2); expect(document.items[0].followup).toBe(document.items[1].id);
   expect(document.items[1].reaskOf).toBe(item.id);
-  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).unapplied).toEqual([{ id: item.id, reason: '부정 또는 유보가 포함되어 있습니다' }]);
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls.at(-1)![0]).unapplied).toEqual([{ id: item.id, reason: '부정 또는 유보가 포함되어 있습니다' }]);
   expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).state).toBe('WAIT_JUDGMENT');
 });
 it('P2: busy stalled는 카운터·상태를 바꾸지 않고 skip 원장·warning', async () => {
@@ -366,7 +371,7 @@ it.each([
 });
 it('P2: /status는 아직 tick하지 않은 워처도 안정된 요약 필드를 표시', async () => {
   const t = await setup(); await t.command('status');
-  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).watcher).toEqual({ lastTickAt: null,
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls.at(-1)![0]).watcher).toEqual({ lastTickAt: null,
     judgment: { observedHash: null, stableFor: 0, expectedHash: null }, childTimeouts: 0 });
 });
 it('M1/L8: 서로 다른 resume 모듈에서도 전송 직전 idle 확인으로 1회·autoTurns +1', async () => {
@@ -447,7 +452,7 @@ it('P3 다른 run·이미 해제된 완료 인박스는 applied만, busy 일치 
 });
 it('P3 /status 위임 요약 및 buildPrompt 결과 조회 지시', async () => {
   const t = await setup(); await delegationFixture(t.root); await t.command('status');
-  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).delegation).toMatchObject({ runId: 'delegated', kind: 'research', title: '조사', status: 'running', minutes: expect.any(Number) });
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls.at(-1)![0]).delegation).toMatchObject({ runId: 'delegated', kind: 'research', title: '조사', status: 'running', minutes: expect.any(Number) });
   const { buildPrompt } = await import('../src/provider/turn.ts');
   await addInbox(t.root, { kind: 'codex-done', runId: 'delegated', codexRunId: 'delegated', codexStatus: 'ok', resultDir: '/result' });
   expect(await buildPrompt(t.root, 'next', 'brain-1')).toContain('fodh codex result delegated');
@@ -482,4 +487,73 @@ it('감독 유실로 추정한 성공은 codex-done에서 경고한다', async (
   const record = await addInbox(t.root, { kind: 'codex-done', codexRunId: 'delegated', codexStatus: 'ok', supervisorLost: true });
   await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [record]);
   expect(t.ctx.ui.notify).toHaveBeenCalledWith('감독 사망 뒤 추정한 성공 — 결과를 직접 확인', 'warning');
+});
+
+it('P4: memory pressure 정리·critical 보존·recovered PICK 및 RESUME', async () => {
+  const t = await setup(), task = await addTask(t.root, { title: 'memory', category: 'docs' });
+  await setTask(t.root, task.id, { status: 'doing' }); await updateState(t.root, { state: 'IMPLEMENT', taskId: task.id, doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  const clean = vi.spyOn(cleanupModule, 'runCleanup'), notices = vi.spyOn(notifyModule, 'notify');
+  await t.decide(['memory-pressure']); expect(clean).toHaveBeenCalledWith(t.root, { scope: 'processes' });
+  await t.decide(['memory-critical']); expect(await readState(t.root)).toMatchObject({ state: 'paused(memory)', taskId: task.id, resumeState: 'IMPLEMENT' });
+  await t.decide(['memory-recovered']); expect(await readState(t.root)).toMatchObject({ state: 'PICK', resumeTask: { taskId: task.id, resumeState: 'IMPLEMENT' } });
+  expect(t.sendMessage).toHaveBeenCalled(); expect((await runPick(t.root)).outcome).toBe('RESUME');
+  expect(notices.mock.calls.map(call => call[1].key)).toEqual(expect.arrayContaining(['memory-pressure', 'memory-critical', 'memory-recovered']));
+});
+it('P4: WAIT 진입 커밋 후 정리를 끝내고 notify 경유, cleanup dry는 보고서 생성', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'PICK' });
+  let during: string | undefined;
+  const actual = cleanupModule.runCleanup;
+  const clean = vi.spyOn(cleanupModule, 'runCleanup').mockImplementation(async (root, options) => { during = (await readState(root)).state; return actual(root, options); });
+  const notices = vi.spyOn(notifyModule, 'notify');
+  await transitionState(t.root, 'WAIT_JUDGMENT'); expect(during).toBe('WAIT_JUDGMENT');
+  expect(clean).toHaveBeenCalledWith(t.root, { scope: 'processes' });
+  expect(notices).toHaveBeenCalledWith(t.root, expect.objectContaining({ key: 'state:WAIT_JUDGMENT', body: expect.stringContaining('회수') }));
+  await t.command('cleanup', 'dry'); expect(clean).toHaveBeenCalledWith(t.root, { scope: 'all', dryRun: true });
+  expect(JSON.parse(await readFile(join(t.root, '.pi/cleanup-last.json'), 'utf8'))).toMatchObject({ dryRun: true });
+});
+
+it('P4: 두뇌 오류 3회는 notify 경유 error, 성공 턴은 연속 횟수 초기화', async () => {
+  const t = await setup(), notices = vi.spyOn(notifyModule, 'notify');
+  await t.end('error'); await t.end('error');
+  expect(notices.mock.calls.filter(call => call[1].key === 'brain-errors')).toHaveLength(0);
+  await t.end('error'); expect(notices).toHaveBeenCalledWith(t.root, expect.objectContaining({ key: 'brain-errors', level: 'error' }), expect.any(Object));
+  await t.end(); expect((await readState(t.root)).brainErrors).toBe(0);
+});
+
+it('P4: 정리 중 상태 기록이 잠금에 막히지 않고 최신 필드를 보존한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'PICK' });
+  const actual = cleanupModule.runCleanup; let once = false;
+  vi.spyOn(cleanupModule, 'runCleanup').mockImplementation(async (root, options) => {
+    if (!once) { once = true; await updateState(root, { heartbeatDuringCleanup: true }); }
+    return actual(root, options);
+  });
+  await transitionState(t.root, 'WAIT_JUDGMENT');
+  expect(await readState(t.root)).toMatchObject({ state: 'WAIT_JUDGMENT', heartbeatDuringCleanup: true });
+});
+
+it('M4: WAIT_RESOURCE 메모리 회복은 lastPaused 해제·PICK·자동 재개', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'WAIT_RESOURCE', lastPaused: 'memory', doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  await t.decide(['memory-recovered']);
+  expect(await readState(t.root)).toMatchObject({ state: 'PICK' }); expect((await readState(t.root)).lastPaused).toBeUndefined();
+  expect(t.sendMessage).toHaveBeenCalledOnce();
+});
+it('M4: READY 메모리 회복은 상태 유지·lastPaused만 해제', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'READY', lastPaused: 'memory' });
+  await t.decide(['memory-recovered']);
+  expect((await readState(t.root)).state).toBe('READY'); expect((await readState(t.root)).lastPaused).toBeUndefined(); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it('F1: cleanup dry 직후 cleanup도 별도 결과 알림을 표시한다', async () => {
+  const t = await setup(); t.ctx.ui.notify.mockClear();
+  await t.command('cleanup', 'dry'); await t.command('cleanup');
+  const bodies = t.ctx.ui.notify.mock.calls.map(([body]) => JSON.parse(body));
+  expect(bodies).toHaveLength(2);
+  for (const body of bodies) expect(body).toMatchObject({ ok: true, remaining: 0, stale: 0, protected: 0 });
+  const entries = (await readLedger(t.root)).filter(e => e.action.startsWith('notify:cleanup:'));
+  expect(entries.map(e => e.status)).toEqual(['ok', 'ok']); expect(entries[0].action).not.toBe(entries[1].action);
+});
+it('L6: 비활성 상태 memory-critical은 위임 거부 안내를 표시한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'READY' });
+  await t.decide(['memory-critical']);
+  expect((await readState(t.root)).state).toBe('READY');
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('회복 전까지 새 위임을 거부합니다'), 'error');
 });

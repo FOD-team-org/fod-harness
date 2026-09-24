@@ -1,7 +1,7 @@
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 import { setTask } from './backlog.ts';
-import { appendLedger } from './ledger.ts';
+import { appendLedgerOnce } from './ledger.ts';
 import { removeProc } from './procs.ts';
 import { releaseSlot } from './slots.ts';
 import { redact } from '../provider/privacy.ts';
@@ -67,31 +67,38 @@ export async function result(root: string, runId: string) {
     exit: meta.exit, ...(meta.supervisorLost ? { supervisorLost: true } : {}), threadId, durationSeconds: meta.durationSeconds, lastMessage,
     changedFiles: [...changedFiles], commands: commands.size + anonymousCommands, usage, errors: [...errors], turnCompleted };
 }
-// All finishers use one lock; meta.finishedAt is published only after durable bookkeeping.
+// All finishers serialize on meta; publish the terminal record before the one terminal ledger entry.
 export async function finishRun(root: string, runId: string, patch: Partial<CodexMeta>): Promise<CodexMeta> {
   return withFileLock(metaPath(root, runId), async () => {
     const meta = await readMeta(root, runId);
     if (!meta) throw new Error('위임 메타데이터가 없습니다');
-    if (meta.finishedAt) return meta;
     const parsed = await result(root, runId);
-    const finishedAt = new Date().toISOString();
-    const next: CodexMeta = { ...meta, ...patch, finishedAt, threadId: parsed.threadId,
+    const finishedAt = meta.finishedAt ?? new Date().toISOString();
+    const next: CodexMeta = meta.finishedAt ? meta : { ...meta, ...patch, finishedAt, threadId: parsed.threadId,
       lastMessageFile: join(resultDir(root, runId), 'last-message.md'),
       durationSeconds: Math.max(0, (Date.parse(finishedAt) - Date.parse(meta.startedAt)) / 1000), peakRssMB: patch.peakRssMB ?? meta.peakRssMB ?? 0 };
-    if (meta.kind === 'task' && next.taskId && next.threadId) {
+    if (!meta.finishedAt && meta.kind === 'task' && next.taskId && next.threadId) {
       try { await setTask(root, next.taskId, { codexThread: next.threadId }); }
       catch (error) { next.error = redact((error as Error).message); next.status = next.status === 'ok' ? 'fail' : next.status; }
     }
-    await appendLedger(root, { runId, taskId: meta.taskId, state: meta.state, action: `codex:${meta.kind}`,
+    await releaseSlot('codex', runId);
+    if (meta.pid) await removeProc(root, meta.pid, runId);
+    if (!meta.finishedAt) await writeMeta(root, next);
+    await appendLedgerOnce(root, { runId, taskId: meta.taskId, state: meta.state, action: `codex:${meta.kind}`,
       status: next.status === 'ok' ? 'ok' : 'fail', evidence: { exit: next.exit, threadId: next.threadId,
         durationSeconds: next.durationSeconds, peakRssMB: next.peakRssMB, changedFiles: parsed.changedFiles.length,
         lastMessageBytes: Buffer.byteLength(parsed.lastMessage), ...(next.status === 'cancelled' ? { cancelled: true } : {}),
         ...(next.reason ? { reason: next.reason } : {}),
         ...(next.supervisorLost ? { supervisorLost: true } : {}),
         ...(next.error ? { error: next.error } : {}), status: next.status } });
-    await releaseSlot('codex', runId);
-    if (meta.pid) await removeProc(root, meta.pid, runId);
-    await writeMeta(root, next);
+    const watcherPath = harnessPath(root, 'harness-watcher.json');
+    await withFileLock(watcherPath, async () => {
+      const file = await readJson<{ watch?: { codexLostFailures?: Record<string, string> } }>(watcherPath, {});
+      if (file.watch?.codexLostFailures && Object.hasOwn(file.watch.codexLostFailures, runId)) {
+        delete file.watch.codexLostFailures[runId];
+        await atomicWrite(watcherPath, JSON.stringify(file, null, 2) + '\n');
+      }
+    });
     return next;
   });
 }

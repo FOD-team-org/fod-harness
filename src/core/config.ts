@@ -1,3 +1,4 @@
+import { commandParts } from '../provider/runner.ts';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
@@ -14,6 +15,11 @@ export interface HarnessConfig {
       brainModel: string; brainEffort: string; workerModel: string; workerEffort: string; maxChildAgents: number;
     };
   };
+  cleanup: { rebuildablePaths: string[]; keepPaths: string[]; sharedCaches: { enabled: boolean; paths: string[] }; codexRunsKeep: number;
+    processes: { neverKill: string[]; killPatterns: string[] }; swapWarnGB: number };
+  verify: { commands: string[]; heavy: string[]; timeoutMinutes: number };
+  notify: { channels: ('tui' | 'macos' | 'slack' | 'ledger')[] };
+  budget: { dailyTurns: number; dailyHours: number };
   worktrees: { root: string; prefix: string };
   watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
   judgment: { file: string };
@@ -104,12 +110,36 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   if (!Array.isArray(requiresApproval) || requiresApproval.some(value => typeof value !== 'string' || !value.trim())) {
     throw new Error('requiresApproval은 문자열 배열이어야 합니다');
   }
+  const cleanup = object(defaultValue(raw.cleanup, {}), 'cleanup');
+  const processes = object(defaultValue(cleanup.processes, {}), 'cleanup.processes');
+  const caches = object(defaultValue(cleanup.sharedCaches, {}), 'cleanup.sharedCaches');
+  const verify = object(defaultValue(raw.verify, {}), 'verify');
+  const notify = object(defaultValue(raw.notify, {}), 'notify');
+  const budget = object(defaultValue(raw.budget, {}), 'budget');
+  const strings = (value: unknown, fallback: string[], label: string): string[] => {
+    const list = defaultValue(value, fallback);
+    if (!Array.isArray(list) || list.some(v => typeof v !== 'string' || !v.trim() || /[\0\r\n]/u.test(v))) throw new Error(`${label}는 문자열 배열이어야 합니다`);
+    return list;
+  };
+  const commands = (value: unknown, label: string) => strings(value, [], label).map(cmd => { commandParts(cmd); return cmd; });
+  const channels = strings(notify.channels, ['tui', 'macos'], 'notify.channels');
+  if (channels.some(c => !['tui', 'macos', 'slack', 'ledger'].includes(c))) throw new Error('notify.channels는 tui|macos|slack|ledger만 허용합니다');
+  const enabled = defaultValue(caches.enabled, false);
+  if (typeof enabled !== 'boolean') throw new Error('cleanup.sharedCaches.enabled는 불리언이어야 합니다');
   return {
     brain: {
       command: command(brain.command, 'claude', 'brain.command'),
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
       model, skipPermissions, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
     },
+    cleanup: { rebuildablePaths: strings(cleanup.rebuildablePaths, [], 'cleanup.rebuildablePaths'), keepPaths: strings(cleanup.keepPaths, [], 'cleanup.keepPaths'),
+      sharedCaches: { enabled, paths: strings(caches.paths, [], 'cleanup.sharedCaches.paths') }, codexRunsKeep: nonnegativeInteger(defaultValue(cleanup.codexRunsKeep, 20), 'cleanup.codexRunsKeep'),
+      processes: { neverKill: strings(processes.neverKill, ['nest start --watch', 'qemu-system', 'Simulator', 'ChatGPT'], 'cleanup.processes.neverKill'),
+        killPatterns: strings(processes.killPatterns, ['jest', 'flutter_tester', 'GradleDaemon'], 'cleanup.processes.killPatterns') },
+      swapWarnGB: atLeast(defaultValue(cleanup.swapWarnGB, 8), 'cleanup.swapWarnGB', 3) },
+    verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes') },
+    notify: { channels: channels as HarnessConfig['notify']['channels'] },
+    budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
     delegate: delegation, worktrees: { root: wtRoot, prefix }, watch: watching, judgment: { file }, requiresApproval,
   };
 }
@@ -180,4 +210,10 @@ function positive(value: unknown, label: string, integer = false): number {
     throw new Error(`${label}는 ${integer ? '양의 정수' : '양수'}여야 합니다`);
   }
   return value;
+}
+
+function atLeast(value: unknown, label: string, minimum: number): number {
+  const number = positive(value, label);
+  if (number < minimum) throw new Error(`${label}는 ${minimum} 이상이어야 합니다`);
+  return number;
 }

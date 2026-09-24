@@ -22,6 +22,7 @@ export async function codexOwnership(owner: CodexOwner, alive?: (pid: number) =>
   if (leader !== 'dead') return leader;
   const pgid = owner.pgid ?? owner.pid;
   if (!groupAlive(pgid)) return 'gone';
+  if (owner.childPid && !owner.childStartedAt) return 'unknown';
   if (owner.childPid && owner.childStartedAt) {
     const child = await processIdentity(owner.childPid, owner.childStartedAt);
     if (child === 'unknown') return 'unknown';

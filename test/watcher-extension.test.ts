@@ -1,13 +1,15 @@
+import { runCleanup } from '../src/core/cleanup.ts';
+vi.mock('../src/core/cleanup.ts', () => ({ runCleanup: vi.fn().mockResolvedValue({ ok: true }) }));
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { readFile, stat } from 'node:fs/promises';
 import watcher from '../extensions/watcher/index.ts';
-import { tick, detectRecovery, pendingDecisions, recordDecision } from '../src/core/watcher.ts';
+import { tick, memoryTick, detectRecovery, pendingDecisions, recordDecision } from '../src/core/watcher.ts';
 import { decideInbox, clearDecisionTimers } from '../extensions/orchestrator/index.ts';
 import { appendLedger } from '../src/core/ledger.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { watch } from 'node:fs';
-vi.mock('../src/core/watcher.ts', () => ({ tick: vi.fn(), detectRecovery: vi.fn(), pendingDecisions: vi.fn(), recordDecision: vi.fn() }));
+vi.mock('../src/core/watcher.ts', () => ({ tick: vi.fn(), memoryTick: vi.fn(), detectRecovery: vi.fn(), pendingDecisions: vi.fn(), recordDecision: vi.fn() }));
 vi.mock('../extensions/orchestrator/index.ts', () => ({ decideInbox: vi.fn(), clearDecisionTimers: vi.fn() }));
 vi.mock('../src/core/ledger.ts', () => ({ appendLedger: vi.fn() }));
 vi.mock('../src/core/config.ts', () => ({ loadConfig: vi.fn() }));
@@ -20,6 +22,7 @@ beforeEach(() => {
   vi.useFakeTimers(); vi.resetAllMocks();
   vi.mocked(tick).mockResolvedValue({ emitted: [], status: { lastTickAt: null, judgment: { observedHash: null, expectedHash: null, stableFor: 0 }, childTimeouts: 0 } });
   vi.mocked(detectRecovery).mockResolvedValue([record]);
+  vi.mocked(memoryTick).mockResolvedValue([]);
   vi.mocked(decideInbox).mockResolvedValue({ deferred: [] });
   vi.mocked(pendingDecisions).mockResolvedValue([]).mockResolvedValueOnce([record]);
   vi.mocked(recordDecision).mockResolvedValue(undefined);
@@ -50,9 +53,9 @@ it('session_start는 복구 기록 뒤 자신의 pi와 ctx로 결정하고 부�
   expect(vi.mocked(detectRecovery).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(decideInbox).mock.invocationCallOrder[0]);
   expect(watch).toHaveBeenCalledWith('/test-project/docs', { persistent: false }, expect.any(Function));
 });
-it('두 타이머 unref·poll/전체 tick 구분·동일 시각 전체 tick 우선·신규 이벤트 결정', async () => {
+it('세 타이머 unref·poll/전체 tick 구분·동일 시각 전체 tick 우선·신규 이벤트 결정', async () => {
   const interval = vi.spyOn(globalThis, 'setInterval'); const t = await setup(); await t.start();
-  expect(interval).toHaveBeenCalledTimes(2);
+  expect(interval).toHaveBeenCalledTimes(3);
   for (const call of interval.mock.results) expect(call.value.hasRef()).toBe(false);
   vi.mocked(tick).mockResolvedValueOnce({ emitted: [{ ...record, kind: 'judgment-changed' }], status: {} as any });
   vi.mocked(pendingDecisions).mockResolvedValueOnce([{ ...record, kind: 'judgment-changed' }]);
@@ -139,15 +142,15 @@ it('M2: 결정 예외는 완료로 기록하지 않고 다음 tick에 재시도,
 });
 it('M3: 복구 감지가 실패해도 잔여 결정·타이머·다음 tick을 계속한다', async () => {
   const t = await setup(); vi.mocked(detectRecovery).mockRejectedValueOnce(new Error('recovery'));
-  await t.start(); expect(vi.getTimerCount()).toBe(2); expect(decideInbox).toHaveBeenCalledTimes(1);
+  await t.start(); expect(vi.getTimerCount()).toBe(3); expect(decideInbox).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(5000); expect(tick).toHaveBeenCalledTimes(1);
 });
 it('M3: 시작 설정 실패는 5/30초 기본 폴링, 복구 후 설정 주기를 재로드', async () => {
   const t = await setup(); vi.mocked(loadConfig).mockRejectedValue(new Error('bad json'));
-  await t.start(); expect(vi.getTimerCount()).toBe(2);
+  await t.start(); expect(vi.getTimerCount()).toBe(3);
   vi.mocked(loadConfig).mockResolvedValue({ judgment: { file: 'docs/판단대기.md' }, watch: { pollSeconds: 2, tickSeconds: 20 } } as any);
   await vi.advanceTimersByTimeAsync(5000); expect(tick).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(2000); expect(tick).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(2);
+  await vi.advanceTimersByTimeAsync(2000); expect(tick).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(3);
 });
 it('L1: 실행 중 전체 tick 요청은 합쳐서 한 번 더 실행', async () => {
   const t = await setup(); await t.start(); let finish!: (result: any) => void;
@@ -206,4 +209,28 @@ it('N1: 같은 세션의 다른 누락 디렉터리는 각각 한 번 기록', a
   vi.mocked(loadConfig).mockResolvedValue({ judgment: { file: 'other/판단.md' }, watch: { pollSeconds: 5, tickSeconds: 30 } } as any);
   await vi.advanceTimersByTimeAsync(15000);
   expect(watch).toHaveBeenCalledTimes(2); expect(appendLedger).toHaveBeenCalledTimes(2);
+});
+
+it('P4: 60초 메모리 표본과 세션 소유 정리, shutdown 후 표본 없음', async () => {
+  const t = await setup(); await t.start();
+  await vi.advanceTimersByTimeAsync(59999); expect(memoryTick).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); expect(memoryTick).toHaveBeenCalledWith(t.ctx.cwd);
+  await t.stop(); expect(runCleanup).toHaveBeenCalledWith(t.ctx.cwd, { scope: 'processes', sessionId: expect.any(String) });
+  await vi.advanceTimersByTimeAsync(120000); expect(memoryTick).toHaveBeenCalledTimes(1);
+});
+
+it('P4 M3: 같은 틱의 poll·memory가 한 인박스 레코드를 중복 결정하지 않는다', async () => {
+  const t = await setup(); await t.start();
+  vi.mocked(decideInbox).mockClear();
+  await vi.advanceTimersByTimeAsync(59999);
+  let release!: () => void, decided = false;
+  vi.mocked(pendingDecisions).mockImplementation(async () => decided ? [] : [record]);
+  vi.mocked(decideInbox).mockImplementation(async () => {
+    await new Promise<void>(resolve => { release = resolve; }); return { deferred: [] };
+  });
+  vi.mocked(recordDecision).mockImplementation(async () => { decided = true; });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(memoryTick).toHaveBeenCalledTimes(1); expect(decideInbox).toHaveBeenCalledTimes(1);
+  release(); await vi.advanceTimersByTimeAsync(0);
+  expect(decideInbox).toHaveBeenCalledTimes(1); expect(decided).toBe(true);
 });

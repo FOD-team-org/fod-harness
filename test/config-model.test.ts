@@ -134,3 +134,31 @@ it.each([
 ])('P3 설정 %s 거부', async (key, value, message) => {
   const root = await project(); await expect(setConfig(root, key, value)).rejects.toThrow(message);
 });
+
+it('P4 설정 기본값·budget 값만 검증·저장', async () => {
+  const root = await project();
+  expect(await getConfig(root)).toMatchObject({ cleanup: { rebuildablePaths: [], keepPaths: [], sharedCaches: { enabled: false, paths: [] }, codexRunsKeep: 20, swapWarnGB: 8 },
+    verify: { commands: [], heavy: [], timeoutMinutes: 30 }, notify: { channels: ['tui', 'macos'] }, budget: { dailyTurns: 200, dailyHours: 20 } });
+  for (const [key, value] of [['cleanup.codexRunsKeep', '0'], ['budget.dailyTurns', '2'], ['budget.dailyHours', '0.5'], ['verify.commands', '["node --version"]'], ['notify.channels', '["slack","ledger"]']]) {
+    expect(await setConfig(root, key, value)).toEqual(JSON.parse(value)); expect(await getConfig(root, key)).toEqual(JSON.parse(value));
+  }
+});
+it.each([
+  ['cleanup.rebuildablePaths', '[1]'], ['cleanup.keepPaths', 'false'], ['cleanup.sharedCaches.enabled', '1'], ['cleanup.codexRunsKeep', '-1'],
+  ['cleanup.processes.neverKill', '[""]'], ['cleanup.swapWarnGB', '0'], ['verify.commands', '["node \\"unclosed"]'],
+  ['verify.heavy', '[null]'], ['verify.timeoutMinutes', '0'], ['notify.channels', '["email"]'], ['notify.channels', '[1]'],
+  ['budget.dailyTurns', '1.5'], ['budget.dailyHours', '-1'],
+])('P4 잘못된 %s 설정을 저장 전에 거부', async (key, value) => {
+  const root = await project(); await setConfig(root, 'brain.model', 'fable');
+  const before = await readFile(join(root, '.pi/harness.json'), 'utf8');
+  await expect(setConfig(root, key, value)).rejects.toThrow(); expect(await readFile(join(root, '.pi/harness.json'), 'utf8')).toBe(before);
+});
+it('P4 CLI 명령·인자 검증·dry-run·ledger 알림·빈 검증 exit 1', async () => {
+  const root = await project(); await setConfig(root, 'notify.channels', '["ledger"]');
+  expect(await cli(root, ['cleanup', 'run', '--scope', 'all', '--dry-run'])).toMatchObject({ code: 0, value: { ok: true, dryRun: true } });
+  expect((await cli(root, ['cleanup', 'run', '--scope', 'bad'])).code).toBe(1);
+  expect((await cli(root, ['notify', 'send', '--title', 'test', '--body', 'body'])).code).toBe(0);
+  expect((await cli(root, ['notify', 'send', '--title', 'test', '--body', 'body', '--level', 'bad'])).code).toBe(1);
+  expect((await cli(root, ['verify', 'run'])).code).toBe(1);
+  expect((await cli(root, ['memory', 'status'])).code).toBe(0);
+});

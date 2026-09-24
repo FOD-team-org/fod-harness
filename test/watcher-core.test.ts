@@ -1,3 +1,5 @@
+import * as fsPromises from 'node:fs/promises';
+vi.mock('node:fs/promises', async original => ({ ...await original<typeof import('node:fs/promises')>() }));
 import * as procTree from '../src/core/proc-tree.ts';
 import * as identity from '../src/core/process-time.ts';
 import * as lock from '../src/core/lock.ts';
@@ -16,7 +18,7 @@ import { addInboxOnce, ackInbox, deliverInbox, listInbox } from '../src/core/inb
 import { addJudgment, answerJudgment } from '../src/core/judgment.ts';
 import { loadConfig, getConfig, setConfig } from '../src/core/config.ts';
 import { registerProc, listProcs } from '../src/core/procs.ts';
-import { atomicWrite, harnessPath, readJson } from '../src/core/storage.ts';
+import { atomicWrite, harnessPath, readJson, withFileLock } from '../src/core/storage.ts';
 import { activeStates } from '../src/core/state.ts';
 import { main } from '../src/cli/index.ts';
 const roots: string[] = [];
@@ -233,6 +235,7 @@ it('죽은 감독 그룹 회수 실패는 첫 기록 후 10분 간격, 성공한
   // A completion event cannot turn a run into ok when a live orphan tree had to be reclaimed.
   await writeFile(join(root, '.pi/codex/orphan/events.jsonl'), '{"type":"turn.completed"}\n');
   expect((await tick(root, { now: now + 661000, isProcessAlive: () => false })).emitted[0]).toMatchObject({ codexStatus: 'lost' });
+  expect((await readJson<any>(harnessPath(root, 'harness-watcher.json'), {})).watch.codexLostFailures).not.toHaveProperty('orphan');
 });
 it('감독·그룹 부재와 turn.completed 증거는 supervisorLost ok로 복구한다', async () => {
   const { root } = await setup(); await codexFixture(root, 'completed', { pid: 99999999 });
@@ -285,7 +288,7 @@ it.each(['legacy', 'matching', 'mismatch'] as const)('감독 그룹 부재 시 %
   vi.spyOn(runner, 'groupAlive').mockImplementation(pgid => pgid === 99999998);
   const reap = vi.spyOn(procTree, 'reclaimCodexTree').mockResolvedValue(true);
   await writeFile(join(root, '.pi/codex/tools/events.jsonl'), '{"type":"turn.completed"}\n');
-  expect((await tick(root, { now: now + 60000 })).emitted[0]).toMatchObject({ codexStatus: 'ok', supervisorLost: true });
+  expect((await tick(root, { now: now + 60000 })).emitted[0]).toMatchObject(scenario === 'matching' ? { codexStatus: 'ok', supervisorLost: true } : { codexStatus: 'lost' });
   if (scenario === 'matching') expect(reap).toHaveBeenCalledWith(0, [], [99999998]);
   else {
     expect(reap).not.toHaveBeenCalled();
@@ -307,4 +310,30 @@ it.each(['start', 'group'] as const)('자식 %s ps 조회 실패 시 워처는 �
   expect(await readMeta(root, 'unknown-child')).toMatchObject({ status: 'running' });
   expect((await readState(root)).delegation?.runId).toBe('unknown-child');
   expect(await readLedger(root)).not.toContainEqual(expect.objectContaining({ action: 'codex:lost' }));
+});
+
+it('P4 N10: 트리 회수 중 다른 워처 파일 잠금 사용자가 기다리지 않는다', async () => {
+  const { root } = await setup(); await codexFixture(root, 'slow-reap', { pid: 99999999 });
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(codexReclaim, 'reclaimCodexOwner').mockImplementation(async () => { entered(); await gate; return { reclaimed: true, owner: 'orphan', skippedGroups: [] }; });
+  const running = tick(root, { now: now + 60000, isProcessAlive: () => false });
+  await started;
+  try { await expect(withFileLock(harnessPath(root, 'harness-watcher.json'), async () => 'available', { waitMs: 500 })).resolves.toBe('available'); }
+  finally { release(); await running; }
+});
+
+it('L3: 후보 수집 뒤 삭제된 run 디렉터리를 recovery 락이 되살리지 않는다', async () => {
+  const { root } = await setup(), runId = 'removed-candidate', dir = harnessPath(root, `codex/${runId}`);
+  await fsPromises.mkdir(dir, { recursive: true });
+  const actual = fsPromises.readdir;
+  vi.spyOn(fsPromises, 'readdir').mockImplementation((async (path: Parameters<typeof actual>[0], options: any) => {
+    const result = await actual(path, options);
+    if (String(path) === harnessPath(root, 'codex')) await rm(dir, { recursive: true, force: true });
+    return result;
+  }) as typeof actual);
+  await tick(root, { now });
+  await expect(fsPromises.access(dir)).rejects.toMatchObject({ code: 'ENOENT' });
 });

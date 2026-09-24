@@ -11,3 +11,5 @@
 `--wait`가 진행 중 오류, 시간 초과, 중단 등 어떤 이유로든 결과 없이 끝나면 stderr의 `{"runId"}` 줄 또는 `fodh codex status`의 `delegation.runId`로 `대기: 위임 3f2c…`를 쓰고 턴을 끝낸다. `3f2c…` 대신 실제 runId 전체를 쓰며, `--wait`를 다시 부르지 않는다.
 
 사용자 표지 `대기: 사용자`는 본문 어느 줄이든 인정한다. 위임 표지는 마지막 비어 있지 않은 3줄 안에 쓴다.
+
+정리는 `fodh cleanup run`, 검증은 `fodh verify run`을 사용한다. 전체 테스트·전체 빌드는 VERIFY의 `fodh verify run --heavy`만 허용한다. 메모리 중단 중에는 새 위임을 시작하지 않는다. 로컬 알림은 `fodh notify send --title … --body …`로 보낸다.

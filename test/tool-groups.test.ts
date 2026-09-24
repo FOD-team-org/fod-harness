@@ -6,7 +6,7 @@ import * as identity from '../src/core/process-time.ts';
 import * as lock from '../src/core/lock.ts';
 import * as runner from '../src/provider/runner.ts';
 import * as tree from '../src/core/proc-tree.ts';
-import { sampleToolGroups, type ToolGroup } from '../src/core/tool-groups.ts';
+import { sampleToolGroups, verifiedToolGroups, reportToolResidual, type ToolGroup } from '../src/core/tool-groups.ts';
 import { reclaimCodexOwner } from '../src/core/codex-reclaim.ts';
 import { readLedger } from '../src/core/ledger.ts';
 const startedAt = '2026-09-24T00:00:00Z', roots: string[] = [];
@@ -63,12 +63,31 @@ it('표본은 죽은 그룹을 제거하고 현재 자손의 신원만 저장하
   psTable(table, table.map(row => row.pgid));
   const old: ToolGroup[] = [{ pid: 200, pgid: 200, startedAt }];
   const sampled = await sampleToolGroups(old, { pids: table.map(row => row.pid), toolGroups: table.map(row => row.pgid) });
-  expect(sampled).toHaveLength(64); expect(sampled).toEqual(table.slice(0, 64));
+  expect(sampled).toHaveLength(64); expect(sampled).toEqual(table.slice(0, 64).map(row => ({ ...row, observedAt: expect.any(String) })));
   expect(sampled).not.toContainEqual(old[0]);
   vi.mocked(runner.groupAlive).mockImplementation(pgid => pgid === 363);
-  expect(await sampleToolGroups(sampled, { pids: [], toolGroups: [] })).toEqual([table[63]]);
+  expect(await sampleToolGroups(sampled, { pids: [], toolGroups: [] })).toEqual([{ ...table[63], observedAt: expect.any(String) }]);
 });
 it('ps로 시작 시각이나 그룹을 읽지 못하면 표본 신원을 만들지 않는다', async () => {
   psTable([{ pid: 300, pgid: 300 }], [300]);
   expect(await sampleToolGroups([], { pids: [300, 301], toolGroups: [300] })).toEqual([]);
+});
+
+it('P4 S1: 도구 셸이 먼저 끝나면 살아 있는 그룹 구성원으로 표본 신원 갱신', async () => {
+  psTable([{ pid: 301, pgid: 300, startedAt }], [300]);
+  vi.spyOn(tree, 'processTreeSnapshot').mockResolvedValue({ pids: [301], toolGroups: [300] });
+  expect(await sampleToolGroups([{ pid: 300, pgid: 300, startedAt }], { pids: [], toolGroups: [] })).toEqual([{ pid: 301, pgid: 300, startedAt, observedAt: expect.any(String) }]);
+});
+it('P4 S2: 미확인 도구 그룹 원장은 run별 첫 1건과 10분 간격만', async () => {
+  const ctx = await context();
+  for (const now of [0, 1000, 599999, 600000]) await reportToolResidual(ctx, [300], now);
+  expect((await readLedger(ctx.root)).filter(e => e.action === 'codex:tool-groups')).toHaveLength(2);
+  expect((await readLedger(ctx.root)).filter(e => e.action === 'codex:residual')).toHaveLength(2);
+});
+
+it('L2: 이전 표본 뒤 시작한 witness는 재사용된 pgid로 간주해 채택하지 않는다', async () => {
+  const old = { pid: 300, pgid: 300, startedAt, observedAt: '2026-09-24T00:01:00Z' };
+  psTable([{ pid: 301, pgid: 300, startedAt: '2026-09-24T00:01:01Z' }], [300]);
+  vi.spyOn(tree, 'processTreeSnapshot').mockResolvedValue({ pids: [301], toolGroups: [300] });
+  expect(await sampleToolGroups([old], { pids: [], toolGroups: [] })).toEqual([old]);
 });

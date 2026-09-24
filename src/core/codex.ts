@@ -1,3 +1,4 @@
+import { codexOwnership } from './process-identity.ts';
 import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -8,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { loadConfig, type HarnessConfig } from './config.ts';
 import { getTask, setTask } from './backlog.ts';
 import { readState, updateState } from './state.ts';
-import { atomicWrite, harnessPath, withFileLock } from './storage.ts';
+import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { appendLedger } from './ledger.ts';
 import { listProcs, registerProc } from './procs.ts';
 import { processStartedAt } from './process-time.ts';
@@ -41,6 +42,9 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
   root = await realpath(root);
   const started = await withFileLock(harnessPath(root, 'harness-delegation'), async () => {
     const state = await readState(root), config = await loadConfig(root), cfg = config.delegate.codex;
+    const watch = await readJson<{ watch?: { memory?: { critical?: boolean } } }>(harnessPath(root, 'harness-watcher.json'), {});
+    if (watch.watch?.memory?.critical === true) throw new Error('메모리 임계 상태입니다');
+    if (state.state === 'paused(memory)' || state.lastPaused === 'memory') throw new Error('메모리 회복 전에는 위임을 시작할 수 없습니다');
     if (kind === 'task' && !options.taskId || options.taskId !== undefined && !/^T\d+$/u.test(options.taskId)) throw new Error('--task T번호가 필요합니다');
     if (kind === 'review' && state.state !== 'REVIEW' || kind === 'research' && !['RESEARCH', 'ARCH', 'PLANNING', 'SPEC', 'REVIEW'].includes(state.state)) throw new Error(`현재 상태에서는 codex ${kind} 를 시작할 수 없습니다`);
     const task = options.taskId ? await getTask(root, options.taskId) : undefined;
@@ -92,7 +96,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
         pid = child.pid!; child.unref();
       } finally { await log.close(); }
       const identity = await processStartedAt(pid) ?? `spawn:${new Date().toISOString()}`;
-      await registerProc(root, { pid, pgid: pid, startedAt: identity, runId, kind: 'codex', taskId: task?.id, cmd: `fodh-codex-supervisor ${runId}` });
+      await registerProc(root, { pid, pgid: pid, startedAt: identity, runId, kind: 'codex', taskId: task?.id, protectedUntil: new Date(Date.now() + 60000).toISOString(), cmd: `fodh-codex-supervisor ${runId}` });
       await updateSlot('codex', runId, { pid, startedAt: identity });
       await withFileLock(metaPath(root, runId), async () => {
         const current = await readMeta(root, runId);
@@ -115,8 +119,10 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
   const { timeoutMinutes: _timeout, ...output } = started;
   return output;
 }
-export function waitLimitMinutes(timeoutMinutes: number, maxTurnMinutes: number, waitMinutes = 8): number {
-  return Math.min(timeoutMinutes + 1, Math.max(1, maxTurnMinutes - 5), waitMinutes);
+export function waitLimitMinutes(timeoutMinutes: number, maxTurnMinutes: number, waitMinutes = 8, env: NodeJS.ProcessEnv = process.env): number {
+  const bashMs = Number(env.BASH_DEFAULT_TIMEOUT_MS);
+  const bashLimit = Number.isFinite(bashMs) && bashMs > 0 ? bashMs * 0.9 / 60000 : Infinity;
+  return Math.min(timeoutMinutes + 1, Math.max(1, maxTurnMinutes - 5), waitMinutes, bashLimit);
 }
 export async function waitForResult(root: string, runId: string, timeoutMinutes: number) {
   const config = await loadConfig(root);
@@ -135,7 +141,7 @@ export async function status(root: string, runId?: string) {
     const meta = await readMeta(root, runId);
     if (!meta) throw new Error(`위임 실행을 찾을 수 없습니다: ${runId}`);
     const record = (await listProcs(root)).find(proc => proc.runId === runId && proc.kind === 'codex');
-    return { ...meta, alive: record ? await slotOwnerAlive(record) : false };
+    return { ...meta, alive: record ? await slotOwnerAlive({ ...record, root, childPid: meta.childPid, childStartedAt: meta.childStartedAt }) : false };
   }
   const state = await readState(root);
   return { delegation: state.delegation ?? null, meta: state.delegation ? await readMeta(root, state.delegation.runId) : null, slots: await slotsStatus() };
@@ -152,9 +158,17 @@ export async function cancel(root: string, runId: string) {
     if (!meta.finishedAt) {
       const record = (await listProcs(root)).find(proc => proc.runId === runId && proc.kind === 'codex');
       const owner = record ?? (meta.pid ? { pid: meta.pid, pgid: meta.pid, startedAt: meta.processStartedAt } : undefined);
+      if (owner && await codexOwnership(owner) === 'owned') {
+        try { process.kill(owner.pid, 'SIGTERM'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !(await readMeta(root, runId))?.finishedAt) await delay(100);
+      }
+      const latest = await readMeta(root, runId);
+      if (!latest?.finishedAt) {
       const reclaimed = owner ? await reclaimCodexOwner({ ...owner, childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups }, { root, runId }) : undefined;
       if (reclaimed && !reclaimed.reclaimed) throw new Error('감독 프로세스 트리 회수 실패');
       await finishRun(root, runId, { status: reclaimed?.owner === 'unverified' ? 'lost' : 'cancelled', exit: null, reason: reclaimed?.reason });
+      }
     }
     await updateState(root, current => current.delegation?.runId === runId ? { delegation: undefined, awaitingDelegation: false } : {});
     return result(root, runId);

@@ -1,3 +1,4 @@
+import { runCleanup } from '../../src/core/cleanup.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { watch, type FSWatcher } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../src/core/config.ts';
 import { appendLedger } from '../../src/core/ledger.ts';
-import { detectRecovery, tick, pendingDecisions, recordDecision } from '../../src/core/watcher.ts';
+import { detectRecovery, tick, memoryTick, pendingDecisions, recordDecision } from '../../src/core/watcher.ts';
 import { redact } from '../../src/provider/privacy.ts';
 import { decideInbox, clearDecisionTimers } from '../orchestrator/index.ts';
 
@@ -16,7 +17,8 @@ export default function watcher(pi: ExtensionAPI): void {
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let watcher: FSWatcher | undefined, watchedDirectory: string | undefined;
   const missingDirectories = new Set<string>(), loggedMissingDirectories = new Set<string>();
-  let pending: Promise<void> | undefined;
+  let pending: Promise<void> | undefined, memoryPending: Promise<void> | undefined;
+  let sessionId: string | undefined;
   let stopped = true, pendingFull = false, lastWarning = -Infinity;
   const fail = async (action: 'tick' | 'fs-watch', error: unknown) => {
     const message = redact(error instanceof Error ? error.message : '워처 실행 실패');
@@ -80,7 +82,13 @@ export default function watcher(pi: ExtensionAPI): void {
     for (const timer of timers) clearInterval(timer);
     periods = next;
     timers = [setInterval(() => { void run(); }, tickSeconds * 1000),
-      setInterval(() => { void run(true); }, pollSeconds * 1000)];
+      setInterval(() => { void run(true); }, pollSeconds * 1000),
+      setInterval(() => {
+        if (stopped || memoryPending) return;
+        memoryPending = memoryTick(root).then(() => undefined)
+          .catch(error => fail('tick', error)).finally(() => { memoryPending = undefined; });
+        void memoryPending.then(() => { if (!stopped) return run(); });
+      }, 60000)];
     for (const timer of timers) timer.unref();
   };
   const run = (judgmentOnly = false): Promise<void> => {
@@ -109,13 +117,14 @@ export default function watcher(pi: ExtensionAPI): void {
     debounce = undefined;
     if (root) clearDecisionTimers(root);
     watcher?.close(); watcher = undefined; watchedDirectory = undefined;
-    await pending;
+    await pending; await memoryPending;
     // A decision already in flight may have scheduled a deferred answer after shutdown began.
     if (root) clearDecisionTimers(root);
   };
   pi.on('session_start', async (_event, context) => {
     await shutdown();
     root = context.cwd; ctx = context; lastWarning = -Infinity;
+    sessionId = randomUUID(); process.env.FODH_SESSION_ID = sessionId;
     missingDirectories.clear(); loggedMissingDirectories.clear();
     sessionStartedAt = `${new Date().toISOString()}:${randomUUID()}`;
     stopped = ctx.hasUI === false;
@@ -138,5 +147,12 @@ export default function watcher(pi: ExtensionAPI): void {
   });
   pi.on('agent_start', async (_event, context) => { ctx = context; });
   pi.on('agent_end', async (_event, context) => { ctx = context; });
-  pi.on('session_shutdown', shutdown);
+  pi.on('session_shutdown', async () => {
+    await shutdown();
+    if (root && sessionId) {
+      try { await runCleanup(root, { scope: 'processes', sessionId }); } catch (error) { await fail('tick', error); }
+      if (process.env.FODH_SESSION_ID === sessionId) delete process.env.FODH_SESSION_ID;
+      sessionId = undefined;
+    }
+  });
 }

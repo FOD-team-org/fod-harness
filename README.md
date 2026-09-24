@@ -67,3 +67,17 @@ P3 위임 복구: 감독이 죽어도 그룹 구성원 중 기록된 Codex 자�
 두뇌 Bash timeout 기본·최대는 각각 600000ms로 주입하며 사용자가 준 환경값은 유지한다. `--wait`가 어떤 이유로든 결과 없이 끝나면 stderr runId 또는 `fodh codex status`의 delegation.runId로 위임 대기를 표시하고, `--wait`를 다시 호출하지 않는다.
 
 감독 PID 재사용은 신호 없이 위임을 마감하고 `pid-reused`, 자식 신원이 맞지 않는 생존 그룹은 `group-unverified`를 원장에 남긴다. 도구 그룹은 30초 표본 때 meta.toolGroups에 누적해 정상 종료·cancel·lost·reclaim에서 함께 회수한다. 회수 실패 원장은 runId별 첫 1건과 10분마다 1건만 기록한다. `supervisorLost`는 결과·인박스에 전달하며 추정 성공 경고를 표시한다. 사용자 대기 표지는 본문 어느 줄이든, 위임 표지는 마지막 비어 있지 않은 3줄에서 인정한다. Codex 자식은 프로젝트 루트 env를 받지 않으며 `FODH_CODEX_CHILD=1`로 fodh 실행이 거부된다.
+
+- `fodh cleanup run [--scope processes|storage|worktrees|all] [--task T] [--dry-run]`: 등록 프로세스·프로젝트 재생성 경로·완료 또는 현재 CLEANUP 작업의 워크트리 정리, `.pi/cleanup-last.json` 보고서. 공유 캐시는 보고만 한다.
+- `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 순차 실행한다. heavy 슬롯과 Codex 슬롯은 상호 배타다.
+- `fodh notify send --title … --body … [--level info|warning|error]`: TUI/macOS/원장 알림. 같은 키 60초 제한, Slack은 skip 기록만 남긴다.
+- `fodh memory status`: 현재 메모리 표본과 60초 워치독 상태. 스왑 초과 5분은 paused(memory), 경고치−2 GB 미만 5분은 자동 재개다.
+
+P4: `/cleanup`은 전체 정리, `/cleanup dry`는 삭제 없는 계획을 표시한다. 세션 종료는 자기 세션 레코드만 회수하며 활성 위임과 두뇌는 보호한다. `budget.dailyTurns/dailyHours`는 값만 검증하며 제한을 강제하지 않는다. `BASH_DEFAULT_TIMEOUT_MS`가 waitMinutes보다 짧으면 doctor가 경고하고 실제 대기 상한을 해당 timeout의 90%로 낮춘다.
+
+P4 정리 보고서의 `stale`은 신호 없이 제거한 죽거나 PID가 재사용된 기록이며 잔존 수에서 제외한다. `protected`는 실행 중 verify·활성 위임·시작 후 60초 이내 위임 등 보호된 기록이다.
+verify 결과의 `interrupted: "signal"`은 외부 SIGTERM/SIGINT 중단이므로 코드 결함으로 판단하지 않고 검증을 다시 실행한다.
+`cleanup.swapWarnGB`는 최소 3이며 메모리 pressure 표본도 이 설정값으로 판정한다.
+알림은 프로세스 메모리와 원장 마지막 200줄의 동일 키 성공 기록으로 60초 중복을 제한한다. `/cleanup` 결과는 실행별 키로 항상 표시한다.
+
+verify 프로세스는 검증 자식과 소유 CLI의 신원이 모두 owned일 때만 보호한다. 소유 CLI가 죽은 검증 자식은 일반 정리 대상이며 heavy 슬롯 생존도 CLI 기준이다.

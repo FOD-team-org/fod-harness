@@ -1,8 +1,11 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { sampleMemory, judgeMemory, type MemorySample, type MemoryWatch } from './memory.ts';
 import { readMeta, finishRun, resultDir, result } from './codex-record.ts';
 import { codexOwnership } from './process-identity.ts';
 import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { createHash } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { appendLedger } from './ledger.ts';
 import { redact } from '../provider/privacy.ts';
@@ -14,6 +17,7 @@ import { activeStates, isPaused, readState } from './state.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
 export interface WatchState {
+  memory?: MemoryWatch; memorySampleFailed?: boolean;
   lastTickAt?: string;
   judgment: { path?: string; observed: { hash: string | null; since: string }; lastEmitted?: string | null };
   codexEmitted?: string[];
@@ -72,6 +76,7 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
   const at = new Date(now).toISOString();
   const config = await loadConfig(root);
   const path = harnessPath(root, 'harness-watcher.json');
+  if (!options.judgmentOnly) await recoverLostRuns(root, now, options);
   return withFileLock(path, async () => {
     const file = await readJson<WatcherFile>(path, {});
     const before = JSON.stringify(file);
@@ -159,28 +164,8 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
           }
           continue;
         }
-        if (!meta.finishedAt && meta.status === 'running' && now - Date.parse(meta.startedAt) >= 60000) {
-          const proc = procs.find(item => item.kind === 'codex' && item.runId === runId);
-          const pid = meta.pid ?? proc?.pid;
-          const owner = pid === undefined ? undefined : { pid, pgid: pid, startedAt: meta.processStartedAt ?? proc?.startedAt,
-            childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups };
-          const identity = owner ? await codexOwnership(owner, options.isProcessAlive) : 'gone';
-          if (!['owned', 'unknown'].includes(identity)) {
-            const reclaimed = owner ? await reclaimCodexOwner(owner, { root, runId }).catch(() => ({ reclaimed: false, owner: identity, reason: undefined })) : { reclaimed: true, owner: 'gone', reason: undefined };
-            if (!reclaimed.reclaimed) {
-              const last = watch.codexLostFailures?.[runId];
-              if (!last || now - Date.parse(last) >= 10 * 60000) {
-                await appendLedger(root, { runId, action: 'codex:lost', status: 'fail', evidence: { reason: 'group-alive' } });
-                (watch.codexLostFailures ??= {})[runId] = at;
-              }
-              continue;
-            }
-            const completed = identity === 'gone' && (await result(root, runId)).turnCompleted;
-            meta = await finishRun(root, runId, { status: completed ? 'ok' : 'lost', exit: null, reason: reclaimed.reason,
-              ...(completed ? { supervisorLost: true } : {}) });
-          }
-        }
         if (meta.finishedAt) {
+          delete watch.codexLostFailures?.[runId];
           await emit({ kind: 'codex-done', dedupeKey: `codex-done:${runId}`, runId, codexRunId: runId, taskId: meta.taskId,
             codexKind: meta.kind, codexStatus: meta.status, exit: meta.exit, threadId: meta.threadId, ...(meta.supervisorLost ? { supervisorLost: true } : {}), resultDir: resultDir(root, runId) });
           watch.codexEmitted = [...(watch.codexEmitted ?? []), runId].slice(-50);
@@ -227,7 +212,7 @@ export async function detectRecovery(root: string, sessionStartedAt: string): Pr
   });
 }
 
-const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover', 'codex-done']);
+const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover', 'codex-done', 'memory-pressure', 'memory-critical', 'memory-recovered']);
 export async function pendingDecisions(root: string): Promise<InboxRecord[]> {
   const file = await readJson<WatcherFile>(harnessPath(root, 'harness-watcher.json'), {});
   const decided = new Set(file.watch?.decided ?? []);
@@ -279,4 +264,103 @@ export async function logDeferredDecision(root: string, records: InboxRecord[], 
     watch.deferredLogged = [...logged, ...fresh.map(record => record.id)];
     await atomicWrite(path, JSON.stringify(file, null, 2) + '\n');
   });
+}
+
+// Only collect candidates while holding the watcher lock. Process-tree waits and meta
+// finalization must not block inbox decisions or judgment writers.
+async function recoverLostRuns(root: string, now: number, options: TickOptions) {
+  const path = harnessPath(root, 'harness-watcher.json');
+  const candidates = await withFileLock(path, async () => {
+    let names: string[] = [];
+    try { names = await readdir(harnessPath(root, 'codex')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    return names.filter(name => /^[A-Za-z0-9_-]+$/u.test(name));
+  });
+  const procs = await listProcs(root);
+  for (const runId of candidates) {
+    try { if (!(await stat(resultDir(root, runId))).isDirectory()) continue; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    // Serialize recovery for this run, independently of the watcher file.
+    await withFileLock(harnessPath(root, `codex/${runId}/recovery`), async () => {
+      let meta = await readMeta(root, runId);
+      if (!meta || meta.finishedAt || meta.status !== 'running' || now - Date.parse(meta.startedAt) < 60000) return;
+          const proc = procs.find(item => item.kind === 'codex' && item.runId === runId);
+          const pid = meta.pid ?? proc?.pid;
+          const owner = pid === undefined ? undefined : { pid, pgid: pid, startedAt: meta.processStartedAt ?? proc?.startedAt,
+            childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups };
+          const identity = owner ? await codexOwnership(owner, options.isProcessAlive) : 'gone';
+          if (!['owned', 'unknown'].includes(identity)) {
+            const reclaimed = owner ? await reclaimCodexOwner(owner, { root, runId }).catch(() => ({ reclaimed: false, owner: identity, reason: undefined })) : { reclaimed: true, owner: 'gone', reason: undefined };
+            if (!reclaimed.reclaimed) {
+              await withFileLock(path, async () => {
+                const file = await readJson<WatcherFile>(path, {});
+                const watch = file.watch ??= emptyWatch(new Date(now).toISOString());
+                const last = watch.codexLostFailures?.[runId];
+                if (!last || now - Date.parse(last) >= 10 * 60000) {
+                  await appendLedger(root, { runId, action: 'codex:lost', status: 'fail', evidence: { reason: 'group-alive' } });
+                  (watch.codexLostFailures ??= {})[runId] = new Date(now).toISOString();
+                  await atomicWrite(path, JSON.stringify(file, null, 2) + '\n');
+                }
+              });
+              return;
+            }
+            const completed = identity === 'gone' && !('skippedGroups' in reclaimed && reclaimed.skippedGroups.length) && (await result(root, runId)).turnCompleted;
+            meta = await finishRun(root, runId, { status: completed ? 'ok' : 'lost', exit: null, reason: reclaimed.reason ?? ('skippedGroups' in reclaimed && reclaimed.skippedGroups.length ? 'residual' : undefined),
+              ...(completed ? { supervisorLost: true } : {}) });
+          }
+    });
+  }
+}
+function emptyWatch(at: string): WatchState {
+  return { judgment: { observed: { hash: null, since: at } }, emittedKeys: [], decided: [], childTimeouts: 0 };
+}
+
+export async function memoryStatus(root: string) {
+  const file = await readJson<WatcherFile>(harnessPath(root, 'harness-watcher.json'), {});
+  return { sample: await sampleMemory((await loadConfig(root)).cleanup.swapWarnGB), memory: file.watch?.memory };
+}
+export async function memoryTick(root: string, options: { now?: number; sample?: () => Promise<MemorySample | undefined> } = {}) {
+  const config = await loadConfig(root);
+  const now = options.now ?? Date.now(), sample = await (options.sample ? options.sample() : sampleMemory(config.cleanup.swapWarnGB));
+  const emitted: InboxRecord[] = [];
+  await withFileLock(harnessPath(root, 'harness-watcher.json'), async () => {
+    const path = harnessPath(root, 'harness-watcher.json'), file = await readJson<WatcherFile>(path, {});
+    const watch = file.watch ??= emptyWatch(new Date(now).toISOString());
+    if (!sample) {
+      if (!watch.memorySampleFailed) await appendLedger(root, { runId: 'memory', action: 'memory:sample', status: 'fail' });
+      watch.memorySampleFailed = true;
+    } else {
+      const decision = judgeMemory(watch.memory, sample, config.cleanup.swapWarnGB, now);
+      watch.memory = decision.watch;
+      for (const entry of decision.events) {
+        const { record, created } = await addInboxOnce(root, entry);
+        await queueInbox(root, record.id); if (created) emitted.push(record);
+      }
+    }
+    await atomicWrite(path, JSON.stringify(file, null, 2) + '\n');
+  });
+  await reportUnregistered(root, config.cleanup.processes.killPatterns, now);
+  return emitted;
+}
+// An orphan command match is diagnostic evidence, never ownership or kill authority.
+export async function reportUnregistered(root: string, patterns: string[], now = Date.now(), run: () => Promise<{ stdout: string }> = () => promisify(execFile)('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,command='], { timeout: 1000 })) {
+  const registered = new Set((await listProcs(root)).map(p => p.pgid));
+  const residual = await readJson<Record<string, { groups: number[] }>>(harnessPath(root, 'harness-tool-residual.json'), {});
+  const groups = new Set(Object.values(residual).flatMap(v => v.groups));
+  try {
+    const { stdout } = await run();
+    const found = stdout.split('\n').flatMap(line => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+      if (!match || registered.has(Number(match[3])) || Number(match[1]) === process.pid) return [];
+      return groups.has(Number(match[3])) || Number(match[2]) === 1 && patterns.some(p => match[4].includes(p))
+        ? [{ pid: Number(match[1]), pgid: Number(match[3]), cmd: redact(match[4]).slice(0, 200) }] : [];
+    });
+    if (!found.length) return;
+    const path = harnessPath(root, 'harness-residual-report.json');
+    await withFileLock(path, async () => {
+      const previous = await readJson<{ at?: number }>(path, {});
+      if (previous.at !== undefined && now - previous.at < 600000) return;
+      await appendLedger(root, { runId: 'watchdog', action: 'memory:residual', status: 'skip', evidence: { reportOnly: true, processes: found } });
+      await atomicWrite(path, JSON.stringify({ at: now }) + '\n');
+    });
+  } catch { /* No process visibility means no residual claim. */ }
 }

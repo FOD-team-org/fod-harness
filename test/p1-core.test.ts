@@ -43,7 +43,13 @@ it.each(Object.entries(graph).flatMap(([from, next]) => next.map(to => [from, to
   if (from === 'CLEANUP' && to === 'PICK') await setTask(root, t.id, { status: 'done' });
   const result = await transitionState(root, to, { taskId: t.id, commit: 'sha1', system: from === 'WAIT_JUDGMENT' });
   expect(result.state).toBe(to); expect(result.autoTurns).toBe(0); expect(result.enteredAt).toBeTruthy();
-  expect((await readLedger(root)).at(-1)).toMatchObject({ action: `state:${from}→${to}`, status: 'ok' });
+  expect((await readLedger(root)).filter(entry => entry.action.startsWith('state:')).at(-1)).toMatchObject({ action: `state:${from}→${to}`, status: 'ok' });
+  if (to.startsWith('WAIT_') || ['DONE_ALL', 'CLEANUP_FAILED'].includes(to)) {
+    const entries = await readLedger(root);
+    const stateIndex = entries.findLastIndex(entry => entry.action === `state:${from}→${to}`);
+    const notifyIndex = entries.findLastIndex(entry => entry.action === `notify:state:${to}`);
+    expect(notifyIndex).toBeGreaterThan(stateIndex);
+  }
 });
 it('IDLE 무백로그 planning, 일반 paused, 그래프 우회와 task 교체를 거부한다', async () => {
   const root = await project(); await expect(transitionState(root, 'PLANNING')).rejects.toThrow('백로그');

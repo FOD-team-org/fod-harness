@@ -1,10 +1,11 @@
-// Provider event 경계만 mock하고 판단·회수·상태·백로그는 실제 임시 프로젝트에서 검증한다.
+// Provider event와 회수 실패 경계를 mock하고 판단·상태·백로그는 실제 임시 프로젝트에서 검증한다.
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { runProcess, childEnv, groupAlive, reclaimOwnedGroup, type ProcessResult, type RunOptions } from '../src/provider/runner.ts';
 import { runTurn } from '../src/provider/turn.ts';
 import { processStartedAt } from '../src/core/process-time.ts';
+import * as cleanup from '../src/core/cleanup.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState } from '../src/core/state.ts';
 import { readJudgment } from '../src/core/judgment.ts';
@@ -54,6 +55,7 @@ async function activeTask() {
   return { root, task };
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.resetAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -103,7 +105,11 @@ it('M8·M4: 훅 회수 연속 실패는 CLEANUP_FAILED 다음 paused(cleanup)·�
   const { root, task } = await activeTask();
   const record = { pid: 987654, pgid: 987654, startedAt: 'Thu Sep 24 00:00:00 2026', runId: 'worker-run', kind: 'worker', taskId: task.id };
   await registerProc(root, record); vi.mocked(groupAlive).mockReturnValue(true);
-  vi.mocked(processStartedAt).mockResolvedValue(record.startedAt); vi.mocked(reclaimOwnedGroup).mockResolvedValue(false);
+  vi.mocked(processStartedAt).mockResolvedValue(record.startedAt);
+  const runCleanup = vi.spyOn(cleanup, 'runCleanup').mockResolvedValue({
+    runId: 'cleanup-failure', ok: false, dryRun: false, scope: 'processes', errors: [],
+    processes: { ok: false, classified: [], reclaimed: [], protected: [], unverified: [], residual: [record], stale: [], planned: [] },
+  });
   emulate(deniedEvents); await runTurn('진행', options(root));
   const firstItems = (await readJudgment(root)).items;
   expect(firstItems).toHaveLength(1);
@@ -117,6 +123,13 @@ it('M8·M4: 훅 회수 연속 실패는 CLEANUP_FAILED 다음 paused(cleanup)·�
   expect(items.find(item => item.title === `정리 실패: 잔존 프로세스 ${record.pid}`)).toMatchObject({
     blocks: task.id, options: ['사용자가 정리했음 → PICK', '보류'],
   });
-  expect(await listProcs(root)).toEqual([record]); expect(reclaimOwnedGroup).toHaveBeenCalledTimes(2);
+  expect(await listProcs(root)).toEqual([record]);
+  // task 회수 2회 뒤 paused(cleanup) 진입 시 일반 정리도 1회 수행한다.
+  expect(runCleanup.mock.calls).toEqual([
+    [root, { scope: 'processes', taskId: task.id }],
+    [root, { scope: 'processes', taskId: task.id }],
+    [root, { scope: 'processes' }],
+  ]);
+  expect(reclaimOwnedGroup).not.toHaveBeenCalled();
   expect(await getTask(root, task.id)).toMatchObject({ worktree: 'wt-preserved', review: { commit: 'review-sha', high: 0 } });
 });

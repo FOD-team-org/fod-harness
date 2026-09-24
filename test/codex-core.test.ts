@@ -1,3 +1,4 @@
+import * as ownership from '../src/core/process-identity.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, symlink, writeFile, readdir, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,7 +25,7 @@ import * as identity from '../src/core/process-time.ts';
 import * as codexReclaim from '../src/core/codex-reclaim.ts';
 import { registerProc } from '../src/core/procs.ts';
 import { parseProcessTree } from '../src/core/proc-tree.ts';
-import { writeMeta } from '../src/core/codex-record.ts';
+import { writeMeta, finishRun } from '../src/core/codex-record.ts';
 import { isProcessAlive } from '../src/core/lock.ts';
 import { reclaimTask } from '../src/core/reclaim.ts';
 import { addJudgment } from '../src/core/judgment.ts';
@@ -384,7 +385,9 @@ it('정상 종료 뒤 남긴 background 도구 그룹을 표본에 기록하고 
   const run = await launch(root); const tool = await detachedPid(root);
   const meta = await finished(root, run.runId, 41000);
   expect(meta).toMatchObject({ status: 'ok', exit: 0 }); expect(meta.error).toBeUndefined();
-  expect(meta.toolGroups).toContainEqual({ pgid: tool, pid: tool, startedAt: expect.any(String) }); expect(meta.childPid).toEqual(expect.any(Number));
+  expect(meta.toolGroups).toEqual(expect.arrayContaining([expect.objectContaining({
+    pgid: tool, pid: tool, startedAt: expect.any(String), observedAt: expect.any(String),
+  })])); expect(meta.childPid).toEqual(expect.any(Number));
   expect(meta.childStartedAt).toEqual(expect.any(String)); expect(isProcessAlive(tool)).toBe(false);
 }, 45000);
 
@@ -431,4 +434,55 @@ it.each(['available', 'unavailable', 'already-real'] as const)('감독 시작 �
     expect((await slotsStatus()).codex).toMatchObject({ runId, startedAt: expected });
   } finally { await running; }
   expect(await readMeta(root, runId)).toMatchObject({ status: 'ok', exit: 0 });
+});
+
+it('P4 R4: orphan status는 meta 자식 신원으로 slots와 동일한 alive를 표시', async () => {
+  const { root } = await setup(); const startedAt = '2026-09-24T00:00:00Z';
+  const cfg = await configs.loadConfig(root);
+  await writeMeta(root, { runId: 'orphan-status', kind: 'task', cwd: root, sandbox: 'workspace-write', model: 'fake', effort: 'xhigh', workerModel: 'fake', workerEffort: 'xhigh', command: ['fake'], startedAt, timeoutMinutes: 90, state: 'IMPLEMENT', status: 'running', pid: 100001, processStartedAt: startedAt, childPid: 100002, childStartedAt: startedAt });
+  await registerProc(root, { pid: 100001, pgid: 100001, runId: 'orphan-status', kind: 'codex', startedAt });
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === 100002);
+  vi.spyOn(runner, 'groupAlive').mockImplementation(pid => pid === 100001);
+  vi.spyOn(identity, 'processStartedAt').mockResolvedValue(startedAt); vi.spyOn(identity, 'processGroup').mockResolvedValue(100001);
+  expect(await status(root, 'orphan-status')).toMatchObject({ alive: true });
+});
+it('P4 N11: 살아 있는 가짜 감독 cancel 종료 원장 정확히 1건', async () => {
+  const { root } = await setup(); vi.stubEnv('FAKE_CODEX_SLEEP_MS', '60000');
+  const run = await launch(root);
+  const deadline = Date.now() + 3000;
+  while (!(await readMeta(root, run.runId))?.childPid && Date.now() < deadline) await delay(20);
+  expect((await readMeta(root, run.runId))?.processStartedAt).not.toMatch(/^spawn:/u);
+  await cancel(root, run.runId);
+  const meta = await readMeta(root, run.runId); expect(meta?.status).toBe('cancelled');
+  await Promise.all([finishRun(root, run.runId, { status: 'lost' }), finishRun(root, run.runId, { status: 'lost' })]);
+  expect((await readLedger(root)).filter(e => e.runId === run.runId && e.action === 'codex:task' && e.status !== 'pre')).toHaveLength(1);
+}, 20000);
+it('P4 R5: 사용자 Bash timeout보다 짧게 실제 wait 상한 자동 하향', () => {
+  expect(waitLimitMinutes(90, 45, 8, { BASH_DEFAULT_TIMEOUT_MS: '120000' })).toBe(1.8);
+  expect(waitLimitMinutes(90, 45, 8, {})).toBe(8);
+});
+it('P4: paused(memory)는 새 위임 시작 거부', async () => {
+  const { root, task } = await setup(); await configs.setConfig(root, 'notify.channels', '["ledger"]');
+  await updateState(root, { state: 'paused(memory)' });
+  await expect(startCodex(root, 'task', { spec: 'spec.md', taskId: task.id })).rejects.toThrow('메모리 회복');
+});
+
+it('P4 N11: 감독 TERM 마감 확인 후 CLI가 같은 트리를 재회수하지 않는다', async () => {
+  const { root } = await setup(); const runId = 'term-handshake', startedAt = new Date().toISOString();
+  await writeMeta(root, { runId, kind: 'research', cwd: root, sandbox: 'read-only', model: 'fake', effort: 'xhigh', workerModel: 'fake', workerEffort: 'xhigh', command: ['fake'], startedAt, timeoutMinutes: 90, state: 'RESEARCH', status: 'running', pid: 100001, processStartedAt: startedAt });
+  await registerProc(root, { pid: 100001, pgid: 100001, startedAt, runId, kind: 'codex' });
+  await writeFile(join(root, '.pi/harness-watcher.json'), JSON.stringify({ watch: { codexLostFailures: { [runId]: startedAt } } }));
+  vi.spyOn(ownership, 'codexOwnership').mockResolvedValue('owned');
+  const originalKill = process.kill; let finishing: Promise<unknown> | undefined;
+  const signal = vi.spyOn(process, 'kill').mockImplementation((pid, name) => {
+    if (pid === 100001 && name === 'SIGTERM') { finishing = finishRun(root, runId, { status: 'cancelled', exit: null }); return true; }
+    return originalKill(pid, name);
+  });
+  const reclaim = vi.spyOn(codexReclaim, 'reclaimCodexOwner');
+  await cancel(root, runId); await finishing;
+  expect(signal).toHaveBeenCalledWith(100001, 'SIGTERM'); expect(reclaim).not.toHaveBeenCalled();
+  await Promise.all([finishRun(root, runId, { status: 'lost' }), finishRun(root, runId, { status: 'lost' })]);
+  expect((await readMeta(root, runId))?.status).toBe('cancelled');
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-watcher.json'), 'utf8')).watch.codexLostFailures).toEqual({});
+  expect((await readLedger(root)).filter(e => e.runId === runId && e.action === 'codex:research')).toHaveLength(1);
 });

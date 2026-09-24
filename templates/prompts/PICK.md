@@ -5,4 +5,4 @@
 끝내는 조건: `fodh pick`의 결과를 확인했다. WAIT_*·DONE_ALL이면 자동으로 진행하지 않는다.
 다음 fodh 명령: PICK 상태에서 `fodh pick`; 선택된 작업은 `fodh backlog get {{taskId}}`와 SPEC 지시를 따른다. 선택·대기 판정을 직접 우회하지 않는다.
 
-WAIT_RESOURCE에서 메모리·예산이 회복됐다는 외부 증거를 확인한 경우에만 `fodh state transition PICK`으로 대기 원인을 해제하고 `fodh pick`을 실행한다. P4 전에는 자동 자원 측정을 하지 않는다.
+WAIT_RESOURCE에서 메모리·예산이 회복됐다는 외부 증거를 확인한 경우에만 `fodh state transition PICK`으로 대기 원인을 해제하고 `fodh pick`을 실행한다. `fodh memory status`의 워치독 표본을 확인한다. paused(memory)는 회복 인박스가 PICK으로 복귀시킨다. 예산 제한 강제는 아직 범위 밖이다.

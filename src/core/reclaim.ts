@@ -1,52 +1,23 @@
-import { readMeta, finishRun } from './codex-record.ts';
-import { appendLedger } from './ledger.ts';
+import { runCleanup, protectedProcessGroups, cleanupStaleProcess } from './cleanup.ts';
 import { cancel } from './codex.ts';
-import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { getTask, setTask } from './backlog.ts';
 import { readJudgment } from './judgment.ts';
-import { listProcs, removeProc, type ProcRecord } from './procs.ts';
-import { processStartedAt } from './process-time.ts';
+import { listProcs, type ProcRecord } from './procs.ts';
 import { readState, transitionState, updateState, allowedTransition } from './state.ts';
 import { harnessPath, withFileLock } from './storage.ts';
-import { groupAlive, reclaimOwnedGroup } from '../provider/runner.ts';
 
 export async function cleanupReport(root: string, resetFailures = true) {
-  const records = await listProcs(root), removed: ProcRecord[] = [];
-  const protectedGroups = new Set(records.filter(record => record.kind === 'brain').map(record => record.pgid));
-  for (const record of records.filter(record => record.kind !== 'brain')) {
-    if (protectedGroups.has(record.pgid) || record.pgid !== record.pid || record.pid <= 1 || record.pid === process.pid) continue;
-    const observed = await processStartedAt(record.pid);
-    if (observed && !sameStart(observed, record.startedAt)) continue;
-    // 시작 시각을 읽을 수 없더라도 커널이 그룹 부재(ESRCH)를 확인한 경우만 삭제한다. 신호는 보내지 않는다.
-    if (!groupAlive(record.pgid)) { await removeProc(root, record.pid, record.runId); removed.push(record); }
+  const records = await listProcs(root), stale: ProcRecord[] = [];
+  const protectedGroups = await protectedProcessGroups(root, records);
+  for (const record of records) {
+    if (protectedGroups.has(record.pgid) || record.pid <= 1 || record.pid === process.pid) continue;
+    try { if (await cleanupStaleProcess(root, record) === 'stale') stale.push(record); }
+    catch { /* Keep the record residual when tool ownership or reclamation is unavailable. */ }
   }
-  const remaining = await listProcs(root), residual = remaining.filter(record => record.kind !== 'brain');
+  const remaining = await listProcs(root), residual = remaining.filter(record => !protectedGroups.has(record.pgid));
   if (!residual.length && resetFailures) await updateState(root, { cleanupFailures: 0 });
-  return { ok: residual.length === 0, remaining: residual.length, residual, removed,
-    protected: remaining.filter(record => record.kind === 'brain') };
-}
-function sameStart(observed: string, stored: string): boolean {
-  if (stored.startsWith('spawn:')) return false;
-  const a = Date.parse(observed), b = Date.parse(stored);
-  return Number.isFinite(a) && Number.isFinite(b) ? Math.abs(a - b) <= 2000 : observed === stored;
-}
-async function reclaimRecord(root: string, record: ProcRecord): Promise<boolean> {
-  if (record.kind === 'codex') {
-    const meta = await readMeta(root, record.runId);
-    const result = await reclaimCodexOwner({ ...record, childPid: meta?.childPid, childStartedAt: meta?.childStartedAt, toolGroups: meta?.toolGroups }, { root, runId: record.runId });
-    if (result.reclaimed && result.reason) {
-      if (meta) await finishRun(root, record.runId, { status: result.owner === 'unverified' ? 'lost' : 'cancelled', exit: null, reason: result.reason });
-      else await appendLedger(root, { runId: record.runId, action: 'codex:reclaim', status: 'ok', evidence: { reason: result.reason } });
-    }
-    return result.reclaimed;
-  }
-  // runner의 핸들 없는 영속 레지스트리를 쓰므로 신호 전에 소유권을 새로 확인한다.
-  if (!Number.isSafeInteger(record.pgid) || record.pgid <= 1 || record.pgid !== record.pid || record.pid === process.pid) return false;
-  if (!groupAlive(record.pgid)) return true;
-  const observed = await processStartedAt(record.pid);
-  if (!observed || record.startedAt.startsWith('spawn:')) return false;
-  if (!sameStart(observed, record.startedAt)) return false;
-  return reclaimOwnedGroup(record.pgid);
+  return { ok: residual.length === 0, remaining: residual.length, residual, removed: stale, stale,
+    protected: remaining.filter(record => protectedGroups.has(record.pgid)) };
 }
 export async function reclaimTask(root: string, taskId: string, judgmentId: string, options: { suspended?: boolean } = {}) {
   return withFileLock(harnessPath(root, 'harness-reclaim'), async () => {
@@ -63,19 +34,14 @@ export async function reclaimTask(root: string, taskId: string, judgmentId: stri
       else await transitionState(root, 'RECLAIM', { taskId });
     }
     await updateState(root, { pendingReclaim: { taskId, judgmentId } });
-    const records = await listProcs(root);
-    const brainGroups = new Set(records.filter(record => record.kind === 'brain').map(record => record.pgid));
+    // RECLAIM explicitly cancels this task's delegation; general cleanup never does.
     let failed = false;
-    for (const record of records.filter(record => record.taskId === taskId && record.kind !== 'brain')) {
-      const reclaimed = !brainGroups.has(record.pgid) && await reclaimRecord(root, record).catch(() => false);
-      if (reclaimed) await removeProc(root, record.pid, record.runId);
-      else failed = true;
+    if (state.delegation?.taskId === taskId) {
+      try { await cancel(root, state.delegation.runId); } catch { failed = true; }
     }
-    if (!failed && state.delegation?.taskId === taskId) {
-      try { await cancel(root, state.delegation.runId); }
-      catch { failed = true; }
-    }
+    const report = await runCleanup(root, { scope: 'processes', taskId });
     const { residual } = await cleanupReport(root, false);
+    failed ||= !report.ok;
     if (failed || residual.length) {
       const failedState = await transitionState(root, 'CLEANUP_FAILED');
       return { error: '프로세스 회수 실패', judgment: judgmentId, reclaimed: false, next: failedState.state, residual };

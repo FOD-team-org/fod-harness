@@ -21,7 +21,7 @@ it('획득·다른 runId 해제 거부·갱신·소유자만 해제', async () =
   await releaseSlot('codex', 'b'); expect((await slotsStatus()).codex).toEqual(owner);
   await updateSlot('codex', 'a', { pid: process.pid, startedAt: owner.startedAt });
   await expect(updateSlot('codex', 'b', owner)).rejects.toThrow('소유권');
-  await releaseSlot('codex', 'a'); expect(await slotsStatus()).toEqual({ codex: null, claude: null, alive: { codex: false, claude: false } });
+  await releaseSlot('codex', 'a'); expect(await slotsStatus()).toEqual({ codex: null, heavy: null, claude: null, alive: { codex: false, heavy: false, claude: false } });
 });
 it('죽은 슬롯은 stale 원장을 남기고 회수한다', async () => {
   const { root, owner } = await setup();
@@ -77,4 +77,25 @@ it.each(['start', 'group'] as const)('죽은 리더의 자식 %s 조회 실패�
   expect(await slotOwnerAlive(orphan)).toBe(true);
   expect(await acquireSlot('codex', { ...owner, runId: 'replacement' })).toEqual({ acquired: false, owner: orphan });
   expect(await readLedger(owner.root)).toEqual([]);
+});
+
+it('P4 S3: spawn 때 childStartedAt이 누락되어도 unknown으로 슬롯 보존', async () => {
+  const { owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998 };
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === orphan.childPid);
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
+  await atomicWrite(slotsPath(), JSON.stringify({ codex: orphan, claude: null }));
+  expect(await slotOwnerAlive(orphan)).toBe(true);
+  expect(await acquireSlot('heavy', { ...owner, runId: 'heavy' })).toMatchObject({ acquired: false });
+});
+
+it.each([true, false])('N1: heavy CLI가 죽으면 자식 생존·kind 기록=%s와 무관하게 슬롯 해제', async stamped => {
+  const { owner } = await setup();
+  const heavy = { ...owner, ...(stamped ? { kind: 'heavy' as const } : {}), pid: 100001, childPid: 100002, childStartedAt: owner.startedAt };
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === 100002);
+  vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(owner.startedAt);
+  await atomicWrite(slotsPath(), JSON.stringify({ codex: null, heavy, claude: null }));
+  expect((await slotsStatus()).alive.heavy).toBe(false);
+  expect((await acquireSlot('codex', { ...owner, runId: 'next' })).acquired).toBe(true);
+  expect((await slotsStatus()).heavy).toBeNull();
+  expect(await readLedger(owner.root)).toContainEqual(expect.objectContaining({ action: 'slot:stale', evidence: { slot: 'heavy', owner: heavy } }));
 });

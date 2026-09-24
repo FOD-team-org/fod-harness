@@ -37,3 +37,14 @@ export async function resolveLedger(root: string, runId: string, action: string,
   }
   return appendLedger(root, { runId, action, status: status as 'ok' | 'fail', evidence: { resolvedBy: 'fodh', note } });
 }
+
+// Terminal run bookkeeping can be retried after meta publication without duplicates.
+export async function appendLedgerOnce(root: string, entry: LedgerEntry): Promise<void> {
+  const path = harnessPath(root, 'harness-ledger.jsonl');
+  await withFileLock(path, async () => {
+    const records = parseJsonLines<LedgerEntry>(await readText(path));
+    if (records.some(r => r.runId === entry.runId && r.action === entry.action && ['ok', 'fail'].includes(r.status))) return;
+    await mkdir(dirname(path), { recursive: true });
+    await appendFile(path, JSON.stringify({ ...entry, at: entry.at ?? new Date().toISOString() }) + '\n', { mode: 0o600 });
+  });
+}

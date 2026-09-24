@@ -7,7 +7,8 @@ import { loadConfig } from '../../src/core/config.ts';
 import { readState, updateState, transitionState, activeStates as active, doctorFresh } from '../../src/core/state.ts';
 import { listBacklog } from '../../src/core/backlog.ts';
 import { runPick } from '../../src/core/pick.ts';
-import { cleanupReport } from '../../src/core/reclaim.ts';
+import { runCleanup } from '../../src/core/cleanup.ts';
+import { notify, setNotifyContext } from '../../src/core/notify.ts';
 import { applyJudgments, readJudgment, JudgmentConflict } from '../../src/core/judgment.ts';
 import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
@@ -35,6 +36,8 @@ async function initialize(root: string): Promise<void> {
 }
 
 export default function orchestrator(pi: ExtensionAPI): void {
+  pi.on('session_start', async (_event, ctx) => { setNotifyContext(ctx.cwd, resumeContext(ctx)); });
+  pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {
     if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
     return { action: 'continue' };
@@ -105,14 +108,24 @@ export default function orchestrator(pi: ExtensionAPI): void {
     },
   });
   pi.registerCommand('cleanup', {
-    description: '프로세스 레지스트리 잔존 보고 (P4 전까지 정리 실행 없음)',
-    handler: async (_args, ctx) => { ctx.ui.notify(JSON.stringify(await cleanupReport(ctx.cwd)), 'info'); },
+    description: '프로세스·저장공간·워크트리 정리 (/cleanup dry 지원)',
+    handler: async (args, ctx) => {
+      if (args.trim() && !['dry', '--dry-run'].includes(args.trim())) throw new Error('/cleanup [dry|--dry-run]');
+      const result = await runCleanup(ctx.cwd, { scope: 'all', dryRun: !!args.trim() });
+      await notify(ctx.cwd, { key: `cleanup:${result.runId}`, level: result.ok ? 'info' : 'warning', title: '정리 결과',
+        body: JSON.stringify({ ok: result.ok, remaining: (result.processes?.residual.length ?? 0) + (result.processes?.unverified.length ?? 0), stale: result.processes?.stale.length ?? 0, protected: result.processes?.protected.length ?? 0, report: '.pi/cleanup-last.json' }) }, resumeContext(ctx));
+    },
   });
   pi.on('agent_end', async (event, ctx) => {
     const last = [...event.messages].reverse().find(message => message.role === 'assistant');
     if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
+    if (last?.role === 'assistant' && last.stopReason === 'error') {
+      const state = await updateState(ctx.cwd, current => ({ brainErrors: Number(current.brainErrors ?? 0) + 1 }));
+      if (Number(state.brainErrors) >= 3) await notify(ctx.cwd, { key: 'brain-errors', title: '두뇌 오류', level: 'error', body: '두뇌 오류가 3회 연속 발생했습니다. 상태와 원장을 확인하세요' }, resumeContext(ctx));
+      return;
+    }
+    if ((await readState(ctx.cwd)).brainErrors) await updateState(ctx.cwd, { brainErrors: 0 });
     if (ctx.hasUI === false) return;
-    if (last?.role === 'assistant' && last.stopReason === 'error') return;
     const text = last?.role === 'assistant' ? last.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : '';
     const tail = text.split('\n').map(line => line.trim()).filter(Boolean).slice(-3)
       .map(line => line.replace(/^[`<>]+|[`<>]+$/gu, '').trim());
@@ -213,14 +226,33 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         });
         if (matching.length) {
           for (const record of matching) {
-            if (record.supervisorLost) context.notify('감독 사망 뒤 추정한 성공 — 결과를 직접 확인', 'warning');
+            if (record.supervisorLost) await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, level: 'warning', title: '위임 완료', body: '감독 사망 뒤 추정한 성공 — 결과를 직접 확인' }, context);
             else if (['fail', 'timeout', 'lost'].includes(String(record.codexStatus))) {
-              context.notify(`Codex 위임 ${record.codexRunId ?? record.runId}: ${record.codexStatus} — 결과를 확인하세요`, 'warning');
+              await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, level: 'warning', title: '위임 실패', body: `Codex 위임 ${record.codexRunId ?? record.runId}: ${record.codexStatus} — 결과를 확인하세요` }, context);
             }
           }
           resumed = (await autoResume(pi, root, context, kind)).resumed === true;
           handled = true; // Keep the matching inbox available to buildPrompt / brain ack, also when busy.
         }
+      } else if (kind === 'memory-pressure') {
+        const report = await runCleanup(root, { scope: 'processes' });
+        await notify(root, { key: kind, level: 'warning', title: '메모리 경고', body: `스왑 ${batch[0].swapUsedGB} GB — 잔존 프로세스 ${report.processes?.reclaimed.length ?? 0}개 회수` }, context);
+        handled = true;
+      } else if (kind === 'memory-critical') {
+        const wasActive = active.has((await readState(root)).state);
+        if (wasActive) await transitionState(root, 'paused(memory)', { system: true });
+        await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}` }, context);
+        handled = true;
+      } else if (kind === 'memory-recovered') {
+        const state = await readState(root);
+        const recover = state.state === 'paused(memory)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'memory';
+        if (recover || state.lastPaused === 'memory') await updateState(root, { lastPaused: undefined });
+        if (recover) {
+          await transitionState(root, 'PICK');
+          resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+        }
+        await notify(root, { key: kind, level: 'info', title: '메모리 회복', body: '스왑 사용량이 회복 기준을 5분 동안 유지했습니다' }, context);
+        handled = true;
       } else if (kind === 'stalled') {
         const state = await readState(root);
         if (state.state === 'recovering' || state.userAborted) {

@@ -1,3 +1,7 @@
+import { runCleanup, type CleanupScope } from '../core/cleanup.ts';
+import { runVerify } from '../core/verify.ts';
+import { notify } from '../core/notify.ts';
+import { memoryStatus } from '../core/watcher.ts';
 import { resolveCliRoot } from './root.ts';
 import { startCodex, status as codexStatus, result as codexResult, cancel as cancelCodex, CodexError } from '../core/codex.ts';
 import { createWorktree, removeWorktree, listWorktrees } from '../core/worktree.ts';
@@ -22,6 +26,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
     root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
       base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
       unknown: { type: 'boolean' }, json: { type: 'boolean' }, system: { type: 'boolean' }, reclaim: { type: 'boolean' },
@@ -40,7 +45,15 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       return Number(value);
     };
     let result: unknown;
-    if (group === 'codex' && ['task', 'review', 'research'].includes(action)) {
+    if (group === 'cleanup' && action === 'run') { exact(0); result = await runCleanup(root, { scope: (values.scope ?? 'all') as CleanupScope, taskId: values.task, dryRun: values['dry-run'] }); }
+    else if (group === 'verify' && action === 'run') { exact(0); result = await runVerify(root, { heavy: values.heavy, cwd: values.cwd }); }
+    else if (group === 'memory' && action === 'status') { exact(0); result = await memoryStatus(root); }
+    else if (group === 'notify' && action === 'send') {
+      exact(0); const level = values.level ?? 'info';
+      if (!values.title || values.body === undefined || !['info', 'warning', 'error'].includes(level)) throw new Error('--title, --body 및 info|warning|error level이 필요합니다');
+      result = await notify(root, { key: `cli:${values.title}`, title: values.title, body: values.body, level: level as 'info' | 'warning' | 'error' });
+    }
+    else if (group === 'codex' && ['task', 'review', 'research'].includes(action)) {
       exact(0); if (!values.spec) throw new Error('--spec 인자가 필요합니다');
       result = await startCodex(root, action as 'task' | 'review' | 'research', { spec: values.spec, taskId: values.task,
         resume: values.resume, wait: values.wait, cwd: values.cwd, title: values.title });
@@ -152,6 +165,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     }
     else if (group === 'proc' && action === 'list') { exact(0); result = await listProcs(root); }
     else throw new Error('지원하지 않는 fodh 명령입니다.');
+    if (result && typeof result === 'object' && 'ok' in result && result.ok === false) process.exitCode = 1;
     process.stdout.write(JSON.stringify(safeValue(result === undefined ? { ok: true } : result)) + '\n');
   } catch (error) {
     process.stdout.write(JSON.stringify({ error: redact(error instanceof Error ? error.message : '하네스 명령 실행 실패'),
