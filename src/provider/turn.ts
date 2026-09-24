@@ -37,7 +37,7 @@ export async function buildPrompt(root: string, latest: string, runId: string): 
       + unknown.map(({ runId, action, at }) => JSON.stringify({ runId, action, at })).join('\n')
       + '\nfodh ledger resolve <runId> <action> ok|fail --evidence "증거 대조 결과" 로 각 항목을 닫아라.\n' : '';
   await deliverInbox(root, pending.map(item => item.id), runId);
-  return recovery + pending.map(item => `[인박스 ${item.id}] ${JSON.stringify(item)}`).join('\n') + (pending.length ? '\n\n' : '') + latest;
+  return recovery + pending.map(item => `[인박스 ${item.id}] ${JSON.stringify(item)}` + (item.kind === 'codex-done' ? item.resultDir ? `\nfodh codex result ${item.codexRunId ?? item.runId} 를 읽고 결과를 반영하라.` : '\n결과 없음 — 위임을 다시 시작하거나 fodh judgment add 로 판단을 등록하라.' : '')).join('\n') + (pending.length ? '\n\n' : '') + latest;
 }
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -67,7 +67,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
     const prompt = options.doctor ? latest : await buildPrompt(root, latest, runId);
     const sessionId = options.doctor ? randomUUID() : initial.sessionId ?? randomUUID();
     let resume = !options.doctor && !!initial.sessionId;
-    const env = { ...options.env ?? process.env, FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root };
+    const suppliedEnv = options.env ?? process.env;
+    const env = { ...suppliedEnv, BASH_DEFAULT_TIMEOUT_MS: suppliedEnv.BASH_DEFAULT_TIMEOUT_MS ?? '600000',
+      BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root };
     for (let attempt = 0; attempt < 2; attempt++) {
       const action = `brain:${attempt}`;
       await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });

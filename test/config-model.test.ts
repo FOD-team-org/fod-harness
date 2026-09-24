@@ -53,7 +53,7 @@ it.each([
   ['brain.rotateAtTokens', '0'], ['brain.doctorTtlHours', '24'],
   ['delegate.claude.subagentModel', 'opus'], ['delegate.codex.brainModel', 'custom-brain'],
   ['delegate.codex.brainEffort', 'low'], ['delegate.codex.workerModel', 'custom-worker'],
-  ['delegate.codex.workerEffort', 'medium'], ['delegate.codex.maxChildAgents', '0'],
+  ['delegate.codex.waitMinutes', '3'], ['delegate.codex.workerEffort', 'medium'], ['delegate.codex.maxChildAgents', '0'],
 ])('설정 변경 및 재로드: %s=%s', async (key, value) => {
   const root = await project();
   const written = await setConfig(root, key, value);
@@ -114,4 +114,23 @@ it('Claude autocompact 인자/settings 불간섭과 env 원본 그대로 전달'
   expect(childEnv(original)).toEqual({ ...original, PATH: join(packageRoot, 'bin') });
   expect(childEnv({ KEEP: 'keep' })).toEqual({ KEEP: 'keep', PATH: join(packageRoot, 'bin') });
   expect(await readFile('templates/claude-settings.json', 'utf8')).not.toMatch(/compact/i);
+});
+
+it('P3 delegate/worktrees 기본값은 config get에 모두 노출된다', async () => {
+  const root = await project();
+  expect(await getConfig(root, 'delegate')).toEqual({ claude: { subagentModel: 'opus', maxChildAgents: 1 },
+    codex: { command: 'codex', brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', sandbox: 'workspace-write', maxChildAgents: 1, timeoutMinutes: 90, waitMinutes: 8 },
+    route: { design: 'claude', default: 'codex' } });
+  expect(await getConfig(root, 'worktrees')).toEqual({ root: '..', prefix: 'wt-' });
+  expect(await getConfig(root, 'watch.childTimeoutMinutes')).toBe(90);
+});
+it.each([
+  ['delegate.codex.sandbox', 'danger-full-access', 'delegate.codex.sandbox는 workspace-write, read-only 중 하나여야 합니다'],
+  ['delegate.codex.waitMinutes', '0', '양의 정수'], ['delegate.codex.waitMinutes', '0.5', '양의 정수'],
+  ['delegate.codex.timeoutMinutes', '0', '양의 정수'], ['delegate.codex.timeoutMinutes', '0.1', '양의 정수'],
+  ['delegate.codex.command', '[]', '명령'], ['delegate.claude.maxChildAgents', '-1', '0 이상의 정수'],
+  ['delegate.route', '{"unknown":"codex"}', 'delegate.route'], ['delegate.route', '{"design":"other"}', 'delegate.route'],
+  ['worktrees.root', '/outside', '상대 경로'], ['worktrees.prefix', '../wt-', '[A-Za-z0-9_-]+'],
+])('P3 설정 %s 거부', async (key, value, message) => {
+  const root = await project(); await expect(setConfig(root, key, value)).rejects.toThrow(message);
 });

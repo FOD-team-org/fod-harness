@@ -7,11 +7,14 @@ export interface HarnessConfig {
     skipPermissions: boolean; maxTurnMinutes: number; doctorTtlHours: number; rotateAtTokens: number;
   };
   delegate: {
-    claude: { subagentModel: string };
+    claude: { subagentModel: string; maxChildAgents: number };
+    route: Record<string, 'codex' | 'claude'>;
     codex: {
+      command: string | string[]; sandbox: 'workspace-write' | 'read-only'; timeoutMinutes: number; waitMinutes: number;
       brainModel: string; brainEffort: string; workerModel: string; workerEffort: string; maxChildAgents: number;
     };
   };
+  worktrees: { root: string; prefix: string };
   watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
   judgment: { file: string };
   requiresApproval: string[];
@@ -39,7 +42,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   const watch = object(defaultValue(raw.watch, {}), 'watch');
   const watching = {
     stallMinutes: positive(defaultValue(watch.stallMinutes, 10), 'watch.stallMinutes', true),
-    childTimeoutMinutes: positive(defaultValue(watch.childTimeoutMinutes, 30), 'watch.childTimeoutMinutes', true),
+    childTimeoutMinutes: positive(defaultValue(watch.childTimeoutMinutes, 90), 'watch.childTimeoutMinutes', true),
     pollSeconds: positive(defaultValue(watch.pollSeconds, 5), 'watch.pollSeconds'),
     freeTextStableSeconds: positive(defaultValue(watch.freeTextStableSeconds, 60), 'watch.freeTextStableSeconds'),
     stableSeconds: positive(defaultValue(watch.stableSeconds, 10), 'watch.stableSeconds'),
@@ -63,9 +66,26 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   const delegate = object(defaultValue(raw.delegate, {}), 'delegate');
   const claude = object(defaultValue(delegate.claude, {}), 'delegate.claude');
   const codex = object(defaultValue(delegate.codex, {}), 'delegate.codex');
-  const delegation = {
-    claude: { subagentModel: modelName(defaultValue(claude.subagentModel, 'opus'), 'delegate.claude.subagentModel') },
+  const route = { design: 'claude', default: 'codex', ...object(defaultValue(delegate.route, {}), 'delegate.route') };
+  for (const [key, value] of Object.entries(route)) {
+    if (!['design', 'non-design', 'docs', 'research', 'default'].includes(key) || typeof value !== 'string' || !['codex', 'claude'].includes(value)) {
+      throw new Error('delegate.route는 백로그 분류 또는 default 키와 codex, claude 값이어야 합니다');
+    }
+  }
+  const sandbox = defaultValue(codex.sandbox, 'workspace-write');
+  if (sandbox !== 'workspace-write' && sandbox !== 'read-only') throw new Error('delegate.codex.sandbox는 workspace-write, read-only 중 하나여야 합니다');
+  const wt = object(defaultValue(raw.worktrees, {}), 'worktrees');
+  const wtRoot = defaultValue(wt.root, '..'), prefix = defaultValue(wt.prefix, 'wt-');
+  if (typeof wtRoot !== 'string' || !wtRoot.trim() || isAbsolute(wtRoot) || /[\r\n\0]/u.test(wtRoot)) throw new Error('worktrees.root는 상대 경로여야 합니다');
+  if (typeof prefix !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(prefix)) throw new Error('worktrees.prefix는 [A-Za-z0-9_-]+ 이어야 합니다');
+  const delegation: HarnessConfig['delegate'] = {
+    route: route as HarnessConfig['delegate']['route'],
+    claude: { subagentModel: modelName(defaultValue(claude.subagentModel, 'opus'), 'delegate.claude.subagentModel'),
+      maxChildAgents: nonnegativeInteger(defaultValue(claude.maxChildAgents, 1), 'delegate.claude.maxChildAgents') },
     codex: {
+      command: command(codex.command, 'codex', 'delegate.codex.command'), sandbox,
+      waitMinutes: positive(defaultValue(codex.waitMinutes, 8), 'delegate.codex.waitMinutes', true),
+      timeoutMinutes: positive(defaultValue(codex.timeoutMinutes, 90), 'delegate.codex.timeoutMinutes', true),
       brainModel: modelName(defaultValue(codex.brainModel, 'gpt-6-astra'), 'delegate.codex.brainModel'),
       brainEffort: effort(defaultValue(codex.brainEffort, 'xhigh'), 'delegate.codex.brainEffort'),
       workerModel: modelName(defaultValue(codex.workerModel, 'gpt-6-sol'), 'delegate.codex.workerModel'),
@@ -90,7 +110,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
       model, skipPermissions, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
     },
-    delegate: delegation, watch: watching, judgment: { file }, requiresApproval,
+    delegate: delegation, worktrees: { root: wtRoot, prefix }, watch: watching, judgment: { file }, requiresApproval,
   };
 }
 

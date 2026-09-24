@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+import { supervise } from '../src/core/codex-supervisor.ts';
+await supervise(process.argv[2], process.argv[3]);

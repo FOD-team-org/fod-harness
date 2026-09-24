@@ -29,3 +29,14 @@ export async function removeProc(root: string, pid: number, runId?: string): Pro
     ) + '\n');
   });
 }
+
+export async function refreshProcStartedAt(root: string, pid: number, runId: string, expected: string, startedAt: string): Promise<void> {
+  const path = harnessPath(root, 'harness-procs.json');
+  await withFileLock(path, async () => {
+    const records = await listProcs(root);
+    const record = records.find(value => value.pid === pid && value.runId === runId && value.startedAt === expected);
+    if (!record) return;
+    record.startedAt = startedAt;
+    await atomicWrite(path, JSON.stringify(records, null, 2) + '\n');
+  });
+}

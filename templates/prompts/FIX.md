@@ -1,6 +1,9 @@
 # FIX
 
-지금 할 일: 작업 `{{taskId}}`의 실패 증거·검수 지적과 repair 횟수를 확인한다. P3 전까지는 수정 위임도 판단대기에 '위임 필요'로 등록하고 RECLAIM한다.
-산출물: 수정 요구와 위임 판단. 실제 수정이 제공되면 해당 커밋과 검증 결과를 새로 확보한다.
-끝내는 조건: 수정이 실제 반영되었으며 기존 검수의 커밋이 달라졌다면 통과를 재사용하지 않는다.
-다음 fodh 명령: 위임이 필요하면 `fodh judgment add --title "위임 필요: {{taskId}} 수정" --background "P3 수정 위임 경로 미구현" --options "위임 준비 후 재개|범위 재검토" --recommend "위임 준비 후 재개" --blocks {{taskId}} --reclaim`; 실제 수정이 완료되면 `fodh state transition VERIFY --task {{taskId}}`. 반드시 VERIFY→REVIEW로 돌아간다.
+지금 할 일: `fodh backlog get {{taskId}}`로 실패 증거·검수 지적과 repair 횟수·delegate를 확인하고 `docs/위임스펙/<날짜>-{{taskId}}-수정.md`에 수정 요구를 쓴다.
+Codex 구현 task는 `fodh codex task --task {{taskId}} --spec docs/위임스펙/<날짜>-{{taskId}}-수정.md --resume last`로 수정 위임한다. `task.codexThread`가 없으면 `--resume` 없이 새 스레드로 위임한다. 마지막 상태 줄 앞에 `대기: 위임 3f2c…`를 적고, 재개되면 `fodh codex result <runId>`를 확인한다.
+Claude 구현 task는 Claude Agent(`model: delegate.claude.subagentModel`)로 등록 워크트리 안에서 수정한다. 작업 경로·git/전체 테스트/전체 빌드/비밀값/산출물 금지와 동시 자식 한도를 프롬프트에 명시한다.
+산출물: 실제 수정과 관련 검증 결과. 대상 커밋이 달라지면 기존 검수 통과를 재사용하지 않는다.
+끝내는 조건: 수정이 실제 반영되었다. `fodh state transition VERIFY --task {{taskId}}`로 반드시 VERIFY→REVIEW에 복귀한다. repair 초과면 판단 등록 후 `fodh reclaim --task {{taskId}} --judgment <A번호>`.
+
+위임 대기 표지의 `3f2c…`는 예시다. 실제 반환된 runId 전체를 꺾쇠 없이 쓰고, 표지는 마지막 비어 있지 않은 3줄 안에 둔다.

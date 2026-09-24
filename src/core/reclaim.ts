@@ -1,3 +1,7 @@
+import { readMeta, finishRun } from './codex-record.ts';
+import { appendLedger } from './ledger.ts';
+import { cancel } from './codex.ts';
+import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { getTask, setTask } from './backlog.ts';
 import { readJudgment } from './judgment.ts';
 import { listProcs, removeProc, type ProcRecord } from './procs.ts';
@@ -26,7 +30,16 @@ function sameStart(observed: string, stored: string): boolean {
   const a = Date.parse(observed), b = Date.parse(stored);
   return Number.isFinite(a) && Number.isFinite(b) ? Math.abs(a - b) <= 2000 : observed === stored;
 }
-async function reclaimRecord(record: ProcRecord): Promise<boolean> {
+async function reclaimRecord(root: string, record: ProcRecord): Promise<boolean> {
+  if (record.kind === 'codex') {
+    const meta = await readMeta(root, record.runId);
+    const result = await reclaimCodexOwner({ ...record, childPid: meta?.childPid, childStartedAt: meta?.childStartedAt, toolGroups: meta?.toolGroups }, { root, runId: record.runId });
+    if (result.reclaimed && result.reason) {
+      if (meta) await finishRun(root, record.runId, { status: result.owner === 'unverified' ? 'lost' : 'cancelled', exit: null, reason: result.reason });
+      else await appendLedger(root, { runId: record.runId, action: 'codex:reclaim', status: 'ok', evidence: { reason: result.reason } });
+    }
+    return result.reclaimed;
+  }
   // runner의 핸들 없는 영속 레지스트리를 쓰므로 신호 전에 소유권을 새로 확인한다.
   if (!Number.isSafeInteger(record.pgid) || record.pgid <= 1 || record.pgid !== record.pid || record.pid === process.pid) return false;
   if (!groupAlive(record.pgid)) return true;
@@ -54,9 +67,13 @@ export async function reclaimTask(root: string, taskId: string, judgmentId: stri
     const brainGroups = new Set(records.filter(record => record.kind === 'brain').map(record => record.pgid));
     let failed = false;
     for (const record of records.filter(record => record.taskId === taskId && record.kind !== 'brain')) {
-      const reclaimed = !brainGroups.has(record.pgid) && await reclaimRecord(record).catch(() => false);
+      const reclaimed = !brainGroups.has(record.pgid) && await reclaimRecord(root, record).catch(() => false);
       if (reclaimed) await removeProc(root, record.pid, record.runId);
       else failed = true;
+    }
+    if (!failed && state.delegation?.taskId === taskId) {
+      try { await cancel(root, state.delegation.runId); }
+      catch { failed = true; }
     }
     const { residual } = await cleanupReport(root, false);
     if (failed || residual.length) {

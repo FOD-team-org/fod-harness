@@ -1,3 +1,12 @@
+import * as procTree from '../src/core/proc-tree.ts';
+import * as identity from '../src/core/process-time.ts';
+import * as lock from '../src/core/lock.ts';
+import { result } from '../src/core/codex-record.ts';
+import * as runner from '../src/provider/runner.ts';
+import * as codexReclaim from '../src/core/codex-reclaim.ts';
+import { readLedger } from '../src/core/ledger.ts';
+import { updateState, readState } from '../src/core/state.ts';
+import { writeMeta, readMeta, type CodexMeta } from '../src/core/codex-record.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,9 +22,9 @@ import { main } from '../src/cli/index.ts';
 const roots: string[] = [];
 const now = Date.parse('2026-09-24T00:00:00Z');
 const iso = (value: number) => new Date(value).toISOString();
-afterEach(async () => { vi.restoreAllMocks(); process.exitCode = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'fodh-watcher-')); roots.push(root);
+  const root = await mkdtemp(join(tmpdir(), 'fodh-watcher-')); roots.push(root); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   const { item } = await addJudgment(root, { title: '방식', background: '', options: ['진행', '보류'], recommend: '', blocks: '' });
   const path = join(root, 'docs/판단대기.md');
   const text = await readFile(path, 'utf8');
@@ -90,7 +99,7 @@ it('awaitingUser·지속 중복 방지·runId/상태 변경·runId 없는 재진
   }
 });
 it('brain/자식 한계·gone·종류별 중복·PID 재사용·레지스트리 보존', async () => {
-  const t = await setup(); const startedAt = iso(now - 31 * 60000);
+  const t = await setup(); await setConfig(t.root, 'watch.childTimeoutMinutes', '30'); const startedAt = iso(now - 31 * 60000);
   for (const [pid, kind] of [[201, 'brain'], [202, 'codex'], [203, 'worker']] as const) {
     await registerProc(t.root, { pid, pgid: pid, startedAt, runId: `r${pid}`, kind });
   }
@@ -138,7 +147,7 @@ it.each([
   await expect(loadConfig('/unused', { watch: { [key]: value } })).rejects.toThrow(`watch.${key}는 ${expected}여야 합니다`);
 });
 it('watch 기본값과 CLI tick/status/config get 출력', async () => {
-  const t = await setup(); const defaults = { stallMinutes: 10, childTimeoutMinutes: 30, pollSeconds: 5, stableSeconds: 10, freeTextStableSeconds: 60, tickSeconds: 30 };
+  const t = await setup(); const defaults = { stallMinutes: 10, childTimeoutMinutes: 90, pollSeconds: 5, stableSeconds: 10, freeTextStableSeconds: 60, tickSeconds: 30 };
   expect(await getConfig(t.root, 'watch')).toEqual(defaults);
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   await main(['config', 'get', 'watch'], t.root); expect(JSON.parse(String(output.mock.calls.at(-1)![0]))).toEqual(defaults);
@@ -160,4 +169,142 @@ it('recover는 applied 이후에도 같은 세션에서 두 번 기록하지 않
   const t = await setup(); await atomicWrite(harnessPath(t.root, 'harness-state.json'), JSON.stringify({ state: 'INTERVIEW' }));
   const records = await detectRecovery(t.root, 's'); await deliverInbox(t.root, records.map(r => r.id), 'r');
   await ackInbox(t.root, records.map(r => r.id), 'r'); expect(await detectRecovery(t.root, 's')).toEqual([]);
+});
+
+async function codexFixture(root: string, runId: string, patch: Partial<CodexMeta> = {}) {
+  await writeMeta(root, { runId, kind: 'research', cwd: root, sandbox: 'read-only', model: 'fake', effort: 'xhigh', workerModel: 'fake', workerEffort: 'xhigh', command: ['fake'], startedAt: iso(now), timeoutMinutes: 90, state: 'RESEARCH', status: 'running', ...patch });
+}
+it('P3 codex-done 완료 감지·ack/delivery 이후에도 중복 없음·최근 50개', async () => {
+  const { root } = await setup();
+  for (let i = 0; i < 52; i++) await codexFixture(root, `done-${i}`, { finishedAt: iso(now), status: 'ok', exit: 0, threadId: 'thread' });
+  const emitted = (await tick(root, { now })).emitted; expect(emitted).toHaveLength(52);
+  expect(emitted[0]).toMatchObject({ kind: 'codex-done', codexStatus: 'ok', threadId: 'thread', status: 'queued' });
+  await deliverInbox(root, emitted.map(item => item.id), 'brain'); await ackInbox(root, emitted.map(item => item.id), 'brain');
+  expect((await tick(root, { now: now + 1000 })).emitted).toEqual([]);
+  expect((await readJson<any>(harnessPath(root, 'harness-watcher.json'), {})).watch.codexEmitted).toHaveLength(50);
+});
+it('P3 lost는 60초 경계 이후 죽은 감독만 마감하고 위임 중 stalled 제외', async () => {
+  const { root } = await setup();
+  await codexFixture(root, 'lost');
+  await atomicWrite(harnessPath(root, 'harness-state.json'), JSON.stringify({ state: 'RESEARCH', savedAt: iso(now - 3600000), delegation: { runId: 'lost', kind: 'research', startedAt: iso(now) } }));
+  expect((await tick(root, { now: now + 59999 })).emitted).toEqual([]);
+  const completed = (await tick(root, { now: now + 60000 })).emitted;
+  expect(completed).toHaveLength(1); expect(completed[0]).toMatchObject({ kind: 'codex-done', codexStatus: 'lost' });
+  expect((await readMeta(root, 'lost'))?.status).toBe('lost');
+  expect((await tick(root, { now: now + 3600000 })).emitted).toEqual([]);
+});
+it('P3 살아 있는 감독 및 judgmentOnly는 lost를 만들지 않는다', async () => {
+  const { root } = await setup(); await codexFixture(root, 'alive');
+  await registerProc(root, { pid: 202, pgid: 202, kind: 'codex', runId: 'alive', startedAt: iso(now) });
+  const startedAt = vi.spyOn(identity, 'processStartedAt').mockResolvedValue(iso(now));
+  expect((await tick(root, { now: now + 60001, isProcessAlive: () => true })).emitted).toEqual([]);
+  expect(startedAt).toHaveBeenCalledWith(202);
+  expect((await tick(root, { now: now + 60001, judgmentOnly: true, isProcessAlive: () => false })).emitted).toEqual([]);
+  expect((await readMeta(root, 'alive'))?.status).toBe('running');
+});
+
+it('meta 없는 delegation은 60초 후 resultDir 없는 lost를 한 번 발행한다', async () => {
+  const { root } = await setup();
+  await updateState(root, { delegation: { runId: 'no-meta', kind: 'research', startedAt: iso(now) }, awaitingDelegation: true });
+  expect((await tick(root, { now: now + 59999 })).emitted).toEqual([]);
+  const events = (await tick(root, { now: now + 60000 })).emitted;
+  expect(events).toHaveLength(1); expect(events[0]).toMatchObject({ kind: 'codex-done', codexRunId: 'no-meta', codexStatus: 'lost' });
+  expect(events[0]).not.toHaveProperty('resultDir');
+  await deliverInbox(root, events.map(item => item.id), 'brain'); await ackInbox(root, events.map(item => item.id), 'brain');
+  expect((await tick(root, { now: now + 60001 })).emitted).toEqual([]);
+});
+it('죽은 감독 그룹 회수 실패는 첫 기록 후 10분 간격, 성공한 다음 tick에서만 lost', async () => {
+  const { root } = await setup(); await codexFixture(root, 'orphan', { pid: 99999999 });
+  await updateState(root, { delegation: { runId: 'orphan', kind: 'research', startedAt: iso(now) } });
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
+  const reap = vi.spyOn(codexReclaim, 'reclaimCodexOwner').mockResolvedValue({ reclaimed: false, owner: 'orphan', skippedGroups: [] });
+  for (const time of [60000, 61000, 62000]) {
+    expect((await tick(root, { now: now + time, isProcessAlive: () => false })).emitted).toEqual([]);
+    expect((await readMeta(root, 'orphan'))?.status).toBe('running');
+  }
+  const failures = (await readLedger(root)).filter(item => item.action === 'codex:lost');
+  expect(failures).toHaveLength(1); expect(failures[0]).toMatchObject({ status: 'fail', evidence: { reason: 'group-alive' } });
+  expect((await readJson<any>(harnessPath(root, 'harness-watcher.json'), {})).watch).not.toHaveProperty('codexLostFailed');
+  await tick(root, { now: now + 659999, isProcessAlive: () => false });
+  expect((await readLedger(root)).filter(item => item.action === 'codex:lost')).toHaveLength(1);
+  await tick(root, { now: now + 660000, isProcessAlive: () => false });
+  expect((await readLedger(root)).filter(item => item.action === 'codex:lost')).toHaveLength(2);
+  reap.mockResolvedValue({ reclaimed: true, owner: 'orphan', skippedGroups: [] });
+  // A completion event cannot turn a run into ok when a live orphan tree had to be reclaimed.
+  await writeFile(join(root, '.pi/codex/orphan/events.jsonl'), '{"type":"turn.completed"}\n');
+  expect((await tick(root, { now: now + 661000, isProcessAlive: () => false })).emitted[0]).toMatchObject({ codexStatus: 'lost' });
+});
+it('감독·그룹 부재와 turn.completed 증거는 supervisorLost ok로 복구한다', async () => {
+  const { root } = await setup(); await codexFixture(root, 'completed', { pid: 99999999 });
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(false);
+  vi.spyOn(procTree, 'processTree').mockResolvedValue([]);
+  await writeFile(join(root, '.pi/codex/completed/events.jsonl'), '{"type":"turn.completed","usage":{"output_tokens":1}}\n');
+  expect((await tick(root, { now: now + 60000, isProcessAlive: () => false })).emitted[0]).toMatchObject({ codexStatus: 'ok', exit: null, supervisorLost: true });
+  expect(await result(root, 'completed')).toMatchObject({ supervisorLost: true });
+  expect(await readMeta(root, 'completed')).toMatchObject({ status: 'ok', exit: null, supervisorLost: true });
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'codex:research', status: 'ok', evidence: expect.objectContaining({ supervisorLost: true }) }));
+});
+it('codex child-timeout은 해당 meta의 timeout+5 경계를 쓰고 meta 없으면 기본값을 쓴다', async () => {
+  const { root } = await setup(); await codexFixture(root, 'custom', { timeoutMinutes: 120 });
+  await registerProc(root, { pid: 301, pgid: 301, runId: 'custom', kind: 'codex', startedAt: iso(now) });
+  await registerProc(root, { pid: 302, pgid: 302, runId: 'no-meta', kind: 'codex', startedAt: iso(now) });
+  const startedAt = vi.spyOn(identity, 'processStartedAt').mockResolvedValue(iso(now));
+  const alive = () => true;
+  expect((await tick(root, { now: now + 90 * 60000, isProcessAlive: alive })).emitted).toEqual([]);
+  expect(startedAt).toHaveBeenCalledWith(301);
+  expect((await tick(root, { now: now + 90 * 60000 + 1, isProcessAlive: alive })).emitted.map(item => item.pid)).toEqual([302]);
+  expect((await tick(root, { now: now + 125 * 60000, isProcessAlive: alive })).emitted).toEqual([]);
+  expect((await tick(root, { now: now + 125 * 60000 + 1, isProcessAlive: alive })).emitted.map(item => item.pid)).toEqual([301]);
+});
+
+it('그룹이 없으면 죽은 pid 트리를 조회하지 않고 완료 증거로 복구한다', async () => {
+  const { root } = await setup(); await codexFixture(root, 'unverified', { pid: 99999999 });
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(false);
+  const tree = vi.spyOn(procTree, 'processTree').mockRejectedValue(new Error('must not query dead leader'));
+  const snapshot = vi.spyOn(procTree, 'processTreeSnapshot').mockRejectedValue(new Error('must not query dead leader'));
+  await writeFile(join(root, '.pi/codex/unverified/events.jsonl'), '{"type":"turn.completed"}\n');
+  expect((await tick(root, { now: now + 60000, isProcessAlive: () => false })).emitted[0]).toMatchObject({ codexStatus: 'ok', supervisorLost: true });
+  expect(tree).not.toHaveBeenCalled(); expect(snapshot).not.toHaveBeenCalled();
+});
+it.each(['foreign', 'unverified'] as const)('%s 감독은 워처가 신호 없이 lost로 마감하고 이유를 기록한다', async scenario => {
+  const { root } = await setup(); await codexFixture(root, 'identity', { pid: 99999999, processStartedAt: iso(now), childPid: 99999998, childStartedAt: iso(now), toolGroups: [{ pgid: 99999997, pid: 99999997, startedAt: iso(now) }] });
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || scenario === 'foreign' || pid === 99999998);
+  vi.spyOn(identity, 'processStartedAt').mockResolvedValue(iso(now - 3600000));
+  vi.spyOn(identity, 'processGroup').mockResolvedValue(99999997);
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
+  const reap = vi.spyOn(procTree, 'reclaimCodexTree');
+  expect((await tick(root, { now: now + 60000 })).emitted[0]).toMatchObject({ codexStatus: 'lost' });
+  expect(reap).not.toHaveBeenCalled();
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ evidence: expect.objectContaining({ reason: scenario === 'foreign' ? 'pid-reused' : 'group-unverified' }) }));
+});
+it.each(['legacy', 'matching', 'mismatch'] as const)('감독 그룹 부재 시 %s 도구 그룹은 신원을 확인한 경우만 회수한다', async scenario => {
+  const { root } = await setup(); await codexFixture(root, 'tools', { pid: 99999999, toolGroups: scenario === 'legacy' ? [99999998] : [{ pgid: 99999998, pid: 99999997, startedAt: iso(now) }] });
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === 99999997);
+  vi.spyOn(identity, 'processStartedAt').mockResolvedValue(iso(scenario === 'mismatch' ? now - 3600000 : now));
+  vi.spyOn(identity, 'processGroup').mockResolvedValue(99999998);
+  vi.spyOn(runner, 'groupAlive').mockImplementation(pgid => pgid === 99999998);
+  const reap = vi.spyOn(procTree, 'reclaimCodexTree').mockResolvedValue(true);
+  await writeFile(join(root, '.pi/codex/tools/events.jsonl'), '{"type":"turn.completed"}\n');
+  expect((await tick(root, { now: now + 60000 })).emitted[0]).toMatchObject({ codexStatus: 'ok', supervisorLost: true });
+  if (scenario === 'matching') expect(reap).toHaveBeenCalledWith(0, [], [99999998]);
+  else {
+    expect(reap).not.toHaveBeenCalled();
+    expect(await readLedger(root)).toContainEqual(expect.objectContaining({ evidence: { reason: 'tool-group-unverified', skippedGroups: [99999998] } }));
+  }
+});
+
+it.each(['start', 'group'] as const)('자식 %s ps 조회 실패 시 워처는 회수·lost 없이 보존한다', async failed => {
+  const { root } = await setup();
+  await codexFixture(root, 'unknown-child', { pid: 99999999, processStartedAt: iso(now), childPid: 99999998, childStartedAt: iso(now) });
+  await updateState(root, { delegation: { runId: 'unknown-child', kind: 'research', startedAt: iso(now) }, awaitingDelegation: true });
+  vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === 99999998);
+  vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
+  vi.spyOn(identity, 'processStartedAt').mockResolvedValue(failed === 'start' ? undefined : iso(now));
+  vi.spyOn(identity, 'processGroup').mockResolvedValue(failed === 'group' ? undefined : 99999999);
+  const reap = vi.spyOn(codexReclaim, 'reclaimCodexOwner');
+  expect((await tick(root, { now: now + 60000 })).emitted).toEqual([]);
+  expect(reap).not.toHaveBeenCalled();
+  expect(await readMeta(root, 'unknown-child')).toMatchObject({ status: 'running' });
+  expect((await readState(root)).delegation?.runId).toBe('unknown-child');
+  expect(await readLedger(root)).not.toContainEqual(expect.objectContaining({ action: 'codex:lost' }));
 });

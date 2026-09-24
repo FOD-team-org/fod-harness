@@ -1,3 +1,4 @@
+import { readMeta } from '../../src/core/codex-record.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -41,6 +42,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     let state = await readState(root);
     if (state.userAborted) return { skipped: 'user-aborted' };
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
+    if (state.awaitingDelegation) return { skipped: 'delegation' };
     if (!active.has(state.state)) {
       if (['WAIT_JUDGMENT', 'DONE_ALL', 'paused(cleanup)'].includes(state.state)) ctxLike.notify(`하네스 상태: ${state.state}`, 'info');
       return { skipped: 'inactive' };
@@ -60,11 +62,15 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       try { ctxLike.notify('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning'); } catch { /* disposed UI */ }
       return { skipped: 'send-failed' };
     }
+    const reminder = reason === 'agent_end' && state.delegation && state.delegationReminder !== state.delegation.runId
+      && !(await readMeta(root, state.delegation.runId))?.finishedAt ? state.delegation.runId : undefined;
+    if (reminder) content = `[위임 진행 중 ${reminder} — 결과를 기다리려면 턴을 \`대기: 위임 ${reminder}\` 로 끝내라]\n` + content;
     let beforeSend: Partial<HarnessState> = {};
     state = await updateState(root, current => {
-      beforeSend = { autoTurns: current.autoTurns,
+      beforeSend = { autoTurns: current.autoTurns, delegationReminder: current.delegationReminder,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
       return { autoTurns: Number(current.autoTurns ?? 0) + 1,
+        ...(reminder ? { delegationReminder: reminder } : {}),
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
     });
     try {

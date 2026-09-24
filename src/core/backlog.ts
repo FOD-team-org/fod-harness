@@ -5,6 +5,7 @@ import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './st
 
 export interface Task {
   id: string; title: string; category: string; depends: string[]; status: string; repair: number;
+  delegate?: 'codex' | 'claude'; codexThread?: string;
   judgment: string; worktree: string; notes: string;
   verify?: { ok?: boolean }; review?: { commit?: string; high?: number }; merge?: { commit?: string };
   docs?: { ok?: boolean }; cleanup?: { ok?: boolean }; spec?: { rev?: number };
@@ -26,6 +27,8 @@ export class BacklogError extends Error {
   constructor(message: string, missing?: string[]) { super(message); this.missing = missing; }
 }
 function validate(task: Task): void {
+  if (task.delegate !== undefined && !['codex', 'claude'].includes(task.delegate)) throw new Error('delegate는 codex, claude 중 하나여야 합니다');
+  if (task.codexThread !== undefined && (typeof task.codexThread !== 'string' || !task.codexThread.trim())) throw new Error('codexThread가 올바르지 않습니다');
   if (!/^T\d+$/u.test(task.id) || !task.title.trim()) throw new Error('task ID와 제목이 필요합니다');
   if (!['design', 'non-design', 'docs', 'research'].includes(task.category)) throw new Error('백로그 분류가 올바르지 않습니다');
   if (!/^(ready|doing|verify|review|fix|merge|done|blocked\(A\d+(?:-\d+)?\))$/u.test(task.status)) {

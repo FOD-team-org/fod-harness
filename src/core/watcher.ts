@@ -1,5 +1,8 @@
+import { readMeta, finishRun, resultDir, result } from './codex-record.ts';
+import { codexOwnership } from './process-identity.ts';
+import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { appendLedger } from './ledger.ts';
 import { redact } from '../provider/privacy.ts';
@@ -13,6 +16,8 @@ import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 export interface WatchState {
   lastTickAt?: string;
   judgment: { path?: string; observed: { hash: string | null; since: string }; lastEmitted?: string | null };
+  codexEmitted?: string[];
+  codexLostFailures?: Record<string, string>;
   emittedKeys: string[];
   decided: string[];
   deferredLogged?: string[];
@@ -116,7 +121,7 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
       const brainAlive = procs.some(proc => proc.kind === 'brain' && aliveByPid.get(proc.pid));
       const heartbeat = Math.max(...[state.lastEventAt, state.enteredAt, state.savedAt]
         .map(value => typeof value === 'string' ? Date.parse(value) : NaN).filter(Number.isFinite));
-      if (activeStates.has(state.state) && state.state !== 'recovering' && !state.userAborted && !brainAlive && state.awaitingUser !== true && Number.isFinite(heartbeat)
+      if (activeStates.has(state.state) && state.state !== 'recovering' && !state.userAborted && !state.delegation && !brainAlive && state.awaitingUser !== true && Number.isFinite(heartbeat)
         && now - heartbeat > config.watch.stallMinutes * 60000) {
         watch.stalledSince = new Date(heartbeat).toISOString();
         await emit({ kind: 'stalled', dedupeKey: `stalled:${JSON.stringify([state.state, state.runId ?? state.enteredAt, heartbeat])}`,
@@ -127,13 +132,59 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
       for (const proc of procs) {
         const alive = aliveByPid.get(proc.pid);
         const minutes = (now - Date.parse(proc.startedAt.replace(/^spawn:/u, ''))) / 60000;
-        const limit = proc.kind === 'brain' ? config.brain.maxTurnMinutes : config.watch.childTimeoutMinutes;
+        const codexMeta = proc.kind === 'codex' ? await readMeta(root, proc.runId) : undefined;
+        const limit = proc.kind === 'brain' ? config.brain.maxTurnMinutes : codexMeta ? codexMeta.timeoutMinutes + 5 : config.watch.childTimeoutMinutes;
         if (alive && !(minutes > limit)) continue;
         const kind = alive ? 'child-timeout' : 'child-gone';
         if (alive) watch.childTimeouts++;
         await emit({ kind, dedupeKey: `${kind}:${JSON.stringify([proc.pid, proc.startedAt, proc.kind])}`,
           pid: proc.pid, pgid: proc.pgid, runId: proc.runId, procKind: proc.kind,
           ...(alive ? { minutes } : {}) }, true);
+      }
+      const doneInbox = await listInbox(root);
+      const emittedRuns = new Set([...(watch.codexEmitted ?? []), ...doneInbox.filter(item => item.kind === 'codex-done').map(item => String(item.codexRunId ?? item.runId))]);
+      let directories: string[] = [];
+      try { directories = await readdir(harnessPath(root, 'codex')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (state.delegation && !directories.includes(state.delegation.runId)) directories.push(state.delegation.runId);
+      for (const runId of directories) {
+        if (!/^[A-Za-z0-9_-]+$/u.test(runId) || emittedRuns.has(runId)) continue;
+        let meta = await readMeta(root, runId);
+        if (!meta) {
+          const delegation = state.delegation;
+          if (delegation?.runId === runId && now - Date.parse(delegation.startedAt) >= 60000) {
+            await emit({ kind: 'codex-done', dedupeKey: `codex-done:${runId}`, runId, codexRunId: runId,
+              taskId: delegation.taskId, codexKind: delegation.kind, codexStatus: 'lost' });
+            watch.codexEmitted = [...(watch.codexEmitted ?? []), runId].slice(-50);
+          }
+          continue;
+        }
+        if (!meta.finishedAt && meta.status === 'running' && now - Date.parse(meta.startedAt) >= 60000) {
+          const proc = procs.find(item => item.kind === 'codex' && item.runId === runId);
+          const pid = meta.pid ?? proc?.pid;
+          const owner = pid === undefined ? undefined : { pid, pgid: pid, startedAt: meta.processStartedAt ?? proc?.startedAt,
+            childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups };
+          const identity = owner ? await codexOwnership(owner, options.isProcessAlive) : 'gone';
+          if (!['owned', 'unknown'].includes(identity)) {
+            const reclaimed = owner ? await reclaimCodexOwner(owner, { root, runId }).catch(() => ({ reclaimed: false, owner: identity, reason: undefined })) : { reclaimed: true, owner: 'gone', reason: undefined };
+            if (!reclaimed.reclaimed) {
+              const last = watch.codexLostFailures?.[runId];
+              if (!last || now - Date.parse(last) >= 10 * 60000) {
+                await appendLedger(root, { runId, action: 'codex:lost', status: 'fail', evidence: { reason: 'group-alive' } });
+                (watch.codexLostFailures ??= {})[runId] = at;
+              }
+              continue;
+            }
+            const completed = identity === 'gone' && (await result(root, runId)).turnCompleted;
+            meta = await finishRun(root, runId, { status: completed ? 'ok' : 'lost', exit: null, reason: reclaimed.reason,
+              ...(completed ? { supervisorLost: true } : {}) });
+          }
+        }
+        if (meta.finishedAt) {
+          await emit({ kind: 'codex-done', dedupeKey: `codex-done:${runId}`, runId, codexRunId: runId, taskId: meta.taskId,
+            codexKind: meta.kind, codexStatus: meta.status, exit: meta.exit, threadId: meta.threadId, ...(meta.supervisorLost ? { supervisorLost: true } : {}), resultDir: resultDir(root, runId) });
+          watch.codexEmitted = [...(watch.codexEmitted ?? []), runId].slice(-50);
+        }
       }
       const inbox = await listInbox(root);
       const applied = new Set(inbox.filter(record => record.status === 'applied').map(record => record.id));
@@ -176,7 +227,7 @@ export async function detectRecovery(root: string, sessionStartedAt: string): Pr
   });
 }
 
-const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover']);
+const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover', 'codex-done']);
 export async function pendingDecisions(root: string): Promise<InboxRecord[]> {
   const file = await readJson<WatcherFile>(harnessPath(root, 'harness-watcher.json'), {});
   const decided = new Set(file.watch?.decided ?? []);

@@ -7,6 +7,9 @@ import { appendLedger } from './ledger.ts';
 import { loadConfig } from './config.ts';
 
 export interface HarnessState {
+  delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string };
+  awaitingDelegation?: boolean; delegationReminder?: string;
+  worktrees?: { taskId: string; path: string; branch: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
   enteredAt?: string; autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
@@ -71,6 +74,9 @@ export function allowedTransition(from: string, to: string, system = false): boo
   if (isPaused(to)) return system;
   return (isPaused(from) ? ['recovering', 'PICK'] : transitionGraph[from] ?? []).includes(to);
 }
+export function transitionMessage(from: string, reason: string): string {
+  return `${reason}. 현재 상태 ${from}에서 가능한 전이: ${(isPaused(from) ? ['recovering', 'PICK'] : transitionGraph[from] ?? []).join(', ') || '없음'}`;
+}
 export class TransitionError extends Error {
   action?: string;
   constructor(message: string, action?: string) { super(message); this.action = action; }
@@ -84,13 +90,13 @@ export async function refreshJudgmentStatus(root: string): Promise<void> {
 }
 export async function transitionState(root: string, to: string, input: TransitionOptions | string = {}): Promise<HarnessState> {
   const options = typeof input === 'string' ? { taskId: input } : input;
-  if (!states.has(to) && !isPaused(to)) throw new Error('지원하지 않는 상태입니다');
+  if (!states.has(to) && !isPaused(to)) throw new TransitionError(transitionMessage((await readState(root)).state, '지원하지 않는 상태입니다'));
   return withFileLock(harnessPath(root, 'harness-transition'), async () => {
     let task: Task | undefined;
     const next = await updateState(root, async current => {
       const resume = options.resume && current.state === 'PICK' && taskStates.includes(to)
         && current.resumeTask?.taskId === options.taskId && current.resumeTask?.resumeState === to;
-      if (options.resume && !resume || !resume && !allowedTransition(current.state, to, options.system)) throw new Error('허용되지 않는 전이');
+      if (options.resume && !resume || !resume && !allowedTransition(current.state, to, options.system)) throw new TransitionError(transitionMessage(current.state, '허용되지 않는 전이'));
       if (current.state === 'WAIT_JUDGMENT') {
         if (!options.system && !options.judgmentApplied) {
           const { readJudgment } = await import('./judgment.ts');

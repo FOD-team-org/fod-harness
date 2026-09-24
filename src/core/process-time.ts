@@ -13,3 +13,13 @@ export async function processStartedAt(pid: number): Promise<string | undefined>
     return stdout.trim() || undefined;
   } catch { return undefined; }
 }
+
+export async function processGroup(pid: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync('/bin/ps', ['-p', String(pid), '-o', 'pgid='], {
+      timeout: 1000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+    });
+    const pgid = Number(stdout.trim());
+    return Number.isSafeInteger(pgid) && pgid > 1 ? pgid : undefined;
+  } catch { return undefined; }
+}

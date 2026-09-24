@@ -1,3 +1,7 @@
+import { resolveCliRoot } from './root.ts';
+import { startCodex, status as codexStatus, result as codexResult, cancel as cancelCodex, CodexError } from '../core/codex.ts';
+import { createWorktree, removeWorktree, listWorktrees } from '../core/worktree.ts';
+import { slotsStatus } from '../core/slots.ts';
 import { getConfig, setConfig, loadConfig } from '../core/config.ts';
 import { addTask, getTask, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
 import { runPick } from '../core/pick.ts';
@@ -12,10 +16,14 @@ import { readLedger, unknownEntries, resolveLedger } from '../core/ledger.ts';
 import { safeValue } from '../provider/privacy.ts';
 import { doctor } from './doctor.ts';
 import { redact } from '../provider/privacy.ts';
-export async function main(args = process.argv.slice(2), root = process.cwd()): Promise<void> {
+export async function main(args = process.argv.slice(2), root?: string): Promise<void> {
   let createdJudgment: string | undefined;
   try {
+    if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
+    root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
+      base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
       unknown: { type: 'boolean' }, json: { type: 'boolean' }, system: { type: 'boolean' }, reclaim: { type: 'boolean' },
       commit: { type: 'string' }, status: { type: 'string' }, depends: { type: 'string' }, category: { type: 'string' },
       judgment: { type: 'string' }, worktree: { type: 'string' },
@@ -32,7 +40,19 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
       return Number(value);
     };
     let result: unknown;
-    if (group === 'doctor' && !action) result = await doctor(root);
+    if (group === 'codex' && ['task', 'review', 'research'].includes(action)) {
+      exact(0); if (!values.spec) throw new Error('--spec 인자가 필요합니다');
+      result = await startCodex(root, action as 'task' | 'review' | 'research', { spec: values.spec, taskId: values.task,
+        resume: values.resume, wait: values.wait, cwd: values.cwd, title: values.title });
+    } else if (group === 'codex' && action === 'status') {
+      if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.'); result = await codexStatus(root, rest[0]);
+    } else if (group === 'codex' && action === 'result') { exact(1); result = await codexResult(root, rest[0]); }
+    else if (group === 'codex' && action === 'cancel') { exact(1); result = await cancelCodex(root, rest[0]); }
+    else if (group === 'slots' && action === 'status') { exact(0); result = await slotsStatus(); }
+    else if (group === 'worktree' && action === 'create') { exact(1); result = await createWorktree(root, rest[0], values.base); }
+    else if (group === 'worktree' && action === 'remove') { exact(1); result = await removeWorktree(root, rest[0], values.force); }
+    else if (group === 'worktree' && action === 'list') { exact(0); result = await listWorktrees(root); }
+    else if (group === 'doctor'  && !action) result = await doctor(root);
     else if (group === 'config' && action === 'get') {
       if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.');
       result = await getConfig(root, rest[0]);
@@ -67,6 +87,10 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
       }
       for (const key of ['title', 'category', 'status', 'judgment', 'worktree'] as const) {
         if (values[key] !== undefined) patch[key] = values[key];
+      }
+      if (values.delegate !== undefined) {
+        if (!['codex', 'claude'].includes(values.delegate)) throw new Error('delegate는 codex, claude 중 하나여야 합니다');
+        patch.delegate = values.delegate as 'codex' | 'claude';
       }
       if (values.depends !== undefined) patch.depends = values.depends.split(',').map(value => value.trim()).filter(Boolean);
 
@@ -131,6 +155,7 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
     process.stdout.write(JSON.stringify(safeValue(result === undefined ? { ok: true } : result)) + '\n');
   } catch (error) {
     process.stdout.write(JSON.stringify({ error: redact(error instanceof Error ? error.message : '하네스 명령 실행 실패'),
+      ...(error instanceof CodexError ? safeValue(error.details) : {}),
       ...(createdJudgment ? { judgment: createdJudgment } : {}),
       ...(error instanceof TransitionError && error.action ? { action: error.action } : {}),
       ...(error instanceof BacklogError && error.missing ? { missing: error.missing } : {}),

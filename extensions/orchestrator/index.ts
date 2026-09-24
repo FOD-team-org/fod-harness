@@ -1,3 +1,4 @@
+import { readMeta } from '../../src/core/codex-record.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { cleanupReport } from '../../src/core/reclaim.ts';
 import { applyJudgments, readJudgment, JudgmentConflict } from '../../src/core/judgment.ts';
 import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
-import { atomicWrite, withFileLock } from '../../src/core/storage.ts';
+import { atomicWrite, harnessPath, withFileLock } from '../../src/core/storage.ts';
 
 import { autoResume, resumeContext, send } from './resume.ts';
 import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
@@ -80,7 +81,10 @@ export default function orchestrator(pi: ExtensionAPI): void {
     description: '상태·미적용 인박스·미해결 원장·최근 한도 표시',
     handler: async (_args, ctx) => {
       const [state, inbox, unknown, watcher] = await Promise.all([readState(ctx.cwd), listInbox(ctx.cwd), unknownEntries(ctx.cwd), watcherStatus(ctx.cwd)]);
-      ctx.ui.notify(JSON.stringify({ state: state.state, task: state.taskId ?? null,
+      const delegationMeta = state.delegation ? await readMeta(ctx.cwd, state.delegation.runId) : undefined;
+      const delegation = state.delegation ? { ...state.delegation, status: delegationMeta?.status ?? 'unknown',
+        minutes: Math.max(0, (Date.now() - Date.parse(state.delegation.startedAt)) / 60000) } : null;
+      ctx.ui.notify(JSON.stringify({ delegation, state: state.state, task: state.taskId ?? null,
         inbox: inbox.filter(item => item.status !== 'applied'), unknown, watcher, rateLimit: state.rateLimitInfo ?? null }), 'info');
     },
   });
@@ -109,7 +113,25 @@ export default function orchestrator(pi: ExtensionAPI): void {
     if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
     if (ctx.hasUI === false) return;
     if (last?.role === 'assistant' && last.stopReason === 'error') return;
-    if (last?.role === 'assistant' && last.content?.some(block => block.type === 'text' && /^대기: 사용자[ \t]*$/mu.test(block.text))) {
+    const text = last?.role === 'assistant' ? last.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : '';
+    const tail = text.split('\n').map(line => line.trim()).filter(Boolean).slice(-3)
+      .map(line => line.replace(/^[`<>]+|[`<>]+$/gu, '').trim());
+    const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
+      .find(Boolean)?.replace(/[`<>]/gu, '');
+    const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
+    if (marker) {
+      const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {
+        const state = await readState(ctx.cwd);
+        const meta = state.delegation?.runId === marker ? await readMeta(ctx.cwd, marker) : undefined;
+        if (meta && !meta.finishedAt) {
+          await updateState(ctx.cwd, { awaitingDelegation: true, ...(awaitingUser ? { awaitingUser: true } : {}), autoTurns: 0 }); return true;
+        }
+        await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
+        await updateState(ctx.cwd, { awaitingDelegation: false }); return false;
+      });
+      if (waiting) return;
+    }
+    if (awaitingUser) {
       await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
     }
     if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
@@ -176,6 +198,28 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         } else {
           clearDecisionTimers(root); resolve = true;
           if (!applied.length && !handled) context.notify('판단대기 변경 감지 — 적용할 답 없음', 'info');
+        }
+      } else if (kind === 'codex-done') {
+        const matching: InboxRecord[] = [];
+        await withFileLock(harnessPath(root, 'harness-resume'), async () => {
+          for (const record of batch) {
+            const runId = record.codexRunId ?? record.runId;
+            const state = await readState(root);
+            if (state.delegation?.runId === runId) {
+              await updateState(root, { delegation: undefined, awaitingDelegation: false, autoTurns: 0 });
+              matching.push(record);
+            } else await resolveInbox(root, [record.id], 'orchestrator', 'codex-done:stale');
+          }
+        });
+        if (matching.length) {
+          for (const record of matching) {
+            if (record.supervisorLost) context.notify('감독 사망 뒤 추정한 성공 — 결과를 직접 확인', 'warning');
+            else if (['fail', 'timeout', 'lost'].includes(String(record.codexStatus))) {
+              context.notify(`Codex 위임 ${record.codexRunId ?? record.runId}: ${record.codexStatus} — 결과를 확인하세요`, 'warning');
+            }
+          }
+          resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+          handled = true; // Keep the matching inbox available to buildPrompt / brain ack, also when busy.
         }
       } else if (kind === 'stalled') {
         const state = await readState(root);

@@ -25,8 +25,8 @@ export async function atomicWrite(path: string, text: string, beforeRename?: () 
   } finally { await unlink(temporary).catch(() => undefined); }
 }
 
-export async function withFileLock<T>(path: string, action: () => Promise<T>): Promise<T> {
-  const release = await acquireLock(`${path}.lock`);
+export async function withFileLock<T>(path: string, action: () => Promise<T>, options: { waitMs?: number } = {}): Promise<T> {
+  const release = await acquireLock(`${path}.lock`, options);
   try { return await action(); } finally { await release(); }
 }
 

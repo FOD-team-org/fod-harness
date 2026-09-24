@@ -5,10 +5,11 @@ import { join, resolve } from 'node:path';
 import { runProcess, childEnv, type RunOptions, type ProcessResult } from '../src/provider/runner.ts';
 import { setConfig } from '../src/core/config.ts';
 import { streamClaude } from '../extensions/provider/stream.ts';
-import { runTurn } from '../src/provider/turn.ts';
+import { runTurn, buildPrompt } from '../src/provider/turn.ts';
 import { doctor } from '../src/cli/doctor.ts';
 import { readState, updateState } from '../src/core/state.ts';
 import { appendLedger, readLedger } from '../src/core/ledger.ts';
+import { addInbox } from '../src/core/inbox.ts';
 import { readJudgment } from '../src/core/judgment.ts';
 vi.mock('../src/provider/runner.ts', async original => ({
   ...await original<typeof import('../src/provider/runner.ts')>(), runProcess: vi.fn(),
@@ -150,4 +151,22 @@ it.each([
 ])('F8: 다른 도구 또는 다른 마커 차단으로 doctor를 통과시키지 않는다 (%#)', async denial => {
   const root = await project(); emulate([init, { ...done, permission_denials: [denial] }]);
   expect(await runTurn('doctor 시험', { root, doctor: true, env: environment(root) })).toMatchObject({ reason: 'error', classification: 'configError' });
+});
+
+it.each([undefined, '123456'])('두뇌 Bash timeout env 기본 주입 및 사용자 값 %s 보존', async timeout => {
+  const root = await project(); emulate([init, done]);
+  const env = { ...environment(root), BASH_DEFAULT_TIMEOUT_MS: timeout, BASH_MAX_TIMEOUT_MS: timeout };
+  await runTurn('대기', { root, model: 'haiku', env });
+  expect(vi.mocked(runProcess).mock.calls.at(-1)![0].env).toMatchObject({
+    BASH_DEFAULT_TIMEOUT_MS: timeout ?? '600000', BASH_MAX_TIMEOUT_MS: timeout ?? '600000', FODH_PROJECT_ROOT: root,
+  });
+});
+it('결과 없는 codex-done은 실패하는 result 호출 대신 재위임·판단을 안내한다', async () => {
+  const root = await project();
+  await addInbox(root, { kind: 'codex-done', codexRunId: 'missing', codexStatus: 'lost' });
+  const prompt = await buildPrompt(root, '계속', 'brain');
+  expect(prompt).toContain('결과 없음 — 위임을 다시 시작하거나 fodh judgment add 로 판단을 등록하라');
+  expect(prompt).not.toContain('fodh codex result missing');
+  await addInbox(root, { kind: 'codex-done', codexRunId: 'present', codexStatus: 'ok', resultDir: '/result' });
+  expect(await buildPrompt(root, '계속', 'brain2')).toContain('fodh codex result present');
 });

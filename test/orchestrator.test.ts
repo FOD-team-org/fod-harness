@@ -400,3 +400,86 @@ it('P2: 실제 문서 직접 편집 → 안정화 tick → decideInbox → 프�
   expect((await tick(t.root, { now: now + 12000 })).emitted).toEqual([]);
   expect((await readJudgment(t.root)).items).toEqual([]);
 });
+
+async function delegationFixture(root: string, runId = 'delegated', finished = false) {
+  const { writeMeta } = await import('../src/core/codex-record.ts');
+  const startedAt = new Date().toISOString();
+  await updateState(root, { state: 'RESEARCH', delegation: { runId, kind: 'research', startedAt, title: '조사' } });
+  await writeMeta(root, { runId, kind: 'research', startedAt, cwd: root, sandbox: 'read-only', model: 'fake', effort: 'xhigh', workerModel: 'fake', workerEffort: 'xhigh', command: ['fake'], timeoutMinutes: 90, state: 'RESEARCH', status: finished ? 'ok' : 'running', ...(finished ? { finishedAt: startedAt, exit: 0 } : {}) });
+}
+it('P3 위임 대기 표지는 재개를 멈추고 recover/stalled도 재개하지 않는다', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', '대기: 위임 delegated\n상태: RESEARCH');
+  expect((await readState(t.root)).awaitingDelegation).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+  await t.decide(['stalled', 'recover']); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it.each(['wrong', 'finished'])('P3 %s 위임 표지를 무시하고 marker skip 후 정상 재개', async scenario => {
+  const t = await setup(); await delegationFixture(t.root, 'delegated', scenario === 'finished');
+  await t.end('stop', `대기: 위임 ${scenario === 'wrong' ? 'different' : 'delegated'}\n상태: RESEARCH`);
+  expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).awaitingDelegation).toBe(false);
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'delegation:marker', status: 'skip' }));
+});
+it('P3 표지 누락 시 다음 프롬프트 안내는 run당 1회', async () => {
+  const t = await setup(); await delegationFixture(t.root); await t.end(); await t.end();
+  expect(t.sendMessage.mock.calls[0][0].content).toContain('[위임 진행 중 delegated');
+  expect(t.sendMessage.mock.calls[1][0].content).not.toContain('[위임 진행 중 delegated');
+});
+it.each(['ok', 'fail', 'timeout', 'lost'])('P3 codex-done %s → 대기 해제·재개·실패 경고·인박스 전달 유지', async status => {
+  const t = await setup(); await delegationFixture(t.root); await updateState(t.root, { awaitingDelegation: true, autoTurns: 3 });
+  const record = await addInbox(t.root, { kind: 'codex-done', runId: 'delegated', codexRunId: 'delegated', codexStatus: status });
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [record]);
+  const state = await readState(t.root); expect(state.delegation).toBeUndefined(); expect(state.awaitingDelegation).toBe(false); expect(state.autoTurns).toBe(1);
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect(t.ctx.ui.notify).toHaveBeenCalledTimes(status === 'ok' ? 0 : 1);
+  const { listInbox } = await import('../src/core/inbox.ts'); expect((await listInbox(t.root))[0].status).not.toBe('applied');
+});
+it('P3 다른 run·이미 해제된 완료 인박스는 applied만, busy 일치 완료는 다음 프롬프트에 유지', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  const { listInbox, deliverInbox } = await import('../src/core/inbox.ts');
+  const old = await addInbox(t.root, { kind: 'codex-done', runId: 'old', codexRunId: 'old', codexStatus: 'fail' });
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [old]);
+  expect((await listInbox(t.root))[0].status).toBe('applied'); expect(t.ctx.ui.notify).not.toHaveBeenCalled(); expect(t.sendMessage).not.toHaveBeenCalled();
+  const matching = await addInbox(t.root, { kind: 'codex-done', runId: 'delegated', codexRunId: 'delegated', codexStatus: 'ok' });
+  await deliverInbox(t.root, [matching.id], 'brain-turn'); t.ctx.isIdle.mockReturnValue(false);
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [(await listInbox(t.root))[1]]);
+  expect((await readState(t.root)).delegation).toBeUndefined(); expect(t.sendMessage).not.toHaveBeenCalled();
+  expect((await listInbox(t.root))[1].status).toBe('delivered');
+});
+it('P3 /status 위임 요약 및 buildPrompt 결과 조회 지시', async () => {
+  const t = await setup(); await delegationFixture(t.root); await t.command('status');
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).delegation).toMatchObject({ runId: 'delegated', kind: 'research', title: '조사', status: 'running', minutes: expect.any(Number) });
+  const { buildPrompt } = await import('../src/provider/turn.ts');
+  await addInbox(t.root, { kind: 'codex-done', runId: 'delegated', codexRunId: 'delegated', codexStatus: 'ok', resultDir: '/result' });
+  expect(await buildPrompt(t.root, 'next', 'brain-1')).toContain('fodh codex result delegated');
+  expect(await buildPrompt(t.root, 'next', 'brain-2')).toContain('fodh codex result delegated');
+});
+
+it.each(['`대기: 위임 delegated`', '대기: 위임 <delegated>', '대기: 위임 `delegated`', '<대기: 위임 delegated>'])('P3 표지 경계 장식 허용: %s', async marker => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', `본문\n${marker}\n\n상태: RESEARCH\n`);
+  expect((await readState(t.root)).awaitingDelegation).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it('P3 본문의 위임 표지는 무시하고 사용자 표지는 보존한다', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', '대기: 위임 delegated\n대기: 사용자\n본문1\n본문2\n상태: RESEARCH');
+  expect((await readState(t.root)).awaitingDelegation).not.toBe(true);
+  expect((await readState(t.root)).awaitingUser).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it('P3 사용자·위임 표지가 함께 있으면 두 대기를 기록한다', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', '대기: 위임 delegated\n대기: 사용자\n상태: RESEARCH');
+  expect(await readState(t.root)).toMatchObject({ awaitingDelegation: true, awaitingUser: true });
+  expect(t.sendMessage).not.toHaveBeenCalled();
+});
+
+it.each(['**대기: 사용자**', '_대기: 사용자_', '`대기: 사용자`'])('본문 중간 사용자 표지는 뒤에 5줄이 있어도 대기한다: %s', async marker => {
+  const t = await setup();
+  await t.end('stop', `${marker}\n질문1\n질문2\n질문3\n질문4\n질문5`);
+  expect((await readState(t.root)).awaitingUser).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it('감독 유실로 추정한 성공은 codex-done에서 경고한다', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  const record = await addInbox(t.root, { kind: 'codex-done', codexRunId: 'delegated', codexStatus: 'ok', supervisorLost: true });
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [record]);
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith('감독 사망 뒤 추정한 성공 — 결과를 직접 확인', 'warning');
+});
