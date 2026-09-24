@@ -12,6 +12,7 @@ export interface HarnessConfig {
       brainModel: string; brainEffort: string; workerModel: string; workerEffort: string; maxChildAgents: number;
     };
   };
+  watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; tickSeconds: number };
   judgment: { file: string };
   requiresApproval: string[];
 }
@@ -35,6 +36,14 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   const raw = object(candidate === undefined ? await readJson<unknown>(harnessPath(root, 'harness.json'), {}) : candidate, '하네스');
   const brain = object(defaultValue(raw.brain, {}), 'brain');
   const judgment = object(defaultValue(raw.judgment, {}), 'judgment');
+  const watch = object(defaultValue(raw.watch, {}), 'watch');
+  const watching = {
+    stallMinutes: positive(defaultValue(watch.stallMinutes, 10), 'watch.stallMinutes', true),
+    childTimeoutMinutes: positive(defaultValue(watch.childTimeoutMinutes, 30), 'watch.childTimeoutMinutes', true),
+    pollSeconds: positive(defaultValue(watch.pollSeconds, 5), 'watch.pollSeconds'),
+    stableSeconds: positive(defaultValue(watch.stableSeconds, 10), 'watch.stableSeconds'),
+    tickSeconds: positive(defaultValue(watch.tickSeconds, 30), 'watch.tickSeconds'),
+  };
   const model = defaultValue(brain.model, 'fable');
   const skipPermissions = defaultValue(brain.skipPermissions, true);
   const maxTurnMinutes = defaultValue(brain.maxTurnMinutes, 45);
@@ -80,7 +89,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
       model, skipPermissions, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
     },
-    delegate: delegation, judgment: { file }, requiresApproval,
+    delegate: delegation, watch: watching, judgment: { file }, requiresApproval,
   };
 }
 
@@ -144,3 +153,10 @@ export async function setConfig(root: string, key: string, text: string): Promis
 }
 
 function defaultValue(value: unknown, fallback: unknown): unknown { return value === undefined ? fallback : value; }
+
+function positive(value: unknown, label: string, integer = false): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || integer && !Number.isSafeInteger(value)) {
+    throw new Error(`${label}는 ${integer ? '양의 정수' : '양수'}여야 합니다`);
+  }
+  return value;
+}

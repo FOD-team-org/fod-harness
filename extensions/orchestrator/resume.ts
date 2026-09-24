@@ -1,0 +1,74 @@
+import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { getConfig, loadConfig } from '../../src/core/config.ts';
+import { activeStates as active, readState, updateState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
+
+const templates = fileURLToPath(new URL('../../templates/', import.meta.url));
+export async function instruction(root: string, state: HarnessState, promptState = state.state): Promise<string> {
+  // Only known state names become filenames; state JSON never chooses an arbitrary path.
+  if (!active.has(promptState)) throw new Error(`자동 진행할 수 없는 상태: ${promptState}`);
+  const config = await loadConfig(root);
+  const prompt = await readFile(join(templates, 'prompts', `${promptState}.md`), 'utf8');
+  const values: Record<string, string> = {
+    taskId: state.taskId ?? '', judgmentFile: config.judgment.file, backlogFile: 'docs/backlog.md',
+  };
+  const rendered = prompt.replace(/\{\{(taskId|judgmentFile|backlogFile)\}\}/gu, (_match, key: string) => values[key]!);
+  return rendered;
+}
+
+export async function send(pi: ExtensionAPI, root: string, state: HarnessState, promptState = state.state, automatic = false): Promise<void> {
+  pi.sendMessage({ customType: 'harness-orchestrator', content: await instruction(root, state, promptState),
+    display: true, details: { state: state.state, taskId: state.taskId } },
+  { triggerTurn: true, ...(automatic ? { deliverAs: 'followUp' as const } : {}) });
+}
+export interface ResumeContext {
+  cwd: string; hasUI: boolean; isIdle: () => boolean;
+  notify: (message: string, type: 'info' | 'warning' | 'error') => void;
+}
+export function resumeContext(ctx: ExtensionContext): ResumeContext {
+  return { cwd: ctx.cwd, hasUI: ctx.hasUI, isIdle: () => ctx.isIdle?.() ?? true,
+    notify: (message, type) => ctx.ui?.notify?.(message, type) };
+}
+export interface ResumeResult { resumed?: boolean; skipped?: string; stopped?: boolean }
+const resuming = new Set<string>();
+export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: ResumeContext, reason: string): Promise<ResumeResult> {
+  if (ctxLike.hasUI === false) return { skipped: 'print' };
+  if (ctxLike.isIdle() === false || resuming.has(root)) return { skipped: 'busy' };
+  resuming.add(root);
+  try {
+    let state = await readState(root);
+    if (state.awaitingUser) return { skipped: 'awaiting-user' };
+    if (!active.has(state.state)) {
+      if (['WAIT_JUDGMENT', 'DONE_ALL', 'paused(cleanup)'].includes(state.state)) ctxLike.notify(`하네스 상태: ${state.state}`, 'info');
+      return { skipped: 'inactive' };
+    }
+    if (state.state === 'recovering' && state.recoveryAutoResumed === true) return { skipped: 'recovery-limit' };
+    const config = await getConfig(root) as { maxAutoTurns?: unknown };
+    const maxAutoTurns = config.maxAutoTurns ?? 3;
+    if (!Number.isSafeInteger(maxAutoTurns) || Number(maxAutoTurns) < 1) throw new Error('maxAutoTurns는 1 이상의 정수여야 합니다');
+    if (Number(state.autoTurns ?? 0) >= Number(maxAutoTurns)) {
+      await stopForJudgment(root);
+      ctxLike.notify('진행 정체를 판단대기에 등록했습니다.', 'warning');
+      return { stopped: true };
+    }
+    let beforeSend: Partial<HarnessState> = {};
+    state = await updateState(root, current => {
+      beforeSend = { autoTurns: current.autoTurns,
+        ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
+      return { autoTurns: Number(current.autoTurns ?? 0) + 1,
+        ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    try {
+      await send(pi, root, state, state.state, true);
+      return { resumed: true };
+    } catch {
+      await updateState(root, beforeSend);
+      try { ctxLike.notify('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning'); }
+      catch { /* 세션 폐기 뒤에는 warning 알림도 사용할 수 없다. */ }
+      return { skipped: 'send-failed' };
+    }
+  } finally { resuming.delete(root); }
+}

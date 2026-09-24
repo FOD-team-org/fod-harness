@@ -1,13 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import orchestrator, { instruction } from '../extensions/orchestrator/index.ts';
+import orchestrator, { instruction, decideInbox } from '../extensions/orchestrator/index.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState, transitionState } from '../src/core/state.ts';
 import { addJudgment, answerJudgment, readJudgment } from '../src/core/judgment.ts';
 import { addInbox } from '../src/core/inbox.ts';
-import { appendLedger } from '../src/core/ledger.ts';
+import { appendLedger, readLedger } from '../src/core/ledger.ts';
+import { tick } from '../src/core/watcher.ts';
 import { setConfig } from '../src/core/config.ts';
 
 const roots: string[] = [];
@@ -19,8 +20,10 @@ async function setup() {
   const sendMessage = vi.fn();
   orchestrator({ registerCommand: (name: string, command: any) => commands.set(name, command),
     on: (name: string, handler: any) => handlers.set(name, handler), sendMessage } as unknown as ExtensionAPI);
-  const ctx = { cwd: root, hasUI: true, ui: { notify: vi.fn() } };
+  const ctx = { cwd: root, hasUI: true, isIdle: vi.fn(() => true), ui: { notify: vi.fn() } };
   return { root, commands, handlers, ctx, sendMessage,
+    decide: async (kinds: string[]) => decideInbox({ sendMessage } as unknown as ExtensionAPI, ctx as any, root,
+      await Promise.all(kinds.map(kind => addInbox(root, { kind, pid: 201 })))),
     command: (name: string, args = '') => commands.get(name)!.handler(args, ctx),
     end: (stopReason = 'stop', text = '') => handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason, content: [{type:'text',text}] }] }, ctx) };
 }
@@ -289,4 +292,102 @@ it('F7: warning UI가 없어도 전송 실패 카운터를 원복한다', async 
   test.sendMessage.mockImplementationOnce(() => { throw new Error('stale send'); });
   await expect(test.handlers.get('agent_end')!({ messages: [] }, { cwd: test.root, hasUI: true })).resolves.toBeUndefined();
   expect((await readState(test.root)).autoTurns).toBe(0); expect(test.sendMessage).toHaveBeenCalledTimes(1);
+});
+
+it('P2: 판단 문서 답 적용은 blocked 해제·완료 표·WAIT 복귀·awaitingUser 해제·재개·원장', async () => {
+  const t = await setup(); const task = await addTask(t.root, { title: '문서 답', category: 'docs' });
+  const { item } = await addJudgment(t.root, { title: '방식', background: '', options: ['진행'], recommend: '', blocks: task.id });
+  await setTask(t.root, task.id, { status: `blocked(${item.id})`, judgment: item.id });
+  await updateState(t.root, { state: 'WAIT_JUDGMENT', resumeState: 'PICK' });
+  await updateState(t.root, { awaitingUser: true, autoTurns: 3 }); await answerJudgment(t.root, item.id, '1');
+  await t.decide(['judgment-changed']);
+  expect(await readState(t.root)).toMatchObject({ state: 'PICK', awaitingUser: false, autoTurns: 1 });
+  expect((await getTask(t.root, task.id)).status).toBe('ready');
+  expect((await readJudgment(t.root)).completed).toEqual([expect.objectContaining({ id: item.id, answer: '1' })]);
+  expect(t.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('# PICK') }), { triggerTurn: true, deliverAs: 'followUp' });
+  expect((await readLedger(t.root)).at(-1)).toMatchObject({ action: 'watcher:decide:judgment-changed', status: 'ok', evidence: { applied: [item.id], resumed: true, ids: [expect.any(String)] } });
+});
+it('P2: 활동 상태에서 문서로 답하면 대기를 풀고 autoTurns를 초기화한다', async () => {
+  const t = await setup(); const { item } = await addJudgment(t.root, { title: '플랫폼', background: '', options: ['웹'], recommend: '', blocks: '' });
+  await answerJudgment(t.root, item.id, '1'); await updateState(t.root, { state: 'INTERVIEW' });
+  await updateState(t.root, { awaitingUser: true, autoTurns: 3 }); await t.decide(['judgment-changed']);
+  expect(await readState(t.root)).toMatchObject({ state: 'INTERVIEW', awaitingUser: false, autoTurns: 1 });
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+});
+it('P2: 답 없는 변경은 알림만, 인박스와 상태를 유지한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW', awaitingUser: true });
+  await t.decide(['judgment-changed']);
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith('판단대기 변경 감지 — 적용할 답 없음(다음 턴에 전달)', 'info');
+  expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).awaitingUser).toBe(true);
+  expect((await readLedger(t.root)).at(-1)).toMatchObject({ status: 'skip', evidence: { applied: [], resumed: false } });
+});
+it('P2: 부정·모호 답은 /judged 경로로 재질문하며 결과 알림에 포함한다', async () => {
+  const t = await setup(); const { item } = await addJudgment(t.root, { title: '방식', background: '', options: ['진행'], recommend: '', blocks: '' });
+  await answerJudgment(t.root, item.id, '하지 마'); await updateState(t.root, { state: 'WAIT_JUDGMENT', pickJudgment: item.id });
+  await t.decide(['judgment-changed']);
+  const document = await readJudgment(t.root);
+  expect(document.items).toHaveLength(2); expect(document.items[0].followup).toBe(document.items[1].id);
+  expect(document.items[1].reaskOf).toBe(item.id);
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).unapplied).toEqual([{ id: item.id, reason: '부정 또는 유보가 포함되어 있습니다' }]);
+  expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).state).toBe('WAIT_JUDGMENT');
+});
+it('P2: busy stalled는 카운터·상태를 바꾸지 않고 skip 원장·warning', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' }); t.ctx.isIdle.mockReturnValue(false);
+  const before = await readState(t.root); await t.decide(['stalled']);
+  expect(await readState(t.root)).toEqual(before); expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('busy'), 'warning');
+  expect((await readLedger(t.root)).at(-1)).toMatchObject({ status: 'skip', evidence: { resumed: false } });
+});
+it('P2: stalled는 idle에서 재개하고 상한이면 판단 생성 후 warning', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  await t.decide(['stalled']); expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  await updateState(t.root, { autoTurns: 3 }); await t.decide(['stalled']);
+  expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).state).toBe('WAIT_JUDGMENT');
+  expect((await readJudgment(t.root)).items).toHaveLength(1);
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith('진행 정체를 판단대기에 등록했습니다.', 'warning');
+});
+it.each(['child-timeout', 'child-gone'])('P2: %s는 warning만 남기며 상태·프로세스를 회수하지 않는다', async kind => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' }); const before = await readState(t.root);
+  await t.decide([kind]); expect(t.sendMessage).not.toHaveBeenCalled(); expect(await readState(t.root)).toEqual(before);
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('201'), 'warning');
+  expect((await readLedger(t.root)).at(-1)).toMatchObject({ action: `watcher:decide:${kind}`, status: 'ok', evidence: { resumed: false } });
+});
+it.each([
+  ['INTERVIEW', true, false, true], ['INTERVIEW', false, false, false], ['INTERVIEW', true, true, false],
+  ['recovering', true, false, false], ['paused(error)', true, false, false], ['WAIT_JUDGMENT', true, false, false],
+])('P2: recover %s doctor=%s awaiting=%s → 재개=%s', async (state, fresh, awaitingUser, resumes) => {
+  const t = await setup(); await updateState(t.root, { state: 'SPEC', taskId: 'T01' });
+  await updateState(t.root, { state: String(state), taskId: 'T01', awaitingUser: Boolean(awaitingUser),
+    doctor: { ok: true, checkedAt: new Date(Date.now() - (fresh ? 0 : 13 * 3600000)).toISOString() } });
+  await t.decide(['recover']); expect(t.sendMessage).toHaveBeenCalledTimes(resumes ? 1 : 0);
+  if (!resumes) expect(t.ctx.ui.notify).toHaveBeenCalledWith(`이전 세션 상태: ${state} /T01 — /develop-start 또는 /judged 로 이어갑니다`, 'info');
+});
+it('P2: /status는 아직 tick하지 않은 워처도 안정된 요약 필드를 표시', async () => {
+  const t = await setup(); await t.command('status');
+  expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).watcher).toEqual({ lastTickAt: null,
+    judgment: { observedHash: null, stableFor: 0, expectedHash: null }, childTimeouts: 0 });
+});
+it('P2: agent_end와 stalled 동시 요청은 공용 재개 잠금으로 한 턴만 예약', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  await Promise.all([t.end(), t.decide(['stalled'])]);
+  expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).autoTurns).toBe(1);
+});
+it('P2: 같은 종류의 여러 인박스는 묶어서 한 번 재개하고 모든 ID를 원장에 남긴다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' }); await t.decide(['stalled', 'stalled']);
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect(((await readLedger(t.root)).at(-1)!.evidence as any).ids).toHaveLength(2);
+});
+it('P2: 실제 문서 직접 편집 → 안정화 tick → decideInbox → 프로젝트 재개', async () => {
+  const t = await setup(); const { item } = await addJudgment(t.root, { title: '플랫폼', background: '', options: ['웹'], recommend: '', blocks: '' });
+  await updateState(t.root, { state: 'WAIT_JUDGMENT', resumeState: 'INTERVIEW', pickJudgment: item.id, awaitingUser: true });
+  const now = Date.now(); await tick(t.root, { now });
+  const path = join(t.root, 'docs/판단대기.md');
+  await writeFile(path, (await readFile(path, 'utf8')).replace('- 답:', '- 답: 1'));
+  expect((await tick(t.root, { now: now + 1000 })).emitted).toEqual([]);
+  const { emitted } = await tick(t.root, { now: now + 11000 }); expect(emitted).toHaveLength(1);
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, emitted);
+  expect(await readState(t.root)).toMatchObject({ state: 'INTERVIEW', awaitingUser: false, autoTurns: 1 });
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect((await tick(t.root, { now: now + 12000 })).emitted).toEqual([]);
+  expect((await readJudgment(t.root)).items).toEqual([]);
 });

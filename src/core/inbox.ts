@@ -3,7 +3,7 @@ import { atomicWrite, harnessPath, parseJsonLines, readText, withFileLock } from
 
 export interface InboxRecord {
   id: string; kind: string; status: 'detected' | 'queued' | 'delivered' | 'applied';
-  at: string; runId?: string; [key: string]: unknown;
+  at: string; runId?: string; dedupeKey?: string; [key: string]: unknown;
 }
 export async function listInbox(root: string): Promise<InboxRecord[]> {
   return parseJsonLines<InboxRecord>(await readText(harnessPath(root, 'harness-inbox.jsonl')));
@@ -18,11 +18,22 @@ async function mutate(root: string, action: (records: InboxRecord[]) => InboxRec
   });
 }
 
-export async function addInbox(root: string, entry: { kind: string; [key: string]: unknown }): Promise<InboxRecord> {
+export async function addInboxOnce(root: string, entry: { kind: string; dedupeKey?: string; [key: string]: unknown }): Promise<{
+  record: InboxRecord; created: boolean;
+}> {
   if (!entry.kind.trim()) throw new Error('인박스 종류가 필요합니다');
-  const record: InboxRecord = { ...entry, id: randomUUID(), kind: entry.kind, status: 'detected', at: new Date().toISOString() };
-  await mutate(root, records => [...records, record]);
-  return record;
+  let record: InboxRecord = { ...entry, id: randomUUID(), kind: entry.kind, status: 'detected', at: new Date().toISOString() };
+  let created = true;
+  await mutate(root, records => {
+    const existing = entry.dedupeKey === undefined ? undefined
+      : records.find(item => item.dedupeKey === entry.dedupeKey && item.status !== 'applied');
+    if (existing) { record = existing; created = false; return records; }
+    return [...records, record];
+  });
+  return { record, created };
+}
+export async function addInbox(root: string, entry: { kind: string; dedupeKey?: string; [key: string]: unknown }): Promise<InboxRecord> {
+  return (await addInboxOnce(root, entry)).record;
 }
 
 async function change(root: string, ids: string[], status: InboxRecord['status'], runId?: string): Promise<InboxRecord[]> {

@@ -12,6 +12,8 @@ export interface HarnessState {
   enteredAt?: string; autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
   retry?: { count: number; nextAt?: string }; [key: string]: unknown;
 }
+export const activeStates = new Set(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW', 'PLANNING', 'PICK',
+  'SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'MERGE', 'DOCS', 'CLEANUP', 'RECLAIM', 'recovering']);
 export const taskStates = ['SPEC', 'IMPLEMENT', 'VERIFY', 'REVIEW', 'FIX', 'MERGE', 'DOCS', 'CLEANUP'];
 const projectStates = ['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'];
 export const isPaused = (state: string) => /^paused\((billing|quota|error|memory|budget|cleanup)\)$/u.test(state);

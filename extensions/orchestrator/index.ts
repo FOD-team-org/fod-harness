@@ -1,20 +1,23 @@
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { access, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getConfig, loadConfig } from '../../src/core/config.ts';
-import { readState, updateState, transitionState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
+import { loadConfig } from '../../src/core/config.ts';
+import { readState, updateState, transitionState, activeStates as active, doctorFresh } from '../../src/core/state.ts';
 import { listBacklog } from '../../src/core/backlog.ts';
 import { runPick } from '../../src/core/pick.ts';
 import { cleanupReport } from '../../src/core/reclaim.ts';
 import { applyJudgments, readJudgment } from '../../src/core/judgment.ts';
-import { listInbox } from '../../src/core/inbox.ts';
-import { unknownEntries } from '../../src/core/ledger.ts';
+import { listInbox, type InboxRecord } from '../../src/core/inbox.ts';
+import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, withFileLock } from '../../src/core/storage.ts';
 
+import { autoResume, resumeContext, send } from './resume.ts';
+import { watcherStatus } from '../../src/core/watcher.ts';
+export { instruction } from './resume.ts';
+
 const templates = fileURLToPath(new URL('../../templates/', import.meta.url));
-const active = new Set(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW', 'PLANNING', 'PICK',
-  'SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'MERGE', 'DOCS', 'CLEANUP', 'RECLAIM', 'recovering']);
+
 
 async function exists(path: string): Promise<boolean> {
   try { await access(path); return true; }
@@ -30,25 +33,7 @@ async function initialize(root: string): Promise<void> {
   await readJudgment(root);
 }
 
-export async function instruction(root: string, state: HarnessState, promptState = state.state): Promise<string> {
-  // Only known state names become filenames; state JSON never chooses an arbitrary path.
-  if (!active.has(promptState)) throw new Error(`자동 진행할 수 없는 상태: ${promptState}`);
-  const config = await loadConfig(root);
-  const prompt = await readFile(join(templates, 'prompts', `${promptState}.md`), 'utf8');
-  const values: Record<string, string> = {
-    taskId: state.taskId ?? '', judgmentFile: config.judgment.file, backlogFile: 'docs/backlog.md',
-  };
-  const rendered = prompt.replace(/\{\{(taskId|judgmentFile|backlogFile)\}\}/gu, (_match, key: string) => values[key]!);
-  return rendered;
-}
-
 export default function orchestrator(pi: ExtensionAPI): void {
-  let resuming = false;
-  const send = async (root: string, state: HarnessState, promptState = state.state, automatic = false) => {
-    pi.sendMessage({ customType: 'harness-orchestrator', content: await instruction(root, state, promptState),
-      display: true, details: { state: state.state, taskId: state.taskId } },
-    { triggerTurn: true, ...(automatic ? { deliverAs: 'followUp' as const } : {}) });
-  };
   pi.on('input', async (event, ctx) => {
     if (event.source !== 'extension') await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
     return { action: 'continue' };
@@ -60,7 +45,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       await initialize(ctx.cwd);
       const state = await transitionState(ctx.cwd, 'INTERVIEW');
       await updateState(ctx.cwd, { awaitingUser: false, ...(args.trim() ? { projectName: args.trim() } : {}) });
-      await send(ctx.cwd, state);
+      await send(pi, ctx.cwd, state);
     },
   });
   pi.registerCommand('develop-start', {
@@ -82,21 +67,21 @@ export default function orchestrator(pi: ExtensionAPI): void {
       if (['IDLE', 'PROJECT_READY', 'DONE_ALL'].includes(state.state)) state = await transitionState(ctx.cwd, 'PLANNING');
       if (!tasks.length) {
         if (state.state !== 'PLANNING') throw new Error('백로그 계획은 PLANNING 상태가 필요합니다');
-        await send(ctx.cwd, state); return;
+        await send(pi, ctx.cwd, state); return;
       }
       if (state.state !== 'PICK') await transitionState(ctx.cwd, 'PICK');
       const result = await runPick(ctx.cwd);
       state = await readState(ctx.cwd);
-      if (active.has(state.state)) await send(ctx.cwd, state);
+      if (active.has(state.state)) await send(pi, ctx.cwd, state);
       else ctx.ui.notify(JSON.stringify(result), 'info');
     },
   });
   pi.registerCommand('status', {
     description: '상태·미적용 인박스·미해결 원장·최근 한도 표시',
     handler: async (_args, ctx) => {
-      const [state, inbox, unknown] = await Promise.all([readState(ctx.cwd), listInbox(ctx.cwd), unknownEntries(ctx.cwd)]);
+      const [state, inbox, unknown, watcher] = await Promise.all([readState(ctx.cwd), listInbox(ctx.cwd), unknownEntries(ctx.cwd), watcherStatus(ctx.cwd)]);
       ctx.ui.notify(JSON.stringify({ state: state.state, task: state.taskId ?? null,
-        inbox: inbox.filter(item => item.status !== 'applied'), unknown, rateLimit: state.rateLimitInfo ?? null }), 'info');
+        inbox: inbox.filter(item => item.status !== 'applied'), unknown, watcher, rateLimit: state.rateLimitInfo ?? null }), 'info');
     },
   });
   pi.registerCommand('judged', {
@@ -110,7 +95,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const state = await readState(ctx.cwd);
       if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
         await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
-        await send(ctx.cwd, state, state.state);
+        await send(pi, ctx.cwd, state, state.state);
       }
     },
   });
@@ -119,45 +104,58 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => { ctx.ui.notify(JSON.stringify(await cleanupReport(ctx.cwd)), 'info'); },
   });
   pi.on('agent_end', async (event, ctx) => {
-    if (ctx.hasUI === false || resuming) return;
-    resuming = true;
-    try {
-      const last = [...event.messages].reverse().find(message => message.role === 'assistant');
-      if (last?.role === 'assistant' && ['error', 'aborted'].includes(last.stopReason)) return;
-      let state = await readState(ctx.cwd);
-      if (last?.role === 'assistant' && last.content?.some(block => block.type === 'text' && /^대기: 사용자[ \t]*$/mu.test(block.text))) {
-        await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
-      }
-      if (state.awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
-      if (!active.has(state.state)) {
-        if (['WAIT_JUDGMENT', 'DONE_ALL', 'paused(cleanup)'].includes(state.state)) ctx.ui.notify(`하네스 상태: ${state.state}`, 'info');
-        return;
-      }
-      if (state.state === 'recovering' && state.recoveryAutoResumed === true) return;
-      const config = await getConfig(ctx.cwd) as { maxAutoTurns?: unknown };
-      const maxAutoTurns = config.maxAutoTurns ?? 3;
-      if (!Number.isSafeInteger(maxAutoTurns) || Number(maxAutoTurns) < 1) throw new Error('maxAutoTurns는 1 이상의 정수여야 합니다');
-      if (Number(state.autoTurns ?? 0) >= Number(maxAutoTurns)) {
-        await stopForJudgment(ctx.cwd);
-        ctx.ui.notify('진행 정체를 판단대기에 등록했습니다.', 'warning');
-        return;
-      }
-      let beforeSend: Partial<HarnessState> = {};
-      state = await updateState(ctx.cwd, current => {
-        beforeSend = { autoTurns: current.autoTurns,
-          ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
-        return { autoTurns: Number(current.autoTurns ?? 0) + 1,
-          ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
-      });
-      await new Promise(resolve => setTimeout(resolve, 0));
-      try {
-        await send(ctx.cwd, state, state.state, true);
-      } catch {
-        await updateState(ctx.cwd, beforeSend);
-        try {
-          ctx.ui?.notify?.('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning');
-        } catch { /* 세션 폐기 뒤에는 warning 알림도 사용할 수 없다. */ }
-      }
-    } finally { resuming = false; }
+    if (ctx.hasUI === false) return;
+    const last = [...event.messages].reverse().find(message => message.role === 'assistant');
+    if (last?.role === 'assistant' && ['error', 'aborted'].includes(last.stopReason)) return;
+    if (last?.role === 'assistant' && last.content?.some(block => block.type === 'text' && /^대기: 사용자[ \t]*$/mu.test(block.text))) {
+      await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
+    }
+    if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
+    await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end');
   });
+}
+
+export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root: string, records: InboxRecord[]): Promise<void> {
+  const context = resumeContext(ctx);
+  // One decision per kind per batch; all facts remain in the durable inbox.
+  for (const kind of new Set(records.map(record => record.kind))) {
+    const batch = records.filter(record => record.kind === kind);
+    let applied: string[] = [], resumed = false, handled = false;
+    if (kind === 'judgment-changed') {
+      const answered = await readJudgment(root, { answered: true });
+      // Nonempty but ambiguous answers also use /judged's re-question path.
+      if (answered.items.length) {
+        const result = await applyJudgments(root);
+        applied = result.applied.map(item => item.id);
+        const reasked = result.unapplied.length ? (await readJudgment(root)).items
+          .filter(item => item.reaskOf && answered.items.some(answer => answer.id === item.reaskOf))
+          .map(item => ({ id: item.id, reaskOf: item.reaskOf })) : [];
+        context.notify(JSON.stringify({ ...result, reasked }), 'info');
+        if (applied.length && active.has((await readState(root)).state)) {
+          await updateState(root, { awaitingUser: false, autoTurns: 0 });
+          resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+        }
+        handled = applied.length > 0 || result.unapplied.length > 0;
+      }
+      if (!applied.length) context.notify('판단대기 변경 감지 — 적용할 답 없음(다음 턴에 전달)', 'info');
+    } else if (kind === 'stalled') {
+      const result = await autoResume(pi, root, context, kind);
+      resumed = result.resumed === true; handled = resumed || result.stopped === true;
+      if (result.skipped) context.notify(`두뇌 정체 감지 — 자동 재개 건너뜀: ${result.skipped}`, 'warning');
+    } else if (kind === 'child-timeout' || kind === 'child-gone') {
+      context.notify(`자식 프로세스 ${kind === 'child-timeout' ? '시간 초과' : '종료'} 감지: ${batch.map(record => record.pid).join(', ')} — 다음 턴에 전달`, 'warning');
+      handled = true;
+    } else if (kind === 'recover') {
+      const state = await readState(root);
+      if (state.state !== 'recovering' && active.has(state.state) && state.awaitingUser !== true
+        && doctorFresh(state, (await loadConfig(root)).brain.doctorTtlHours)) {
+        resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+        handled = resumed;
+      } else {
+        context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — /develop-start 또는 /judged 로 이어갑니다`, 'info');
+      }
+    }
+    await appendLedger(root, { runId: batch[0]!.id, action: `watcher:decide:${kind}`, status: handled ? 'ok' : 'skip',
+      evidence: { ids: batch.map(record => record.id), applied, resumed } });
+  }
 }

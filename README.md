@@ -44,3 +44,5 @@ Claude Code autocompact는 사용자 `~/.claude/settings.json` 설정을 따릅�
 하네스 보조 회전 임계값 `brain.rotateAtTokens`의 기본값은 0(회전 끔)이며, 이번 단계는 설정 로드·검증까지만 제공합니다.
 
 Codex 수행자 기본값 `gpt-6-sol`은 판단 A11 로 확정되었습니다.
+
+`/status`는 워처의 마지막 tick·판단 해시/안정 시간·정체 시작·초과 자식 수를 표시합니다. `fodh watch tick`은 한 번 감지하고, `fodh watch status`는 저장된 워처 요약을 조회합니다.

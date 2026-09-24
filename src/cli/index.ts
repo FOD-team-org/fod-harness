@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { readState, updateState, transitionState, doctorFresh, TransitionError } from '../core/state.ts';
 import { readJudgment, addJudgment, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
+import { tick, watcherStatus } from '../core/watcher.ts';
 import { listProcs } from '../core/procs.ts';
 import { readLedger, unknownEntries, resolveLedger } from '../core/ledger.ts';
 import { safeValue } from '../provider/privacy.ts';
@@ -38,6 +39,8 @@ export async function main(args = process.argv.slice(2), root = process.cwd()): 
     } else if (group === 'config' && action === 'set') {
       exact(2); result = await setConfig(root, rest[0], rest[1]);
     }
+    else if (group === 'watch' && action === 'tick') { exact(0); result = await tick(root); }
+    else if (group === 'watch' && action === 'status') { exact(0); result = await watcherStatus(root); }
     else if (group === 'state' && action === 'get') { exact(0); result = await readState(root); }
     else if (group === 'state' && action === 'await-user') { exact(0); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
