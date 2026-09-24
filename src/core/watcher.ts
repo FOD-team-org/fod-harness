@@ -138,7 +138,6 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
         for (const kind of ['heavy', 'codex'] as const) {
           const held = slots[kind];
           if (!held) continue;
-          owner = kind === 'heavy' ? { ...held, kind } : held;
           const status = await slotOwnerIdentity({ ...held, kind });
           if (['owned', 'unknown', 'orphan'].includes(status)) {
             owner = kind === 'heavy' ? { ...held, kind } : held; identity = status; break;

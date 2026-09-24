@@ -170,7 +170,7 @@ it('P4 검증 증거 필수·다른 task/과거 증거 거부·짧은 SHA 허용
   await writeFile(join(path, 'code.txt'), 'implementation');
   const commit = await commitWorktree(root, task.id, 'implementation');
   if (!('commit' in commit)) throw new Error('commit missing');
-  await expect(validateTaskCommit(root, task.id, commit.commit, 'review')).rejects.toThrow('검증 증거가 없습니다');
+  await expect(validateTaskCommit(root, task.id, commit.commit, 'review')).rejects.toThrow('검증 증거가 없습니다: fodh verify run 을 다시 실행하세요(업그레이드 전 증거는 무효)');
   await verify(root);
   const proof = (await readState(root)).verify!;
   for (const patch of [{ taskId: 'T99' }, { at: '2000-01-01T00:00:00Z' }, { ok: false }]) {
@@ -191,4 +191,18 @@ it('P6 검증이 만든 dirty 경로는 결과·상태·검수 거부 진단에 
   if (!('runId' in report)) throw new Error('result missing');
   expect(JSON.parse(await readFile(join(root, '.pi/verify', report.runId, 'result.json'), 'utf8')).dirtyAfter).toEqual(['verify-output.txt']);
   await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('verify-output.txt — 검증 산출물이면 프로젝트 .gitignore 에 추가(위임)');
+});
+
+it('Q3 실제 git: 검수 커밋이 직접 부모인 병합만 허용한다', { timeout: 60_000 }, async () => {
+  const { root, path, task } = await gitProject();
+  const review = await implement(root, path, task.id);
+  await setTask(root, task.id, { review: { commit: review, high: 0 } });
+  await git(root, 'merge', '--no-ff', review, '-m', 'reviewed merge');
+  const merged = await git(root, 'rev-parse', 'HEAD');
+  await validateTaskCommit(root, task.id, merged, 'merge');
+  // 검수 SHA가 조상이지만 직접 부모가 아닌 후속 커밋은 병합 증거가 아니다.
+  await writeFile(join(root, 'later.txt'), 'later');
+  await git(root, 'add', '.'); await git(root, 'commit', '-m', 'later root commit');
+  await expect(validateTaskCommit(root, task.id, await git(root, 'rev-parse', 'HEAD'), 'merge'))
+    .rejects.toThrow('병합 커밋의 부모에 검수 커밋이 없습니다');
 });

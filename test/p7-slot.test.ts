@@ -217,3 +217,23 @@ it('F17 unknown 누적은 현재 파일 소유자가 바뀌면 처음부터 센�
   const { readLedger } = await import('../src/core/ledger.ts');
   expect((await readLedger(root)).filter(e => e.action === 'notify:slot:unknown-owner')).toHaveLength(0);
 });
+it('Q4 codex가 비고 heavy 기록이 죽었으면 대기 소유자는 바꾸지 않는다', async () => {
+  const root = await project('IMPLEMENT');
+  await updateState(root, { state: 'paused(slot)', awaitingSlot: waiting });
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: { ...waiting.owner, runId: 'dead-heavy' } }));
+  vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('gone');
+  expect((await tick(root)).emitted).toContainEqual(expect.objectContaining({ kind: 'slot-free', ownerRunId: waiting.owner.runId }));
+  expect((await readState(root)).awaitingSlot?.owner).toEqual(waiting.owner);
+  const { readLedger } = await import('../src/core/ledger.ts');
+  expect((await readLedger(root)).some(e => e.action === 'slot:owner-changed')).toBe(false);
+});
+it('N1 INTERVIEW의 사용자 대기는 슬롯 표지가 있어도 유지한다', async () => {
+  const root = await project('INTERVIEW');
+  await updateState(root, { awaitingSlot: waiting });
+  const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>(), sendMessage = vi.fn();
+  orchestrator({ registerCommand: vi.fn(), on: (name: string, fn: any) => handlers.set(name, fn), sendMessage } as unknown as ExtensionAPI);
+  await handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '대기: 사용자' }] }] },
+    { cwd: root, hasUI: true, isIdle: () => true, ui: { notify: vi.fn() } });
+  expect(await readState(root)).toMatchObject({ state: 'INTERVIEW', awaitingUser: true });
+  expect(sendMessage).not.toHaveBeenCalled();
+});

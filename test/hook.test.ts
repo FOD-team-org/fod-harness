@@ -388,3 +388,14 @@ it.each(['branch -f main abc123', 'branch -D topic', 'checkout -B main abc123', 
       .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
   }
 });
+
+it.each([
+  ['switch -C main abc123', 'switch --force-create main abc123'],
+  ['branch -M topic main', 'branch -C topic main', 'branch --move --force topic main', 'branch --copy --force topic main'],
+  ['fetch . +abc123:refs/heads/main'],
+  ['push . +abc123:refs/heads/main'],
+  ['merge -s ours topic', 'merge -X ours topic', 'merge --strategy=ours topic', 'merge --strategy-option=ours topic', 'merge --strategy ours topic', 'merge --strategy-option ours topic'],
+].map(commands => ({ commands })))('Q3 참조·내용 덮어쓰기 보호: %j', async ({ commands }) => {
+  for (const command of commands) expect(await invoke('Bash', { command: `git ${command}` }, 'MERGE', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+});

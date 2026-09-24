@@ -11,7 +11,10 @@ export interface PickDecision {
 }
 const inProgress = (task: Task) => ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status);
 export function decidePick(backlog: Task[], state: HarnessState, resources: PickResources,
-  current: { taskId?: string; resumeState?: string } = state.resumeTask ?? state): PickDecision {
+  current: { taskId?: string; resumeState?: string } = state.taskId ? {
+    taskId: state.taskId,
+    resumeState: state.resumeTask?.taskId === state.taskId ? state.resumeTask.resumeState : state.resumeState,
+  } : state.resumeTask ?? state): PickDecision {
   const now = resources.now ?? Date.parse(state.savedAt ?? state.enteredAt ?? '1970-01-01T00:00:00Z');
   const paused = /^paused\(([^)]+)\)$/u.exec(state.state)?.[1] ?? state.lastPaused;
   if ((['memory', 'budget'].includes(paused ?? '') || paused === 'slot' && (state.state !== 'PICK' || !!state.awaitingSlot)) || resources.slots === false || resources.slots === 'unavailable') {
@@ -37,13 +40,17 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
     return { outcome: 'RESUME', task: activeTask, next: state.state, reason: '현재 task 단계를 유지' };
   }
   const resumable = pending.find(task => task.id === current.taskId && (task.status === 'ready' || inProgress(task)));
-  if (resumable && taskStates.includes(current.resumeState ?? '')) {
-    return { outcome: 'RESUME', task: resumable, next: current.resumeState, reason: '중단된 현재 task의 원래 단계로 복귀' };
+  const resumeStage = current.resumeState ?? resumable?.resume?.state;
+  if (resumable && taskStates.includes(resumeStage ?? '')) {
+    return { outcome: 'RESUME', task: resumable, next: resumeStage, reason: '중단된 현재 task의 원래 단계로 복귀' };
   }
-  const orphans = pending.filter(inProgress);
+  const recovered = !resumable && pending.filter(task => inProgress(task) && taskStates.includes(task.resume?.state ?? ''))
+    .sort((a, b) => Date.parse(a.resume!.at) - Date.parse(b.resume!.at))[0];
+  if (recovered) return { outcome: 'RESUME', task: recovered, next: recovered.resume!.state, reason: '회수한 task의 저장된 단계로 복귀' };
+  const orphans = pending.filter(task => inProgress(task) && !taskStates.includes(task.resume?.state ?? ''));
   // 고아는 먼저 차단한다. 순수 판정에서는 blocked가 된 후보 집합으로 다음 선택을 계산한다.
   if (orphans.length) {
-    const remaining = backlog.map(task => inProgress(task) ? { ...task, status: 'blocked(A0)' } : task);
+    const remaining = backlog.map(task => orphans.some(orphan => orphan.id === task.id) ? { ...task, status: 'blocked(A0)' } : task);
     const next = decidePick(remaining, { ...state, lastPaused: undefined, resumeTask: undefined }, resources, {});
     return { ...next, orphans };
   }
@@ -60,7 +67,7 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
     active.delete(id); visited.add(id);
   }
   for (const task of pending) { const cycle = visit(task.id, []); if (cycle) return { outcome: 'DEADLOCK', cycle, reason: '의존 순환' }; }
-  const selected = pending.find(task => task.status === 'ready'
+  const selected = (resumable?.status === 'ready' ? [resumable] : pending).find(task => task.status === 'ready'
     && task.depends.every(id => backlog.some(dependency => dependency.id === id && dependency.status === 'done')));
   if (selected) return { outcome: 'SPEC', task: selected, reason: '표 순서상 첫 실행 가능 task' };
   if (!pending.length) return backlog.length

@@ -187,7 +187,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
     const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
     const slotState = await readState(ctx.cwd);
     if (slotState.awaitingSlot && !slotState.delegation
-      && (active.has(slotState.state) && slotState.state !== 'recovering' || slotState.state === 'paused(slot)')) {
+      && (active.has(slotState.state) && !['recovering', 'INTERVIEW'].includes(slotState.state) || slotState.state === 'paused(slot)')) {
       if (slotState.state !== 'paused(slot)') await updateState(ctx.cwd, { state: 'paused(slot)', awaitingUser: false, autoTurns: 0 });
       else await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
       return;

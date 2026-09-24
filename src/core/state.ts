@@ -164,9 +164,13 @@ export async function transitionState(root: string, to: string, input: Transitio
     let task: Task | undefined;
     let verified: HarnessState['verify'];
     let documented = false;
+    let staleResumeTask: HarnessState['resumeTask'];
     const next = await updateState(root, async current => {
+      const savedTask = options.resume && options.taskId ? await getTask(root, options.taskId) : undefined;
+      const taskCheckpoint = savedTask && ['doing', 'verify', 'review', 'fix', 'merge'].includes(savedTask.status)
+        && savedTask.resume?.state === to;
       const resume = options.resume && current.state === 'PICK' && (taskStates.includes(to) || !current.taskId && current.phase === 'project' && to === 'RESEARCH')
-        && current.resumeTask?.taskId === options.taskId && current.resumeTask?.resumeState === to;
+        && (current.resumeTask?.taskId === options.taskId && current.resumeTask?.resumeState === to || taskCheckpoint);
       if (options.resume && !resume || !resume && !allowedTransition(current.state, to, options.system)) throw new TransitionError(transitionMessage(current.state, '허용되지 않는 전이'));
       if (current.state === 'INTERVIEW' && to === 'RESEARCH' && (await loadConfig(root)).interview.enforce) {
         const { interviewStatus, remainingAreas } = await import('./interview.ts');
@@ -261,6 +265,9 @@ export async function transitionState(root: string, to: string, input: Transitio
       if (current.state === 'VERIFY' && to === 'REVIEW') verified = current.verify;
       documented = current.state === 'DOCS' && to === 'CLEANUP';
       const returning = to === 'PICK' && (isPaused(current.state) || ['recovering', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(current.state));
+      const checkpoint = current.resumeTask && current.resumeTask.taskId === current.taskId
+        ? current.resumeTask : { taskId: current.taskId, resumeState: current.resumeState };
+      if (returning && current.resumeTask && current.resumeTask.taskId !== current.taskId) staleResumeTask = current.resumeTask;
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
       const mergeBase = current.state === 'REVIEW' && to === 'MERGE'
@@ -278,9 +285,9 @@ export async function transitionState(root: string, to: string, input: Transitio
         taskId: clearsTask || projectReview ? undefined : options.taskId ?? current.taskId,
         ...(to === 'WAIT_JUDGMENT' ? { resumeState: judgmentResume(current), resumeTask: current.resumeTask } : {}),
         ...(current.state === 'WAIT_JUDGMENT' ? { resumeState: undefined, pickJudgment: undefined } : {}),
-        ...(returning ? { resumeTask: current.resumeTask ?? { taskId: current.taskId, resumeState: current.resumeState }, resumeState: undefined } : {}),
+        ...(returning ? { resumeTask: checkpoint, resumeState: undefined } : {}),
         ...(to === 'RECLAIM' ? { resumeTask: { taskId: current.taskId, resumeState: taskStates.includes(current.state) ? current.state : current.resumeTask?.resumeState ?? current.resumeState } } : {}),
-        ...(resume || clearsTask && !(to === 'PICK' && ['RECLAIM', 'WAIT_JUDGMENT'].includes(current.state)) ? { resumeTask: undefined } : {}),
+        ...(resume || clearsTask && !(to === 'PICK' && current.state === 'WAIT_JUDGMENT') ? { resumeTask: undefined } : {}),
         ...(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'PROJECT_READY'].includes(to) || projectReview ? { phase: 'project' as const } : {}),
         ...(to === 'PLANNING' || to === 'SPEC' || resume && !!options.taskId ? { phase: 'task' as const } : {}),
       };
@@ -289,9 +296,11 @@ export async function transitionState(root: string, to: string, input: Transitio
     if (task) {
       const status = ({ SPEC: 'doing', IMPLEMENT: 'doing', VERIFY: 'verify', REVIEW: 'review', FIX: 'fix',
         MERGE: 'merge', DOCS: 'merge', CLEANUP: 'merge' } as Record<string, string>)[to];
-      await setTask(root, task.id, { status, ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
+      await setTask(root, task.id, { status, ...(options.resume ? { resume: undefined } : {}), ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
         verify: { ok: false }, review: { commit: undefined, high: undefined }, merge: { commit: undefined }, docs: { ok: false }, cleanup: { ok: false } } : {}) });
     }
+    if (staleResumeTask) await appendLedger(root, { runId: randomUUID(), taskId: next.taskId,
+      action: 'pick:stale-resume-task', status: 'warn', evidence: { ignored: staleResumeTask } });
     if (to === 'FIX' && task && !options.resume) await appendLedger(root, { runId: randomUUID(), taskId: task.id, action: 'review-commit:cleared', status: 'ok' });
     if (next.state === 'WAIT_JUDGMENT') {
       const { readJudgment } = await import('./judgment.ts');

@@ -196,7 +196,7 @@ it('판단 답의 치환 문자 보존, 문항 직접 편집 rev 증가, KST 날
 it.each(['1 모두 적용', '1 전부 처리', '1 제외 조건'])('단일 번호 문맥 %s는 확정한다', answer => {
   expect(classifyAnswer(answer, ['첫째', '둘째']).applicable).toBe(true);
 });
-it.each(['모두', '전부'])('다중 선택 문맥 %s는 모호 처리한다', answer => {
+it.each(['모두', '전부', '1과 2 제외'])('다중 선택 문맥 %s는 모호 처리한다', answer => {
   expect(classifyAnswer(answer, ['첫째', '둘째']).applicable).toBe(false);
 });
 it('잠금 소유자의 실제 프로세스 시작 시각이 다르면 PID가 살아 있어도 stale이다', async () => {
@@ -211,6 +211,3 @@ it('잠금 소유자의 실제 프로세스 시작 시각이 다르면 PID가 �
   expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: new Date(startedAt.getTime() - 10000).toISOString() })).toBe(false);
 });
 
-it('F21 숫자 뒤 공백·구두점이 없는 자유 서술은 번호로 읽지 않는다', () => {
-  expect(classifyAnswer('1과 2 제외', ['첫째', '둘째'])).toEqual({ kind: 'freeform', applicable: true });
-});

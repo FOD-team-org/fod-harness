@@ -90,8 +90,10 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
     return { kind: 'ambiguous', applicable: false, reason: '부정 또는 유보가 포함되어 있습니다' };
   }
   const circles = [...answer.matchAll(/[①-⑩]/gu)];
-  const leading = answer.match(/^(10|[1-9])(?=$|[\s\p{P}])/u);
-  if (circles.length > 1 || (!circles.length && /^(?:10|[1-9])(?=$|[\s\p{P}])(?:\s*(?:[,/]|또는|혹은|및|와|과|하고)\s*|\s+)(?:10|[1-9])(?=$|[\s\p{P}])/u.test(answer))) {
+  // 번 뒤 조사가 이어지는 "2번으로"도 선택이다. 소수와 영숫자 식별자는 제외한다.
+  const leading = answer.match(/^(10|[1-9])(?!\.\d)(?:번(?=$|[\s\p{P}\p{Script=Hangul}])|(?=$|[\s\p{P}]))/u);
+  const numbers = [...answer.matchAll(/(?<![A-Za-z0-9_])(?<!\d\.)(10|[1-9])(?![A-Za-z0-9_]|\.\d)(?=$|[\s\p{P}]|번|과|와|또는|혹은|이나|은|는|을|를|으로|로|하고|및)/gu)];
+  if (circles.length + numbers.length > 1) {
     return { kind: 'ambiguous', applicable: false, reason: '선택 번호가 여러 개입니다' };
   }
   if (/모두|제외|전부/u.test(answer) && !circles.length && !leading
@@ -351,9 +353,6 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
         const other = document.items.find(item => !item.followup && !entry.releases.includes(item.id)
           && item.blocks.split(/[,\s]+/u).includes(task.id));
         const status = entry.hold ? task.status : other ? `blocked(${other.id})` : task.resume?.status ?? 'ready';
-        if (!entry.hold && !other && task.resume) await updateState(root, {
-          resumeTask: { taskId: task.id, resumeState: task.resume.state },
-        });
         await setTask(root, task.id, { status, judgment: entry.hold ? task.judgment : other?.id ?? '',
           notes: [task.notes, `${entry.id}: ${entry.interpretation}`].filter(Boolean).join('\n') });
       }

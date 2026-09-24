@@ -49,7 +49,7 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
   const state = await readState(root), verify = state.verify;
   if (kind === 'review') {
     if (!verify?.ok || verify.taskId !== taskId || !verify.head
-      || !(Date.parse(verify.at) >= Date.parse(state.verifySince ?? verify.since ?? ''))) throw new Error('검증 증거가 없습니다');
+      || !(Date.parse(verify.at) >= Date.parse(state.verifySince ?? verify.since ?? ''))) throw new Error('검증 증거가 없습니다: fodh verify run 을 다시 실행하세요(업그레이드 전 증거는 무효)');
     if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error(message);
     let commit: string, verified: string;
     try {
@@ -66,7 +66,7 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
       }
     } else await appendLedger(root, { runId: randomUUID(), taskId, action: 'merge-commit:base-branch-unknown', status: 'warn' });
   }
-  let dirtyHint = '';
+  let dirtyHint = '', mergeError = '';
   try {
     if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error();
     const cwd = kind === 'review' ? await taskWorktree(root, taskId, true) : root;
@@ -91,9 +91,13 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
       await git(root, ['merge-base', '--is-ancestor', sha, 'HEAD']);
       const commit = (await git(root, ['rev-parse', `${sha}^{commit}`])).trim();
       const reviewed = (await git(root, ['rev-parse', `${review}^{commit}`])).trim();
+      const parents = (await git(root, ['rev-list', '--parents', '-n', '1', commit])).trim().split(/\s+/u).slice(1);
+      if (commit !== reviewed && !parents.includes(reviewed)) {
+        mergeError = '병합 커밋의 부모에 검수 커밋이 없습니다'; throw new Error();
+      }
       if (commit === reviewed && (await git(root, ['rev-parse', 'HEAD'])).trim() !== commit) throw new Error();
     }
-  } catch { throw new Error(message + dirtyHint); }
+  } catch { throw new Error(mergeError || message + dirtyHint); }
 }
 export async function commitWorktree(root: string, taskId: string, message: string) {
   if (!message.trim()) throw new Error('커밋 메시지 -m이 필요합니다');

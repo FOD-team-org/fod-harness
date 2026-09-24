@@ -23,9 +23,9 @@ it('F22 MERGE 회수→답 적용→PICK은 증거를 보존하고 MERGE로 복�
   await updateState(root, { state: 'MERGE', taskId: task.id, phase: 'task', doctor: { ok: true, checkedAt: new Date().toISOString() } });
   const result = await cli(root, ['judgment', 'add', '--title', '재개', '--background', '병합 후', '--options', '변경|유지', '--recommend', '②', '--blocks', task.id, '--reclaim']);
   expect(result).toMatchObject({ code: 0, value: { reclaimed: true, next: 'PICK' } });
-  expect(await readState(root)).toMatchObject({ resumeTask: { taskId: task.id, resumeState: 'MERGE' } });
+  expect((await readState(root)).resumeTask).toBeUndefined();
   expect(await getTask(root, task.id)).toMatchObject({ status: `blocked(${result.value.judgment})`, resume: { status: 'merge', state: 'MERGE' }, ...evidence });
-  // An intervening judgment wait must retain the task checkpoint.
+  // An intervening judgment wait must retain task.resume, without a state checkpoint.
   await transitionState(root, 'WAIT_JUDGMENT');
   await answerJudgment(root, result.value.judgment, prose);
   expect((await applyJudgments(root)).applied).toHaveLength(1);
@@ -90,4 +90,85 @@ it.each(['VERIFY', 'REVIEW', 'FIX'])('F22 %s 회수와 재개는 검증·검수 
   if (stage === 'VERIFY') expect((await readState(root)).verifySince).toBe(entered.verifySince);
   if (stage === 'REVIEW') expect((await readState(root)).reviewSince).toBe(entered.reviewSince);
   expect(await getTask(root, task.id)).toMatchObject({ verify: { ok: true }, review: { commit: 'none', high: 0 }, merge: { commit: 'none' } });
+});
+
+it('Q1/Q5 다른 task 중 판단 적용→정지 복귀→완료 뒤 회수 task 재개', async () => {
+  const root = await project('PICK');
+  const first = await addTask(root, { title: '병합 회수', category: 'docs' });
+  const second = await addTask(root, { title: '다음 구현', category: 'docs' });
+  await setTask(root, first.id, { status: 'merge', review: { commit: 'none', high: 0 }, merge: { commit: 'none' } });
+  await updateState(root, { state: 'MERGE', taskId: first.id, phase: 'task', doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  const result = await cli(root, ['judgment', 'add', '--title', '재개', '--background', '대기', '--options', '재개|보류', '--recommend', '①', '--blocks', first.id, '--reclaim']);
+  expect(result.value.reclaimed).toBe(true);
+  expect(await runPick(root)).toMatchObject({ outcome: 'SPEC', task: { id: second.id } });
+  await transitionState(root, 'IMPLEMENT', second.id);
+  const checkpoint = (await readState(root)).resumeTask;
+  await answerJudgment(root, result.value.judgment, '1');
+  expect((await applyJudgments(root)).applied).toHaveLength(1);
+  expect((await readState(root)).resumeTask).toEqual(checkpoint);
+  await transitionState(root, 'paused(slot)', { system: true });
+  await transitionState(root, 'PICK');
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', next: 'IMPLEMENT', task: { id: second.id } });
+  expect((await getTask(root, first.id)).resume?.state).toBe('MERGE');
+  await setTask(root, second.id, { status: 'done', verify: { ok: true }, review: { commit: 'none', high: 0 }, merge: { commit: 'none' }, docs: { ok: true }, cleanup: { ok: true } });
+  await updateState(root, { state: 'CLEANUP' });
+  await transitionState(root, 'PICK');
+  expect((await readState(root)).resumeTask).toBeUndefined();
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', next: 'MERGE', task: { id: first.id } });
+  expect((await getTask(root, first.id)).resume).toBeUndefined();
+  expect((await readJudgment(root)).items).toHaveLength(0);
+});
+it('Q1 정지 복귀는 다른 task의 낡은 checkpoint를 무시하고 원장에 남긴다', async () => {
+  const root = await project('PICK'), task = await addTask(root, { title: '현재', category: 'docs' });
+  await setTask(root, task.id, { status: 'doing' });
+  await updateState(root, { state: 'IMPLEMENT', taskId: task.id, doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  await transitionState(root, 'paused(slot)', { system: true });
+  await updateState(root, { resumeTask: { taskId: 'T99', resumeState: 'MERGE' } });
+  await transitionState(root, 'PICK');
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', next: 'IMPLEMENT', task: { id: task.id } });
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'pick:stale-resume-task', evidence: { ignored: { taskId: 'T99', resumeState: 'MERGE' } } }));
+});
+it('Q1/Q5 회수 후보는 오래된 순이며 실패한 RESUME에는 resume을 보존한다', async () => {
+  const root = await project('PICK');
+  const newer = await addTask(root, { title: '신규', category: 'docs' }), older = await addTask(root, { title: '이전', category: 'docs' });
+  for (const [task, at] of [[newer, '2026-09-24T02:00:00Z'], [older, '2026-09-24T01:00:00Z']] as const) {
+    await setTask(root, task.id, { status: 'merge', resume: { status: 'merge', state: 'MERGE', at } });
+  }
+  await expect(runPick(root)).rejects.toThrow('doctor');
+  expect((await getTask(root, older.id)).resume).toBeDefined();
+  await updateState(root, { doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', task: { id: older.id } });
+  expect((await getTask(root, older.id)).resume).toBeUndefined();
+  expect((await getTask(root, newer.id)).resume).toBeDefined();
+});
+it.each(['1또는2', '1번과2번', '선택지는 1 혹은 2', '1과 2 제외', '① 2', '1이나2'])('Q2 복수 독립 토큰은 재질문: %s', answer => {
+  expect(classifyAnswer(answer, ['진행', '보류'])).toMatchObject({ kind: 'ambiguous', applicable: false });
+});
+it.each([['2번', 2], ['2번으로 진행', 2], ['1번 선택', 1], ['② 그대로', 2]] as const)('Q2 선택 접미사: %s', (answer, selection) => {
+  expect(classifyAnswer(answer, ['진행', '보류'])).toMatchObject({ applicable: true, selection });
+});
+it.each(['T02 를 fce149f 로 진행', '1.5배로', 'v2 그대로'])('Q2/N3 식별자·소수는 번호가 아니다: %s', answer => {
+  expect(classifyAnswer(answer, ['진행', '보류'])).toEqual({ kind: 'freeform', applicable: true });
+});
+it('Q1 현재 taskId는 더 오래된 회수 후보보다 우선한다', async () => {
+  const root = await project('PICK');
+  const older = await addTask(root, { title: '이전 회수', category: 'docs' });
+  const current = await addTask(root, { title: '현재 회수', category: 'docs' });
+  await setTask(root, older.id, { status: 'merge', resume: { status: 'merge', state: 'MERGE', at: '2026-09-24T01:00:00Z' } });
+  await setTask(root, current.id, { status: 'merge', resume: { status: 'merge', state: 'MERGE', at: '2026-09-24T02:00:00Z' } });
+  await updateState(root, { taskId: current.id, doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', task: { id: current.id } });
+  expect((await getTask(root, older.id)).resume).toBeDefined();
+});
+it('Q1 RECLAIM의 임시 checkpoint가 오래된 회수 후보를 앞지르지 않는다', async () => {
+  const root = await project('PICK');
+  const older = await addTask(root, { title: '먼저 회수', category: 'docs' });
+  const newer = await addTask(root, { title: '나중 회수', category: 'docs' });
+  await setTask(root, older.id, { status: 'merge', resume: { status: 'merge', state: 'MERGE', at: '2026-09-24T01:00:00Z' } });
+  await setTask(root, newer.id, { status: 'merge' });
+  await updateState(root, { state: 'MERGE', taskId: newer.id, phase: 'task', doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  const result = await cli(root, ['judgment', 'add', '--title', '나중 회수', '--background', '', '--options', '재개|보류', '--recommend', '①', '--blocks', newer.id, '--reclaim']);
+  expect(result.value.reclaimed).toBe(true);
+  await answerJudgment(root, result.value.judgment, '1'); await applyJudgments(root);
+  expect(await runPick(root)).toMatchObject({ outcome: 'RESUME', task: { id: older.id } });
 });
