@@ -58,7 +58,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
     codex: {
       brainModel: modelName(defaultValue(codex.brainModel, 'gpt-6-astra'), 'delegate.codex.brainModel'),
       brainEffort: effort(defaultValue(codex.brainEffort, 'xhigh'), 'delegate.codex.brainEffort'),
-      workerModel: modelName(defaultValue(codex.workerModel, 'gpt-5.6-sol'), 'delegate.codex.workerModel'),
+      workerModel: modelName(defaultValue(codex.workerModel, 'gpt-6-sol'), 'delegate.codex.workerModel'),
       workerEffort: effort(defaultValue(codex.workerEffort, 'xhigh'), 'delegate.codex.workerEffort'),
       maxChildAgents: nonnegativeInteger(defaultValue(codex.maxChildAgents, 1), 'delegate.codex.maxChildAgents'),
     },
