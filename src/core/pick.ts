@@ -1,5 +1,5 @@
 import { listBacklog, setTask, type Task } from './backlog.ts';
-import { addJudgment } from './judgment.ts';
+import { addJudgment, type JudgmentItem } from './judgment.ts';
 import { readState, transitionState, updateState, taskStates, type HarnessState } from './state.ts';
 import { harnessPath, withFileLock } from './storage.ts';
 
@@ -10,6 +10,17 @@ export interface PickDecision {
   retry?: { count: number; nextAt?: string }; exhausted?: boolean;
 }
 const inProgress = (task: Task) => ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status);
+// Judgment blocking is separate from selection; completed tasks never carry it.
+export function blockedTaskIds(tasks: readonly Task[], openItems: readonly Pick<JudgmentItem, 'id' | 'blocks'>[]): Set<string> {
+  const pending = tasks.filter(task => task.status !== 'done');
+  const blocked = new Set(pending.filter(task => openItems.some(item => item.blocks.split(/[,\s]+/u).includes(task.id)
+    || task.status === `blocked(${item.id})`)).map(task => task.id));
+  for (let size = -1; size !== blocked.size;) {
+    size = blocked.size;
+    for (const task of pending) if (task.depends.some(id => blocked.has(id))) blocked.add(task.id);
+  }
+  return blocked;
+}
 export function decidePick(backlog: Task[], state: HarnessState, resources: PickResources,
   current: { taskId?: string; resumeState?: string } = state.taskId ? {
     taskId: state.taskId,

@@ -724,3 +724,19 @@ it('F25 PICK의 복귀 후보도 사용자에게 떠넘기지 않는다', async 
   expect((await readState(t.root)).awaitingUser).toBe(false);
   expect(t.sendMessage.mock.calls[0][0].content).toContain(task.id);
 });
+
+it.each(['seed', 'propagation'])('F26 done task는 판단 차단의 %s에서 제외한다', async kind => {
+  const t = await setup();
+  const upstream = kind === 'propagation' ? await addTask(t.root, { title: '판단 대기', category: 'docs' }) : undefined;
+  const done = await addTask(t.root, { title: '완료된 선행 작업', category: 'docs' });
+  await setTask(t.root, done.id, { status: 'done', depends: upstream ? [upstream.id] : [],
+    verify: { ok: true }, review: { high: 0, commit: 'none' }, merge: { commit: 'none' }, docs: { ok: true }, cleanup: { ok: true } });
+  const ready = await addTask(t.root, { title: '실행 가능한 후속 작업', category: 'docs', depends: [done.id] });
+  const { item } = await addJudgment(t.root, { title: '남아 있는 판단', background: '', options: ['진행'], recommend: '', blocks: upstream?.id ?? done.id });
+  if (upstream) await setTask(t.root, upstream.id, { status: `blocked(${item.id})` });
+  await updateState(t.root, { state: 'PICK' });
+  await t.end('stop', '대기: 사용자');
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'pick:user-wait-rejected', evidence: { taskIds: [ready.id] } }));
+  expect((await readState(t.root)).awaitingUser).toBe(false);
+  expect(t.sendMessage).toHaveBeenCalledOnce();
+});

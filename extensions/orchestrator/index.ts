@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../../src/core/config.ts';
 import { readState, updateState, transitionState, activeStates as active, doctorFresh } from '../../src/core/state.ts';
 import { listBacklog } from '../../src/core/backlog.ts';
-import { runPick, decidePick } from '../../src/core/pick.ts';
+import { runPick, decidePick, blockedTaskIds } from '../../src/core/pick.ts';
 import { runCleanup } from '../../src/core/cleanup.ts';
 import { notify, setNotifyContext } from '../../src/core/notify.ts';
 import { applyJudgments, readJudgment, holdBrainTurnAnswers, JudgmentConflict } from '../../src/core/judgment.ts';
@@ -213,12 +213,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const state = await readState(ctx.cwd), tasks = await listBacklog(ctx.cwd);
       const decision = decidePick(tasks, state, { slots: 'ok', now: Date.now() });
       const open = (await readJudgment(ctx.cwd)).items;
-      const blocked = new Set(tasks.filter(task => open.some(item => item.blocks.split(/[,\s]+/u).includes(task.id)
-        || task.status === `blocked(${item.id})`)).map(task => task.id));
-      for (let size = -1; size !== blocked.size;) {
-        size = blocked.size;
-        for (const task of tasks) if (task.depends.some(id => blocked.has(id))) blocked.add(task.id);
-      }
+      const blocked = blockedTaskIds(tasks, open);
       const candidates = tasks.filter(task => task.status !== 'done' && !blocked.has(task.id)).map(task => task.id);
       const allBlocked = tasks.some(task => task.status !== 'done') && !candidates.length;
       if (decision.outcome !== 'EMPTY' && !allBlocked) {
