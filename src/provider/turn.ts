@@ -4,6 +4,7 @@ import { auditPaths } from '../core/audit.ts';
 import { join, resolve } from 'node:path';
 import { access } from 'node:fs/promises';
 import { loadConfig } from '../core/config.ts';
+import { notify } from '../core/notify.ts';
 import { readState, updateState } from '../core/state.ts';
 import { acquireLock } from '../core/lock.ts';
 import { appendLedger, unknownEntries } from '../core/ledger.ts';
@@ -57,6 +58,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
   const runId = randomUUID();
   let release: (() => Promise<void>) | undefined;
   let unclassifiedLogged = false;
+  let reportText = '';
   const turnSuspicions = new Set<string>();
   const pendingDenials: (() => Promise<void>)[] = [];
   const patchState = (patch: Parameters<typeof updateState>[1]) =>
@@ -78,6 +80,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root, FODH_BRAIN: '1', FODH_DOCS_ROOT: config.docs.root,
       FODH_PROTECTED_EXTRA: [config.interview.extraBankFile, config.docs.overrideDir].join(':') };
     for (let attempt = 0; attempt < 2; attempt++) {
+      reportText = '';
       const action = `brain:${attempt}`;
       await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
       let init: TurnResult['init'];
@@ -156,11 +159,14 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                 && (info?.overageStatus === undefined || info.overageStatus === 'rejected')) return 'quota';
               if (info?.isUsingOverage === true || info?.overageStatus !== 'rejected') return 'billing';
             } else if (event.type === 'stream_event') {
-              if (event.event?.type === 'message_start') partialText = false;
+              if (event.event?.type === 'message_start') { partialText = false; reportText = ''; }
               if (event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') {
+                reportText += event.event.delta.text;
                 partialText = true; text(event.event.delta.text);
               }
             } else if (event.type === 'assistant') {
+              reportText = (event.message?.content ?? []).filter((block: any) => block.type === 'text')
+                .map((block: any) => block.text).join('\n');
               for (const block of event.message?.content ?? []) {
                 if (block.type === 'tool_use') {
                   toolSeen = true; toolInputs.set(block.id, { tool_name: block.name, tool_input: block.input });
@@ -196,6 +202,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
               }
             } else if (event.type === 'result') {
               result = event;
+              if (typeof event.result === 'string') reportText = event.result;
               await appendLedger(root, { runId, action: `result:${attempt}`, status: event.is_error ? 'fail' : 'ok', evidence: safeValue({
                 model: (await readState(root)).actualModel, stop_reason: event.stop_reason, terminal_reason: event.terminal_reason,
                 is_error: event.is_error, api_error_status: event.api_error_status, permission_denials: event.permission_denials ?? [],
@@ -302,6 +309,23 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
   } finally {
     try {
       for (const persist of pendingDenials) await persist();
+      if (!options.doctor) {
+        try {
+          const tail = reportText.trim().split(/\r?\n/u).filter(line => line.trim()).slice(-3);
+          const reported = tail.map(line => /^상태:\s*([A-Za-z_()]+)\s*$/u.exec(line.replace(/[`*]/gu, '').trim())?.[1]).findLast(Boolean);
+          const actual = (await readState(root)).state;
+          if (reported && reported !== actual) {
+            await appendLedger(root, { runId, action: 'report:state-mismatch', status: 'warn',
+              evidence: { reported: redact(reported), actual } });
+            await notify(root, { key: `report:state-mismatch:${runId}`, level: 'info', title: '두뇌 상태 보고',
+              body: `두뇌 보고 상태 ${reported} ≠ 실제 ${actual}` });
+          }
+        } catch (error) {
+          try { await appendLedger(root, { runId, action: 'report:state-check', status: 'fail',
+            evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
+          catch { /* Diagnostic storage failure must also preserve the original turn result. */ }
+        }
+      }
       const fresh = [...turnSuspicions].filter(path => !notifiedAuditPaths.has(`${resolve(root)}\0${path}`));
       if (fresh.length && options.notify) {
         try {

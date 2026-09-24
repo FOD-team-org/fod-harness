@@ -13,7 +13,7 @@
 ## 다음 fodh 명령
 - task 통과 → `fodh backlog set {{taskId}} --review-commit <sha> --review-high 0` 후 `fodh state transition MERGE --task {{taskId}}`
 - task 반려 → `fodh state transition FIX --task {{taskId}}`; 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim`
-- 프로젝트 통과 → `fodh state transition PROJECT_READY`; 질문 추가 → `fodh interview add --area NN --text "<질문>" --must` 후 `fodh state transition INTERVIEW`
+- 프로젝트 통과 → `fodh state transition PROJECT_READY` 이후 `대기: 사용자` 로 턴을 끝낸다; 질문 추가 → `fodh interview add --area NN --text "<질문>" --must` 후 `fodh state transition INTERVIEW`
 - 프로젝트 미결 → `fodh state transition WAIT_JUDGMENT`
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.

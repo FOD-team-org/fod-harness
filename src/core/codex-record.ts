@@ -1,4 +1,5 @@
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { readdir } from 'node:fs/promises';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 import { setTask } from './backlog.ts';
 import { appendLedgerOnce } from './ledger.ts';
@@ -22,6 +23,21 @@ export function resultDir(root: string, runId: string): string {
 export const metaPath = (root: string, runId: string) => join(resultDir(root, runId), 'meta.json');
 export async function readMeta(root: string, runId: string): Promise<CodexMeta | undefined> {
   return readJson<CodexMeta | undefined>(metaPath(root, runId), undefined);
+}
+export async function hasReviewEvidence(root: string, reviewSince: string | undefined, taskId?: string): Promise<boolean> {
+  const entered = Date.parse(reviewSince ?? '');
+  const runs = await readdir(harnessPath(root, 'codex'), { withFileTypes: true }).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  });
+  for (const run of runs) {
+    if (!run.isDirectory() || !/^[A-Za-z0-9_-]+$/u.test(run.name)) continue;
+    const meta = await readMeta(root, run.name);
+    if (meta?.status === 'ok' && (taskId === undefined || meta.taskId === taskId)
+      && (meta.kind === 'review' && Date.parse(meta.startedAt) >= entered
+        || taskId !== undefined && meta.kind === 'task')) return true;
+  }
+  return false;
 }
 export async function writeMeta(root: string, meta: CodexMeta): Promise<void> {
   await atomicWrite(metaPath(root, meta.runId), JSON.stringify(meta, null, 2) + '\n');

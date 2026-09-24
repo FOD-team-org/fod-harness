@@ -5,9 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
-import { getTask, setTask, missingDoD, BacklogError, type Task } from './backlog.ts';
+import { getTask, setTask, listBacklog, missingDoD, BacklogError, type Task } from './backlog.ts';
 import { appendLedger } from './ledger.ts';
 import { loadConfig } from './config.ts';
+import { hasReviewEvidence } from './codex-record.ts';
 
 export interface HarnessState {
   delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string };
@@ -15,12 +16,14 @@ export interface HarnessState {
   worktrees?: { taskId: string; path: string; branch: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
-  enteredAt?: string; autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
+  enteredAt?: string; reviewSince?: string; resumeReviewSince?: string;
+  autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
   retry?: { count: number; nextAt?: string }; [key: string]: unknown;
 }
 export const activeStates = new Set(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW', 'PLANNING', 'PICK',
   'SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'MERGE', 'DOCS', 'CLEANUP', 'RECLAIM', 'recovering']);
 export const taskStates = ['SPEC', 'IMPLEMENT', 'VERIFY', 'REVIEW', 'FIX', 'MERGE', 'DOCS', 'CLEANUP'];
+export const userOnlyTransitions = new Set(['PROJECT_READY→PLANNING', 'DONE_ALL→PLANNING', 'DONE_ALL→IDLE']);
 const projectStates = ['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'];
 export const isPaused = (state: string) => /^paused\((billing|quota|error|memory|budget|cleanup)\)$/u.test(state);
 export async function readState(root: string): Promise<HarnessState> {
@@ -34,10 +37,24 @@ export async function updateState(
   let committedState: HarnessState | undefined, stateChanged = false;
   for (let attempt = 0; attempt < 5; attempt++) {
     const current = await readState(root);
-    const next: HarnessState = { ...current, ...(typeof patch === 'function' ? await patch(current) : patch), savedAt: new Date().toISOString() };
+    const changes = typeof patch === 'function' ? await patch(current) : patch;
+    const next: HarnessState = { ...current, ...changes, savedAt: new Date().toISOString() };
     if (typeof next.state !== 'string' || !next.state.trim()) throw new Error('상태 값이 올바르지 않습니다');
     const changed = next.state !== current.state;
     if (changed || next.taskId !== current.taskId) { next.autoTurns = 0; next.enteredAt = next.savedAt; }
+    if (changed || next.taskId !== current.taskId) {
+      if (next.state === 'REVIEW') {
+        next.reviewSince = changes.reviewSince ?? next.savedAt;
+        next.resumeReviewSince = undefined;
+      } else if (current.state === 'REVIEW') {
+        // REVIEW's active clock is cleared on exit; suspension keeps a separate checkpoint.
+        next.resumeReviewSince = next.state === 'WAIT_JUDGMENT' || isPaused(next.state) || next.state === 'recovering'
+          ? current.reviewSince ?? current.enteredAt : undefined;
+        next.reviewSince = undefined;
+      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'].includes(next.state) && !isPaused(next.state)) {
+        next.resumeReviewSince = undefined;
+      }
+    }
     if (changed && (isPaused(next.state) || next.state === 'recovering')) {
       if (taskStates.includes(current.state) || projectStates.includes(current.state) || current.state === 'PLANNING') {
         next.resumeState = current.state;
@@ -70,8 +87,9 @@ export async function updateState(
       cleanupLine = ` — 프로세스 ${report.processes?.reclaimed.length ?? 0}개 회수, 잔존 ${(report.processes?.residual.length ?? 0) + (report.processes?.unverified.length ?? 0)}개`;
     } catch (error) { await recordFailure('cleanup:processes', error); }
   }
-  if (stateChanged && (next.state.startsWith('WAIT_') || isPaused(next.state) || ['DONE_ALL', 'CLEANUP_FAILED'].includes(next.state))) {
-    try { await notify(root, { key: `state:${next.state}`, title: '하네스 상태', body: `하네스 상태: ${next.state}${cleanupLine}`,
+  if (stateChanged && (next.state.startsWith('WAIT_') || isPaused(next.state) || ['PROJECT_READY', 'DONE_ALL', 'CLEANUP_FAILED'].includes(next.state))) {
+    try { await notify(root, { key: `state:${next.state}`, title: '하네스 상태', body: next.state === 'PROJECT_READY'
+      ? '프로젝트 준비 완료 — `/develop-start` 로 개발을 시작하세요' : `하네스 상태: ${next.state}${cleanupLine}`,
       level: isPaused(next.state) || next.state === 'CLEANUP_FAILED' ? 'warning' : 'info' }); }
     catch (error) { await recordFailure(`notify:state:${next.state}`, error); }
   }
@@ -157,6 +175,9 @@ export async function transitionState(root: string, to: string, input: Transitio
       if (current.state === 'IDLE' && to === 'PLANNING') {
         await access(join(root, 'docs/backlog.md')).catch(() => { throw new Error('PLANNING 진입에는 백로그가 필요합니다'); });
       }
+      if (current.state === 'PLANNING' && to === 'PICK' && !(await listBacklog(root)).length) {
+        throw new Error('PICK 진입에는 등록된 task 가 필요합니다 (fodh backlog add)');
+      }
       const needsTask = taskStates.includes(to) && !projectReview;
       const id = options.taskId ?? (to === 'CLEANUP' ? current.taskId : undefined);
       if (needsTask) {
@@ -167,6 +188,10 @@ export async function transitionState(root: string, to: string, input: Transitio
       }
       if (['IMPLEMENT', 'MERGE'].includes(to) && !doctorFresh(current, (await loadConfig(root)).brain.doctorTtlHours)) {
         throw new Error('doctor 검증이 없거나 오래되었습니다. Pi 세션을 재시작하거나 fodh doctor 를 실행하세요.');
+      }
+      if (current.state === 'REVIEW' && (to === 'PROJECT_READY' || to === 'MERGE')
+        && !await hasReviewEvidence(root, current.reviewSince, to === 'MERGE' ? task!.id : undefined)) {
+        throw new Error('교차검수 증거가 없습니다: fodh codex review --wait 결과가 필요합니다');
       }
       if (current.state === 'MERGE' && to === 'DOCS'
         && (!options.commit || !task?.review?.commit || task.review.high !== 0 || task.review.commit !== options.commit)) {
@@ -182,6 +207,10 @@ export async function transitionState(root: string, to: string, input: Transitio
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
       return { state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
+        ...(to === 'REVIEW' && (resume || current.state === 'WAIT_JUDGMENT') ? { reviewSince: current.resumeReviewSince } : {}),
+        ...(current.state !== to && (['PROJECT_READY', 'DONE_ALL', 'CLEANUP_FAILED'].includes(current.state) || current.state.startsWith('WAIT_'))
+          ? { awaitingUser: false } : {}),
+        ...(to === 'PROJECT_READY' ? { awaitingUser: true } : {}),
         ...(to === 'CLEANUP_FAILED' ? { cleanupFailures: failures } : {}),
         ...(current.state === 'CLEANUP' && to === 'PICK' ? { cleanupFailures: 0 } : {}),
         ...(['WAIT_RESOURCE', 'WAIT_RETRY'].includes(current.state) && to === 'PICK' ? { lastPaused: undefined, retry: undefined } : {}),

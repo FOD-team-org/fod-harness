@@ -62,10 +62,10 @@ it('defer dedupe, 완료 표를 answered로 읽고 파일은 쓰지 않는다', 
   const first = await deferInterview(root, 'Q03-02'), second = await deferInterview(root, 'Q03-02');
   expect(second.judgmentId).toBe(first.judgmentId);
   expect((await readJudgment(root)).items).toHaveLength(1);
-  expect((await readJudgment(root)).items[0]).toMatchObject({ blocks: '-', background: '인터뷰 영역 03', options: ['1주 이내','2~4주','1~3개월','미정'] });
-  await answerJudgment(root, first.judgmentId!, '2'); await completeJudgment(root, first.judgmentId!, { interpretation: '2~4주', commit: '문서 반영' });
+  expect((await readJudgment(root)).items[0]).toMatchObject({ blocks: '-', background: '인터뷰 영역 03', options: ['2~4주','1주 이내','1~3개월','미정'] });
+  await answerJudgment(root, first.judgmentId!, '1'); await completeJudgment(root, first.judgmentId!, { interpretation: '2~4주', commit: '문서 반영' });
   const before = await readFile(join(root, '.pi/harness-interview.json'));
-  const status = await interviewStatus(root); expect(status.questions['Q03-02']).toMatchObject({ status: 'answered', source: `judgment:${first.judgmentId}`, answer: '2' });
+  const status = await interviewStatus(root); expect(status.questions['Q03-02']).toMatchObject({ status: 'answered', source: `judgment:${first.judgmentId}`, answer: '2~4주' });
   expect(await readFile(join(root, '.pi/harness-interview.json'))).toEqual(before);
   await deferInterview(root, 'Q01-01'); expect((await readJudgment(root)).items[0].options).toEqual(['추천안 채택','직접 답하기']);
 });

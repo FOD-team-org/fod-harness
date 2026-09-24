@@ -2,7 +2,7 @@ import { codexOwnership } from './process-identity.ts';
 import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, realpath, stat, open } from 'node:fs/promises';
+import { readFile, realpath, stat, lstat, open } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -59,9 +59,21 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
     const specPath = await realpath(resolve(root, options.spec));
     if (!inside(root, specPath)) throw new Error('--spec은 프로젝트 내부 상대 경로여야 합니다');
     const spec = await readFile(specPath, 'utf8');
-    const worktree = kind === 'task' && task?.worktree ? await realpath(resolve(root, task.worktree)) : null;
+    const gitTask = kind === 'task' && await lstat(join(root, '.git')).then(() => true).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    });
+    const needsWorktree = 'IMPLEMENT 는 워크트리가 필요합니다: fodh worktree create <task>';
+    const worktree = kind === 'task' && task?.worktree ? await realpath(resolve(root, task.worktree)).catch(error => {
+      if (gitTask && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(needsWorktree);
+      throw error;
+    }) : null;
+    const registered = await Promise.all((state.worktrees ?? []).map(async item => realpath(resolve(root, item.path)).catch(() => '')));
+    if (gitTask && (!worktree || !(state.worktrees ?? []).some((item, index) => item.taskId === task!.id && registered[index] === worktree))) {
+      throw new Error(needsWorktree);
+    }
     const cwd = await realpath(options.cwd ? resolve(root, options.cwd) : worktree ?? root);
-    const registered = await Promise.all((state.worktrees ?? []).map(async item => realpath(item.path).catch(() => '')));
+    if (gitTask && !inside(worktree!, cwd)) throw new Error('--cwd는 해당 task의 등록된 워크트리 안이어야 합니다');
     if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
     if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
     const resume = options.resume === 'last' ? task?.codexThread : options.resume;

@@ -1,0 +1,65 @@
+import { expect, it, vi } from 'vitest';
+import { ChildProcess, spawn } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { project } from './p5-helpers.ts';
+import { addTask, setTask } from '../src/core/backlog.ts';
+import { updateState } from '../src/core/state.ts';
+import { startCodex } from '../src/core/codex.ts';
+import { readLedger } from '../src/core/ledger.ts';
+import * as slots from '../src/core/slots.ts';
+import * as processes from '../src/core/process-time.ts';
+
+vi.mock('node:child_process', async original => ({ ...await original<typeof import('node:child_process')>(), spawn: vi.fn() }));
+async function setup(git: 'file' | 'directory' | false) {
+  const root = await project('PICK'), task = await addTask(root, { title: '구현', category: 'docs' });
+  if (git === 'directory') await mkdir(join(root, '.git'));
+  if (git === 'file') await writeFile(join(root, '.git'), 'gitdir: unused-fixture');
+  await writeFile(join(root, 'spec.md'), 'fixture');
+  await updateState(root, { state: 'IMPLEMENT', taskId: task.id });
+  vi.mocked(spawn).mockReset();
+  vi.spyOn(slots, 'acquireSlot').mockResolvedValue({ acquired: true });
+  vi.spyOn(slots, 'updateSlot').mockResolvedValue(undefined);
+  vi.spyOn(processes, 'processStartedAt').mockResolvedValue('fixture-start');
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  vi.mocked(spawn).mockImplementation(() => {
+    const child = new ChildProcess(); Object.defineProperty(child, 'pid', { value: 99999991 });
+    queueMicrotask(() => child.emit('spawn')); return child;
+  });
+  return { root, task, start: (cwd?: string) => startCodex(root, 'task', { taskId: task.id, spec: 'spec.md', cwd }) };
+}
+
+it.each(['file', 'directory'] as const)('F8 .git %s 프로젝트는 등록 워크트리 없으면 spawn 전 거부', async git => {
+  const { root, task, start } = await setup(git);
+  await expect(start()).rejects.toThrow('IMPLEMENT 는 워크트리가 필요합니다: fodh worktree create <task>');
+  const worktree = join(root, 'wt'); await mkdir(worktree);
+  await setTask(root, task.id, { worktree });
+  await expect(start()).rejects.toThrow('IMPLEMENT 는 워크트리가 필요합니다');
+  await updateState(root, { worktrees: [{ taskId: 'T99', path: worktree, branch: 'fixture', createdAt: 'fixture' }] });
+  await expect(start()).rejects.toThrow('IMPLEMENT 는 워크트리가 필요합니다');
+  expect(spawn).not.toHaveBeenCalled();
+});
+
+it('F8 등록된 task 워크트리 내부만 허용하고 루트·다른 등록 워크트리 cwd는 거부', async () => {
+  const { root, task, start } = await setup('directory');
+  const worktree = join(root, 'wt'), other = join(root, 'other'), nested = join(worktree, 'src');
+  await mkdir(nested, { recursive: true }); await mkdir(other);
+  await setTask(root, task.id, { worktree });
+  await updateState(root, { worktrees: [
+    { taskId: task.id, path: worktree, branch: 'fixture', createdAt: 'fixture' },
+    { taskId: 'T99', path: other, branch: 'other', createdAt: 'fixture' },
+  ] });
+  await expect(start(root)).rejects.toThrow('--cwd는 해당 task의 등록된 워크트리 안');
+  await expect(start(other)).rejects.toThrow('--cwd는 해당 task의 등록된 워크트리 안');
+  expect(spawn).not.toHaveBeenCalled();
+  expect(await start(nested)).toMatchObject({ cwd: nested, worktree, kind: 'task' });
+  expect(spawn).toHaveBeenCalledOnce();
+  const entry = (await readLedger(root)).find(e => e.action === 'codex:task' && e.status === 'pre');
+  expect(entry?.evidence).not.toHaveProperty('fallback');
+});
+
+it('F8 비-git 프로젝트는 기존 루트 폴백과 증거를 유지한다', async () => {
+  const { root, start } = await setup(false);
+  expect(await start()).toMatchObject({ cwd: root, worktree: null, kind: 'task' });
+  expect((await readLedger(root)).find(e => e.action === 'codex:task' && e.status === 'pre')?.evidence).toMatchObject({ fallback: 'root' });
+});

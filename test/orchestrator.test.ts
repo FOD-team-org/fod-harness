@@ -1,6 +1,7 @@
 import * as cleanupModule from '../src/core/cleanup.ts';
 import * as notifyModule from '../src/core/notify.ts';
 import { runPick } from '../src/core/pick.ts';
+import * as pickModule from '../src/core/pick.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -73,10 +74,20 @@ it('develop-start에 백로그가 없으면 빈 템플릿 뒤 PLANNING 지시문
 });
 it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL'])('develop-start는 %s에서 기존 백로그 PICK을 실행한다', async state => {
   const test = await setup(); const task = await addTask(test.root, { title: '우선 작업', category: 'docs' });
-  await updateState(test.root, { state }); await test.command('develop-start');
+  await updateState(test.root, { state, awaitingUser: state === 'PROJECT_READY' }); await test.command('develop-start');
   expect(await readState(test.root)).toMatchObject({ state: 'SPEC', taskId: task.id });
+  expect((await readState(test.root)).awaitingUser).toBe(false);
   expect((await getTask(test.root, task.id)).status).toBe('doing');
   expect(test.sendMessage.mock.calls[0][0].content).toContain(`# SPEC`);
+});
+it('develop-start의 PICK 결과 EMPTY는 알림 후 턴을 시작하지 않는다', async () => {
+  const test = await setup(); await addTask(test.root, { title: '선택 전 등록 작업', category: 'docs' });
+  await updateState(test.root, { state: 'PICK' });
+  vi.spyOn(pickModule, 'runPick').mockResolvedValueOnce({ outcome: 'EMPTY', reason: '백로그가 비어 있습니다' });
+  await test.command('develop-start');
+  expect((await readState(test.root)).state).toBe('PICK');
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith('백로그가 비어 있습니다', 'info');
+  expect(test.sendMessage).not.toHaveBeenCalled();
 });
 it('develop-start의 빈 기존 백로그는 PLANNING을 유지하고 반복 호출 알림만 표시한다', async () => {
   const test = await setup(); await test.command('develop-start');

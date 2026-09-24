@@ -5,7 +5,7 @@ import { harnessPath, withFileLock } from './storage.ts';
 
 export interface PickResources { slots: 'ok' | 'unavailable' | boolean; now?: number }
 export interface PickDecision {
-  outcome: 'RESUME' | 'SPEC' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
+  outcome: 'RESUME' | 'SPEC' | 'EMPTY' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
   task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
   retry?: { count: number; nextAt?: string }; exhausted?: boolean;
 }
@@ -56,7 +56,9 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
   const selected = pending.find(task => task.status === 'ready'
     && task.depends.every(id => backlog.some(dependency => dependency.id === id && dependency.status === 'done')));
   if (selected) return { outcome: 'SPEC', task: selected, reason: '표 순서상 첫 실행 가능 task' };
-  if (!pending.length) return { outcome: 'DONE_ALL', reason: '모든 task가 완료되었습니다' };
+  if (!pending.length) return backlog.length
+    ? { outcome: 'DONE_ALL', reason: '모든 task가 완료되었습니다' }
+    : { outcome: 'EMPTY', reason: '백로그가 비어 있습니다' };
   if (pending.some(task => /^blocked\(A/u.test(task.status))) {
     return { outcome: 'WAIT_JUDGMENT', reason: '남은 task는 판단 또는 그 의존 task를 기다립니다' };
   }
@@ -76,6 +78,7 @@ export async function runPick(root: string, resources: PickResources = { slots: 
     if (state.state === 'WAIT_RESOURCE' && decision.outcome === 'WAIT_RESOURCE') return decision;
     if (state.state === 'WAIT_RETRY' && decision.outcome === 'WAIT_RETRY') return decision;
     if (state.state !== 'PICK') state = await transitionState(root, 'PICK', { now });
+    if (decision.outcome === 'EMPTY') return decision;
     for (const orphan of decision.orphans ?? []) {
       const { item } = await addJudgment(root, { title: `고아 task ${orphan.id}: 재개 / 폐기`,
         background: '현재 재개 대상이 아닌 진행 중 task입니다. 소유 프로세스와 증거를 확인해야 합니다.',

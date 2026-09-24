@@ -12,6 +12,7 @@ const promptKeys=['taskId','judgmentFile','backlogFile','docsRoot','today','inte
 const docsKeys=['date','taskId','taskTitle','specRev','topic','subject','projectName','judgmentFile'];
 async function files(dir:string):Promise<string[]> { const result:string[]=[];for(const e of await readdir(dir,{withFileTypes:true})) if(e.isDirectory())result.push(...await files(join(dir,e.name)));else result.push(join(dir,e.name));return result; }
 it('모든 상태 프롬프트 5절 순서·25줄·금지 첫 줄·허용 치환',async()=>{
+  expect(await files('templates/prompts')).toContain('templates/prompts/PROJECT_READY.md');
   for(const file of await files('templates/prompts')){
     const text=await readFile(file,'utf8');expect([...text.matchAll(/^## (.+)$/gmu)].map(m=>m[1]),file).toEqual(headings);
     expect(text.trimEnd().split('\n').length,file).toBeLessThanOrEqual(25);
@@ -19,6 +20,19 @@ it('모든 상태 프롬프트 5절 순서·25줄·금지 첫 줄·허용 치환
     for(const m of text.matchAll(/\{\{([^{}]+)\}\}/gu))expect(promptKeys,file).toContain(m[1]);
     expect(text).not.toMatch(/P[34] 전/u);
   }
+});
+it('P7 준비 완료 정지·백로그 등록 확인·조사 주제와 필수 인자를 안내한다', async () => {
+  expect(await readFile('templates/prompts/PICK.md', 'utf8')).toContain('EMPTY(백로그 비어 있음)면 `fodh state transition PLANNING` 은 하지 말고 `대기: 사용자` 로 끝낸다');
+  expect(await readFile('templates/prompts/IMPLEMENT.md', 'utf8')).toContain('git 프로젝트면 `fodh worktree create {{taskId}}` 가 **필수**');
+  const ready = await readFile('templates/prompts/PROJECT_READY.md', 'utf8');
+  expect(ready).toContain('마지막 3줄에 `대기: 사용자`');
+  expect(ready).toContain('없음(사용자 `/develop-start`)');
+  expect(ready).toContain('`fodh state transition PLANNING` 호출');
+  expect(await readFile('templates/prompts/REVIEW.md', 'utf8')).toContain('PROJECT_READY` 이후 `대기: 사용자`');
+  expect(await readFile('templates/prompts/PLANNING.md', 'utf8')).toContain('`fodh backlog list` 로 등록 수를 확인');
+  const research = await readFile('templates/prompts/RESEARCH.md', 'utf8');
+  expect(research).toContain('인터뷰 핵심 결정에서 스스로 정한다(사용자에게 묻지 않는다)');
+  expect(research).toContain('`--topic` 은 필수'); expect(research).toContain('`--spec` 도 필수');
 });
 it('템플릿·스킬의 명시 명령은 commandTable과 일치, 표 중복 없음',async()=>{
   expect(new Set(commandTable.map(c=>c.group+':'+c.action)).size).toBe(commandTable.length);

@@ -8,6 +8,7 @@ import { decidePick, runPick } from '../src/core/pick.ts';
 import { addJudgment, answerJudgment, applyJudgments, readJudgment } from '../src/core/judgment.ts';
 import { readLedger } from '../src/core/ledger.ts';
 import { main } from '../src/cli/index.ts';
+import { atomicWrite, harnessPath } from '../src/core/storage.ts';
 
 const roots: string[] = [];
 async function project() { const root = await mkdtemp('/private/tmp/fodh-p1-'); roots.push(root); return root; }
@@ -43,6 +44,8 @@ it.each(Object.entries(graph).flatMap(([from, next]) => next.map(to => [from, to
     taskId: projectReview || projectResume ? undefined : t.id, resumeState: from === 'WAIT_JUDGMENT' ? to : undefined,
     doctor: { ok: true, checkedAt: new Date().toISOString() }, autoTurns: 2 });
   if (from === 'CLEANUP' && to === 'PICK') await setTask(root, t.id, { status: 'done' });
+  if (from === 'REVIEW' && ['PROJECT_READY', 'MERGE'].includes(to)) await atomicWrite(harnessPath(root, 'codex/review-fixture/meta.json'),
+    JSON.stringify({ kind: 'review', status: 'ok', taskId: to === 'MERGE' ? t.id : undefined, startedAt: (await readState(root)).reviewSince }));
   const result = await transitionState(root, to, { taskId: t.id, commit: 'sha1', system: from === 'WAIT_JUDGMENT' });
   expect(result.state).toBe(to); expect(result.autoTurns).toBe(0); expect(result.enteredAt).toBeTruthy();
   expect((await readLedger(root)).filter(entry => entry.action.startsWith('state:')).at(-1)).toMatchObject({ action: `state:${from}→${to}`, status: 'ok' });
@@ -137,7 +140,7 @@ it('잘못된 사람 편집 done은 증거를 만들어내지 않으며 JSON 내
 const now=Date.parse('2026-09-24T00:00:00Z');
 it.each([
   [[task('T01')],{},'SPEC'], [[task('T01',{status:'done'}),task('T02',{depends:['T01']})],{},'SPEC'],
-  [[],{},'DONE_ALL'],[[task('T01',{status:'done'})],{},'DONE_ALL'],
+  [[],{},'EMPTY'],[[task('T01',{status:'done'})],{},'DONE_ALL'],
   [[task('T01',{status:'blocked(A1)'})],{},'WAIT_JUDGMENT'],
   [[task('T01',{status:'blocked(A1)'}),task('T02',{depends:['T01']})],{},'WAIT_JUDGMENT'],
   [[task('T01',{status:'doing'})],{lastPaused:'error'},'WAIT_RETRY'],[[task('T01',{status:'doing'})],{lastPaused:'quota'},'WAIT_RETRY'],

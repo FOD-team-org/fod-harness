@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { redact } from '../../src/provider/privacy.ts';
 import { scaffoldDoc } from '../../src/core/docs.ts';
+import { ensureHarnessGitignore } from '../../src/core/project-init.ts';
 import { startInterview, validateInterviewStart } from '../../src/core/interview.ts';
 import { installSkills } from '../../src/core/skills.ts';
 import { generateClaudeMd } from '../../src/core/claude-md.ts';
@@ -28,6 +29,7 @@ async function exists(path: string): Promise<boolean> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 export async function initialize(root: string): Promise<void> {
+  await ensureHarnessGitignore(root);
   await scaffoldDoc(root, 'backlog', { ifMissing: true });
   await scaffoldDoc(root, 'worklog', { ifMissing: true });
   await readJudgment(root);
@@ -45,7 +47,10 @@ async function prepareProject(root: string, ctx: ExtensionContext, reportChanges
 }
 
 export default function orchestrator(pi: ExtensionAPI): void {
-  pi.on('session_start', async (_event, ctx) => { setNotifyContext(ctx.cwd, resumeContext(ctx)); });
+  pi.on('session_start', async (_event, ctx) => {
+    setNotifyContext(ctx.cwd, resumeContext(ctx));
+    await ensureHarnessGitignore(ctx.cwd);
+  });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {
     if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
@@ -93,6 +98,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       }
       if (state.state !== 'PICK') await transitionState(ctx.cwd, 'PICK');
       const result = await runPick(ctx.cwd);
+      if (result.outcome === 'EMPTY') { ctx.ui.notify(result.reason, 'info'); return; }
       state = await readState(ctx.cwd);
       if (active.has(state.state)) await send(pi, ctx.cwd, state);
       else ctx.ui.notify(JSON.stringify(result), 'info');

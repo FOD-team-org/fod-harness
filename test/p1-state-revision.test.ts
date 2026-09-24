@@ -60,6 +60,8 @@ it('H2: 고아 여러 개를 각각 차단하고 ready를 선택하며 재개와
 it('M2: 각 task 전이는 백로그 상태도 기록하고 M3는 완료 전 PICK을 막는다', async () => {
   const { root, task } = await setup();
   for (const [to, status] of [['VERIFY', 'verify'], ['REVIEW', 'review'], ['FIX', 'fix'], ['VERIFY', 'verify'], ['REVIEW', 'review'], ['MERGE', 'merge'], ['DOCS', 'merge'], ['CLEANUP', 'merge']]) {
+    if (to === 'MERGE') await storage.atomicWrite(storage.harnessPath(root, 'codex/review-fixture/meta.json'),
+      JSON.stringify({ kind: 'review', status: 'ok', taskId: task.id, startedAt: (await readState(root)).reviewSince }));
     if (to === 'DOCS') await setTask(root, task.id, { review: { commit: 'sha', high: 0 } });
     await transitionState(root, to, { taskId: task.id, commit: 'sha' });
     expect((await getTask(root, task.id)).status).toBe(status);

@@ -127,6 +127,12 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 
 ## 알려진 한계
 
+프로젝트 REVIEW→PROJECT_READY는 `.pi/codex/*/meta.json`의 `kind: review`, `status: ok`, `startedAt >= reviewSince` 증거를 요구한다. task의 REVIEW→MERGE도 같은 taskId의 검수 증거가 필요하지만, 그 taskId의 `kind: task`, `status: ok` 구현 meta가 있으면 면제한다. delegate 표기는 판정에 쓰지 않는다. 이 면제 경로의 Claude Agent 검수 증거는 여전히 수집하지 못한다. `reviewSince`는 새 REVIEW 진입 때 설정하고, REVIEW를 떠날 때 지운다. 판단 대기·일시 중단 시에는 `resumeReviewSince`에 보관해 WAIT_JUDGMENT 복귀 또는 PICK의 resume 경로에서 복원한다.
+
+PROJECT_READY→PLANNING, DONE_ALL→PLANNING·IDLE 및 CLI `state transition --system`은 사용자 전용이며 `assertNotBrain`의 환경변수·잠금 소유자 자손 체인 검사로 두뇌를 거부한다. 오케스트레이터·워처·프로바이더의 내부 전이는 그대로다. 코어 전이가 PROJECT_READY·DONE_ALL·WAIT_*·CLEANUP_FAILED를 떠나면 `awaitingUser`를 해제한다.
+
+git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.worktrees` 등록이 모두 필요하고 `--cwd`도 그 워크트리 안이어야 한다. 비-git 프로젝트만 루트 폴백을 허용한다. 프로젝트 초기화와 첫 세션은 git 프로젝트의 `.gitignore`에 `.pi/harness.lock`, `.pi/harness-*.json`, `.pi/harness-*.jsonl`, `.pi/scratch/`, `.pi/codex/`, `.pi/cleanup-last.json`, `.pi/harness-config-warned.json` 중 빠진 줄을 추가하며 기존 내용은 보존한다.
+
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
 | 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령과 `sh -c '…'`·셸로 넘기는 heredoc 본문 안의 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |

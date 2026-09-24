@@ -1,4 +1,5 @@
 import { commandTable as commands } from './commands.ts';
+import { randomUUID } from 'node:crypto';
 export const commandTable: { group: string; action?: string }[] = commands;
 import { startInterview, nextInterview, recordInterview, deferInterview, skipInterview, addInterview, interviewStatus } from '../core/interview.ts';
 import { scaffoldDoc } from '../core/docs.ts';
@@ -18,12 +19,13 @@ import { addTask, getTask, readBacklog, syncBacklog, setTask, BacklogError, type
 import { runPick } from '../core/pick.ts';
 import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
-import { readState, updateState, transitionState, doctorFresh, TransitionError } from '../core/state.ts';
+import { readState, updateState, transitionState, doctorFresh, TransitionError, userOnlyTransitions } from '../core/state.ts';
+import { assertNotBrain } from '../core/brain-guard.ts';
 import { readJudgment, addJudgment, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
 import { tick, watcherStatus } from '../core/watcher.ts';
 import { listProcs } from '../core/procs.ts';
-import { readLedger, unknownEntries, resolveLedger } from '../core/ledger.ts';
+import { appendLedger, readLedger, unknownEntries, resolveLedger } from '../core/ledger.ts';
 import { safeValue } from '../provider/privacy.ts';
 import { doctor } from './doctor.ts';
 import { redact } from '../provider/privacy.ts';
@@ -102,6 +104,18 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'state' && action === 'await-user') { exact(0); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
       exact(1);
+      const from = (await readState(root)).state, transition = `${from}→${rest[0]}`;
+      if (userOnlyTransitions.has(transition) || values.system) {
+        try { await assertNotBrain(root, `${transition} 전이${values.system ? ' --system' : ''}`); }
+        catch (cause) {
+          const error = userOnlyTransitions.has(transition)
+            ? from === 'PROJECT_READY' ? 'PROJECT_READY 는 사용자가 /develop-start 로 시작합니다'
+              : 'DONE_ALL 은 사용자가 /develop-start 또는 IDLE 전이로 이어갑니다'
+            : redact(cause instanceof Error ? cause.message : String(cause));
+          await appendLedger(root, { runId: randomUUID(), action: `state:${transition}`, status: 'fail', state: from, evidence: { error } });
+          throw new Error(error);
+        }
+      }
       if (['IMPLEMENT', 'MERGE'].includes(rest[0]) && !doctorFresh(await readState(root), (await loadConfig(root)).brain.doctorTtlHours)) {
         throw new Error('doctor 검증이 없거나 오래되었습니다. Pi 세션을 재시작하거나 fodh doctor 를 실행하세요.');
       }

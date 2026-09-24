@@ -8,6 +8,7 @@
 {{backlogFile}} 의존을 만족하는 최상위 ready 또는 대기·완료.
 ## 끝내는 조건
 pick 결과를 확인했고 WAIT_*·DONE_ALL이면 멈춘다.
+EMPTY(백로그 비어 있음)면 `fodh state transition PLANNING` 은 하지 말고 `대기: 사용자` 로 끝낸다(사용자 `/develop-start`).
 ## 다음 fodh 명령
 - 선택 → `fodh backlog get {{taskId}}` 후 SPEC 지시
 - WAIT_RESOURCE 회복 증거 있음 → `fodh state transition PICK` 후 `fodh pick`

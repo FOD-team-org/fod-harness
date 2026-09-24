@@ -56,7 +56,9 @@ async function view(root: string, data?: Interview) {
     if (q.must && answer.status === 'skipped' || decision && q.kind === 'free' && /^(?:2[.)]?|②|직접 답하기)$/u.test(decision.answer.trim())) {
       return [q.id, { status: 'open' as const, askCount: 0 }];
     }
-    return [q.id, decision ? { ...answer, status: 'answered' as const, answer: decision.answer, source: `judgment:${decision.id}` } : answer];
+    return [q.id, decision ? { ...answer, status: 'answered' as const,
+      answer: q.kind === 'choice' ? decision.interpretation || decision.answer : decision.answer,
+      source: `judgment:${decision.id}` } : answer];
   }));
   const byArea = interviewAreas.map((_, index) => {
     const area = String(index + 1).padStart(2, '0'), qs = bank.filter(q => q.area === area);
@@ -192,7 +194,11 @@ async function deferQuestion(root: string, data: Interview, q: Question): Promis
   const id = q.id;
   if (['answered', 'skipped'].includes(data.questions[id]?.status)) throw new Error('이미 답하거나 건너뛴 질문은 판단대기로 넘길 수 없습니다');
   if (data.questions[id]?.status === 'judgment') return data.questions[id];
-  const added = await addJudgment(root, { title: q.text, background: `인터뷰 영역 ${q.area}`, options: q.options ?? ['추천안 채택', '직접 답하기'], recommend: q.recommend, blocks: '-', dedupeKey: `interview:${id}` });
+  const options = [...(q.options ?? ['추천안 채택', '직접 답하기'])];
+  const normalize = (value: string) => value.trim().replace(/\s+/gu, ' ');
+  const recommended = q.options ? options.findIndex(option => normalize(option) === normalize(q.recommend)) : -1;
+  if (recommended > 0) options.unshift(...options.splice(recommended, 1));
+  const added = await addJudgment(root, { title: q.text, background: `인터뷰 영역 ${q.area}`, options, recommend: q.recommend, blocks: '-', dedupeKey: `interview:${id}` });
   return data.questions[id] = { askCount: data.questions[id]?.askCount ?? 0, round: data.questions[id]?.round, status: 'judgment', judgmentId: added.item.id };
 }
 export async function skipInterview(root: string, id: string, reason: string) {

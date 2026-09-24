@@ -1,8 +1,11 @@
 import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { commandParts } from '../provider/runner.ts';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
+import { notify as sendNotification } from './notify.ts';
 
 export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
 export interface HarnessConfig {
@@ -169,7 +172,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   for (const name of install) if (!/^[a-z0-9]+(-[a-z0-9]+)*$/u.test(name) || !existsSync(new URL(`../../skills/${name}/SKILL.md`, import.meta.url))) throw new Error(`skills.install 에 없는 스킬: ${name}`);
   const targets = strings(claudeMd.targets, ['CLAUDE.md'], 'claudeMd.targets');
   if (!targets.length || new Set(targets).size !== targets.length || targets.some(t => !['CLAUDE.md', 'AGENTS.md'].includes(t))) throw new Error('claudeMd.targets는 CLAUDE.md·AGENTS.md의 중복 없는 비어 있지 않은 배열이어야 합니다');
-  return {
+  const config: HarnessConfig = {
     interview: { enforce, roundSize: bounded(interview.roundSize, 6, 5, 8, 'interview.roundSize'), maxAsks: bounded(interview.maxAsks, 2, 1, 5, 'interview.maxAsks'), extraBankFile: protectedInternal(interview.extraBankFile, '.pi/interview-bank.md', 'interview.extraBankFile') },
     docs: { root: docsRoot, overrideDir: protectedInternal(docs.overrideDir, '.pi/templates/docs', 'docs.overrideDir') },
     skills: { target: internal(skills.target, '.claude/skills', 'skills.target'), install },
@@ -189,6 +192,32 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
     delegate: delegation, worktrees: { root: wtRoot, prefix }, watch: watching, judgment: { file }, requiresApproval,
   };
+  const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
+  for (const [prefix, values, known] of [
+    ['brain', brain, config.brain], ['delegate.codex', codex, config.delegate.codex],
+    ['verify', verify, config.verify], ['docs', docs, config.docs],
+    ['skills', skills, config.skills], ['notify', notify, config.notify],
+  ] as const) {
+    unknown.push(...Object.keys(values).filter(key => !Object.hasOwn(known, key)).map(key => `${prefix}.${key}`));
+  }
+  const warnedPath = harnessPath(root, 'harness-config-warned.json');
+  if (unknown.length || existsSync(warnedPath)) {
+    try {
+      const shouldNotify = await withFileLock(warnedPath, async () => {
+        if (!unknown.length) {
+          await unlink(warnedPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+          return false;
+        }
+        const keysHash = createHash('sha256').update(JSON.stringify(unknown.sort())).digest('hex');
+        if ((await readJson<{ keysHash: string } | undefined>(warnedPath, undefined))?.keysHash === keysHash) return false;
+        await atomicWrite(warnedPath, JSON.stringify({ keysHash, at: new Date().toISOString() }) + '\n');
+        return true;
+      });
+      if (shouldNotify) await sendNotification(root, { key: 'config:unknown-key', level: 'warning', title: '하네스 설정',
+        body: `알 수 없는 설정 키: ${unknown.join(', ')}` }, undefined, { config, dedupe: false });
+    } catch { /* A diagnostic must not turn otherwise valid configuration into an error. */ }
+  }
+  return config;
 }
 
 function nonnegativeInteger(value: unknown, label: string): number {

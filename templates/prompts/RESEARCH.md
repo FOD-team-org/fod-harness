@@ -1,5 +1,6 @@
 # RESEARCH
 ## 지금 할 일
+조사 주제는 인터뷰 핵심 결정에서 스스로 정한다(사용자에게 묻지 않는다). `fodh docs scaffold research-q --topic <슬러그>` 의 `--topic` 은 필수이고, `fodh codex research --spec <질문 파일> --wait` 의 `--spec` 도 필수다.
 1. `fodh docs scaffold research-q --topic <주제>`로 질문을 만든다. 이미 있으면 기존 파일을 고친다.
 2. scaffold 결과의 `path`를 `--spec`에 쓴다: `fodh codex research --spec <scaffold 결과의 path> --title "<주제>"`로 읽기 전용 조사 위임한다.
 3. 반환 runId 전체로 `대기: 위임 <runId>`를 마지막 비어 있지 않은 3줄 안에 쓰고 턴을 끝낸다.

@@ -2,7 +2,7 @@
 ## 지금 할 일
 1. `fodh backlog get {{taskId}}`으로 작업을 확인한다.
 2. `fodh config get delegate`로 라우팅을 확인한다.
-3. `fodh worktree create {{taskId}}`로 만든다. 비-git이면 루트 폴백으로 Codex를 진행한다.
+3. git 프로젝트면 `fodh worktree create {{taskId}}` 가 **필수**다(없으면 `codex task` 가 거부된다). 비-git 만 루트 폴백.
 4. design은 `fodh backlog set {{taskId}} --delegate claude` 후 Claude Agent(model: delegate.claude.subagentModel)로 등록 워크트리에 위임한다. Agent에게 "하네스 두뇌 세션 전용. 위임 수행자(Codex·Claude Agent)는 위임 프롬프트를 따르고 이 흐름표의 fodh 명령을 치지 않는다"를 명시한다.
 5. 그 외는 `fodh codex task --task {{taskId}} --spec <위임스펙 파일> --title "<제목>"`로 위임한다.
 6. 실제 runId 전체로 `대기: 위임 <runId>`를 마지막 비어 있지 않은 3줄 안에 쓰고 턴을 끝낸다.
