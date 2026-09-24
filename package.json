@@ -17,6 +17,9 @@
       "./extensions/provider/index.ts",
       "./extensions/orchestrator/index.ts",
       "./extensions/watcher/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {

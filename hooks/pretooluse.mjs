@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Keep this literal identical to src/provider/privacy.ts (covered by hook tests).
+const secretPattern = /sk-ant-[A-Za-z0-9_-]*|sk-proj-[A-Za-z0-9_-]{8,}|sk_(?:live|test)_[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{20,}|xox[abp]-[A-Za-z0-9_-]{8,}|\bghp_[A-Za-z0-9]{36}\b|github_pat_[A-Za-z0-9_]*|\bAKIA[0-9A-Z]{16}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)|Bearer [A-Za-z0-9._-]{20,}/;
+
 const deny = message => {
   process.stderr.write(`하네스 가드: ${message}\n`);
   process.exit(2);
@@ -96,14 +99,16 @@ try {
   const command = String(input.command ?? '');
   const editing = /^(?:Write|Edit|MultiEdit|NotebookEdit)$/i.test(name);
   const bash = name === 'Bash';
+  const extraProtected = ['.pi/interview-bank.md', '.pi/templates', ...(process.env.FODH_PROTECTED_EXTRA ?? '').split(':').filter(Boolean)].map(value => resolve(root, value));
   const protectedPath = value => {
     const path = resolve(cwd, value);
-    return path === resolve(root, '.claude/settings.json')
+    return extraProtected.some(extra => path === extra || path.startsWith(`${extra}${sep}`))
+      || path === resolve(root, '.claude/settings.json')
       || path === resolve(root, '.claude/settings.local.json')
       || path.startsWith(`${hooks}${sep}`)
       || (dirname(path) === resolve(root, '.pi') && /^harness.*\.jsonl?$/.test(basename(path)));
   };
-  if ((editing || bash) && /sk-ant-|AKIA|-----BEGIN [A-Z ]*PRIVATE KEY/.test(text)) {
+  if ((editing || bash) && secretPattern.test(text)) {
     deny('비밀값 패턴을 기록할 수 없습니다.');
   }
   if (editing && protectedPath(input.file_path ?? input.notebook_path ?? '')) {
@@ -112,6 +117,14 @@ try {
   if (!bash) process.exit(0);
 
   const groups = tokenize(command);
+  for (const words of groups) {
+    const assignment = words.some(word => /^FODH_[A-Z_]*=/.test(word));
+    const unset = words.some((word, index) => basename(word) === 'unset' && words.slice(index + 1).some(arg => /^FODH_[A-Z_]+$/.test(arg)));
+    const clearedEnv = words.some((word, index) => basename(word) === 'env' && words.slice(index + 1).some((arg, offset, args) =>
+      arg === '-i' || arg === '--ignore-environment' || /^-uFODH_[A-Z_]+$/.test(arg) || /^--unset=FODH_[A-Z_]+$/.test(arg)
+      || (arg === '-u' || arg === '--unset') && /^FODH_[A-Z_]+$/.test(args[offset + 1] ?? '')));
+    if (assignment || unset || clearedEnv) deny('하네스 환경변수는 바꿀 수 없습니다.');
+  }
   const commands = groups.filter(words => words.length).map(commandWords);
   for (const words of groups) {
     const executable = basename(commandWords(words)[0] ?? '');

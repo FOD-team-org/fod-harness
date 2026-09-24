@@ -1,8 +1,18 @@
 # CLEANUP
-
-지금 할 일: 먼저 `fodh state get`의 pendingReclaim을 확인한다. 있으면 기록된 taskId·judgmentId로 `fodh reclaim --task <taskId> --judgment <judgmentId>`를 재시도한다. 성공하면 blocked와 PICK이므로 이 턴을 끝낸다.
-정상 완료 경로에서는 `fodh cleanup run --task {{taskId}} --scope all`을 실행하고 `.pi/cleanup-last.json`을 확인한다. 활성 위임·두뇌·neverKill은 보호하며 워크트리는 done이거나 현재 CLEANUP 작업을 --task로 지정했고 clean이면 함께 제거한다. 제거 실패·더러운 워크트리는 kept에 이유를 기록하고 나머지 정리를 계속한다. stale은 죽거나 재사용된 프로세스의 기록만 제거한 수이며 잔존 수에 포함하지 않는다. protected는 활성 verify·위임·두뇌 등 보호된 기록이다.
-산출물: 프로세스·저장공간·워크트리 정리 보고서와 원장.
-끝내는 조건: 결과 ok가 true이다. 실패·미확인을 성공으로 기록하지 않는다.
-다음 fodh 명령: 성공하면 `fodh backlog set {{taskId}} --cleanup-ok`, DoD 전체 충족 시 `fodh backlog set {{taskId}} --status done`, `fodh state transition PICK`, `fodh pick`.
-실패하면 `fodh state transition CLEANUP_FAILED`, `fodh state transition CLEANUP --task {{taskId}}` 후 `fodh cleanup run --task {{taskId}} --scope processes`를 딱 1회 재시도한다. 재실패하면 `fodh state transition CLEANUP_FAILED`로 paused(cleanup)+알림에 맡긴다. 최초 실패가 저장공간·워크트리였으면 processes 성공만으로 전체 성공을 기록하지 말고 원인을 판단대기에 등록한다.
+## 지금 할 일
+1. `fodh state get`의 pendingReclaim을 확인하고 있으면 `fodh reclaim --task <T> --judgment <A>`로 재시도하고 반환 상태를 따른 뒤 턴을 끝낸다.
+2. pendingReclaim이 없으면 `fodh cleanup run --task {{taskId}} --scope all`로 정리한다.
+3. 프로세스·저장공간·워크트리 결과와 residual을 확인한다.
+4. 실패 원인과 각 범위 결과를 보존한다.
+## 산출물
+.pi/cleanup-last.json과 잔존 수·보호·stale 기록.
+## 끝내는 조건
+전체 정리 성공과 DoD 6항을 확인했다.
+## 다음 fodh 명령
+- 성공 → `fodh backlog set {{taskId}} --cleanup-ok` 후 `fodh backlog set {{taskId}} --status done` 후 `fodh state transition PICK`
+- 첫 실패 → `fodh state transition CLEANUP_FAILED` → `fodh state transition CLEANUP --task {{taskId}}` 후 `fodh cleanup run --task {{taskId}} --scope processes` 1회 재시도
+- 재실패 → `fodh state transition CLEANUP_FAILED`(paused(cleanup)); 원인 판단 등록
+- 첫 실패가 storage·worktrees였으면 processes 성공만으로 끝내지 말고 원인을 `fodh judgment add --title "<정리 실패>" --background "<원인>" --options "재시도|보류" --recommend "<추천>" --blocks {{taskId}}`로 등록하고 `대기: 사용자`.
+## 금지
+두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
+sharedCaches는 보고만. 저장공간·워크트리 실패를 processes 성공으로 덮지 않는다. 연속 실패는 paused(cleanup)+알림에 맡긴다.

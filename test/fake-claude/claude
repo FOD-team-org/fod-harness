@@ -31,12 +31,16 @@ if (args.includes('--hang-orphan-child')) {
   const stripped = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
   appendFileSync('.pi/fake-calls.jsonl', JSON.stringify({
-    args, prompt, projectRoot: process.env.FODH_PROJECT_ROOT, forbiddenEnvPresent: stripped.filter(key => key in process.env),
+    args, prompt, projectRoot: process.env.FODH_PROJECT_ROOT, brain: process.env.FODH_BRAIN, protectedExtra: process.env.FODH_PROTECTED_EXTRA, forbiddenEnvPresent: stripped.filter(key => key in process.env),
   }) + '\n');
   const fixtureName = scenario === 'resume' ? 'resume-run' : 'first-run-hook-deny';
   const path = new URL(`../fixtures/claude-stream-json/${fixtureName}.jsonl`, import.meta.url);
   const events = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const emit = event => {
+    if (event.subtype === 'init' && scenario.startsWith('p5-skills-')) event = { ...event,
+      skills: scenario !== 'p5-skills-missing' ? ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'] : [],
+      memory_paths: scenario === 'p5-skills-missing' ? [] : { auto: process.cwd() + '/auto-memory' },
+    };
     if (get('--model') === 'fable') {
       if (event.subtype === 'init') event = { ...event, model: 'claude-fable-5-1' };
       if (event.type === 'result') {
@@ -89,6 +93,11 @@ if (args.includes('--hang-orphan-child')) {
         encoding: 'utf8',
       }).status === 2);
       emit(events.find(event => event.subtype === 'init'));
+      if (scenario.startsWith('p5-skills-')) {
+        let marker;
+        try { marker = readFileSync('CLAUDE.md', 'utf8').match(/^- doctor 표식: (FODH-DOC-[a-f0-9]{8})$/m)?.[1]; } catch {}
+        emit({ type: 'assistant', message: { content: [{ type: 'text', text: `차단 확인\n${marker ? '문서 확인 ' + marker : '문서 없음'}` }] } });
+      }
       if (['doctor-max-turns', 'doctor-max-turns-tool-result'].includes(scenario)) {
         const fixture = new URL('../fixtures/claude-stream-json/doctor-max-turns.jsonl', import.meta.url);
         for (const line of readFileSync(fixture, 'utf8').trim().split('\n')) {

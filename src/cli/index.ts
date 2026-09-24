@@ -1,3 +1,9 @@
+import { commandTable as commands } from './commands.ts';
+export const commandTable: { group: string; action?: string }[] = commands;
+import { startInterview, nextInterview, recordInterview, deferInterview, skipInterview, addInterview, interviewStatus } from '../core/interview.ts';
+import { scaffoldDoc } from '../core/docs.ts';
+import { generateClaudeMd } from '../core/claude-md.ts';
+import { installSkills, skillsStatus } from '../core/skills.ts';
 import { runCleanup, type CleanupScope } from '../core/cleanup.ts';
 import { runVerify } from '../core/verify.ts';
 import { notify } from '../core/notify.ts';
@@ -26,6 +32,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
     root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
       base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
@@ -39,13 +46,28 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
+    if (!commandTable.some(c => c.group === group && c.action === action)) {
+      const choices = commandTable.filter(c => c.group === group);
+      throw new Error('지원하지 않는 fodh 명령입니다. 가능한 명령: '+(choices.length ? choices : commandTable).map(c => `fodh ${c.group}${c.action ? ' '+c.action : ''}`).join(', '));
+    }
     const exact = (count: number) => { if (rest.length !== count) throw new Error('명령 인자 수를 확인하세요.'); };
     const integer = (value: string, name: string): number => {
       if (!/^(0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name}는 0 이상의 정수여야 합니다`);
       return Number(value);
     };
     let result: unknown;
-    if (group === 'cleanup' && action === 'run') { exact(0); result = await runCleanup(root, { scope: (values.scope ?? 'all') as CleanupScope, taskId: values.task, dryRun: values['dry-run'] }); }
+    if (group === 'interview' && action === 'start') { exact(0); result = await startInterview(root); }
+    else if (group === 'interview' && action === 'next') { exact(0); result = await nextInterview(root, values.count === undefined ? undefined : Number(values.count)); }
+    else if (group === 'interview' && action === 'record') { exact(1); result = await recordInterview(root, rest[0], values.answer ?? '', values.source); }
+    else if (group === 'interview' && action === 'defer') { exact(1); result = await deferInterview(root, rest[0]); }
+    else if (group === 'interview' && action === 'skip') { exact(1); result = await skipInterview(root, rest[0], values.reason ?? ''); }
+    else if (group === 'interview' && action === 'add') { exact(0); result = await addInterview(root, { area: values.area ?? '', text: values.text ?? '', must: values.must, recommend: values.recommend }); }
+    else if (group === 'interview' && action === 'status') { exact(0); result = await interviewStatus(root); }
+    else if (group === 'docs' && action === 'scaffold') { exact(1); result = await scaffoldDoc(root, rest[0], { task: values.task, topic: values.topic, subject: values.subject, date: values.date }); }
+    else if (group === 'claude-md' && action === 'generate') { exact(0); const generated = await generateClaudeMd(root, { check: values.check }); result = generated; if ('upToDate' in generated && !generated.upToDate) process.exitCode = 1; }
+    else if (group === 'skills' && action === 'install') { exact(0); result = await installSkills(root); for (const name of (result as { conflicts: string[] }).conflicts) process.stderr.write(`사용자 스킬과 이름이 겹칩니다: ${name}\n`); }
+    else if (group === 'skills' && action === 'status') { exact(0); result = await skillsStatus(root); }
+    else if (group === 'cleanup' && action === 'run') { exact(0); result = await runCleanup(root, { scope: (values.scope ?? 'all') as CleanupScope, taskId: values.task, dryRun: values['dry-run'] }); }
     else if (group === 'verify' && action === 'run') { exact(0); result = await runVerify(root, { heavy: values.heavy, cwd: values.cwd }); }
     else if (group === 'memory' && action === 'status') { exact(0); result = await memoryStatus(root); }
     else if (group === 'notify' && action === 'send') {
@@ -157,14 +179,15 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     } else if (group === 'judgment' && action === 'answer') { exact(2); result = await answerJudgment(root, rest[0], rest[1]); }
     else if (group === 'judgment' && action === 'write-status') { exact(1); result = await writeJudgmentStatus(root, rest[0]); }
     else if (group === 'inbox' && action === 'list') { exact(0); result = await listInbox(root); }
-    else if (group === 'inbox' && action === 'ack' && rest.length) result = await ackInbox(root, rest);
+    else if (group === 'inbox' && action === 'ack') { if (!rest.length) throw new Error('확인할 인박스 ID가 필요합니다.'); result = await ackInbox(root, rest); }
     else if (group === 'ledger' && action === 'list') {
       exact(0); result = await (values.unknown ? unknownEntries(root) : readLedger(root));
     } else if (group === 'ledger' && action === 'resolve') {
       exact(3); result = await resolveLedger(root, rest[0], rest[1], rest[2], redact(values.evidence ?? ''));
     }
     else if (group === 'proc' && action === 'list') { exact(0); result = await listProcs(root); }
-    else throw new Error('지원하지 않는 fodh 명령입니다.');
+    else throw new Error(`명령 표와 분기가 어긋났습니다: ${group} ${action ?? ''}`);
+    if (result && typeof result === 'object' && 'error' in result && ['docs', 'claude-md', 'interview', 'skills'].includes(group)) process.exitCode = 1;
     if (result && typeof result === 'object' && 'ok' in result && result.ok === false) process.exitCode = 1;
     process.stdout.write(JSON.stringify(safeValue(result === undefined ? { ok: true } : result)) + '\n');
   } catch (error) {

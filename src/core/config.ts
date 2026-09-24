@@ -1,8 +1,14 @@
+import { existsSync } from 'node:fs';
 import { commandParts } from '../provider/runner.ts';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
+export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
 export interface HarnessConfig {
+  interview: { enforce: boolean; roundSize: number; maxAsks: number; extraBankFile: string };
+  docs: { root: string; overrideDir: string };
+  skills: { target: string; install: string[] };
+  claudeMd: { targets: ('CLAUDE.md' | 'AGENTS.md')[] };
   brain: {
     command: string | string[]; switchCommand: string | string[]; model: string;
     skipPermissions: boolean; maxTurnMinutes: number; doctorTtlHours: number; rotateAtTokens: number;
@@ -126,7 +132,40 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
   if (channels.some(c => !['tui', 'macos', 'slack', 'ledger'].includes(c))) throw new Error('notify.channels는 tui|macos|slack|ledger만 허용합니다');
   const enabled = defaultValue(caches.enabled, false);
   if (typeof enabled !== 'boolean') throw new Error('cleanup.sharedCaches.enabled는 불리언이어야 합니다');
+  const interview = object(defaultValue(raw.interview, {}), 'interview');
+  const docs = object(defaultValue(raw.docs, {}), 'docs');
+  const skills = object(defaultValue(raw.skills, {}), 'skills');
+  const claudeMd = object(defaultValue(raw.claudeMd, {}), 'claudeMd');
+  const enforce = defaultValue(interview.enforce, true);
+  if (typeof enforce !== 'boolean') throw new Error('interview.enforce는 불리언이어야 합니다');
+  const bounded = (value: unknown, fallback: number, low: number, high: number, key: string): number => {
+    const n = defaultValue(value, fallback);
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < low || n > high) throw new Error(`${key}는 ${low}~${high} 사이 정수여야 합니다`);
+    return n;
+  };
+  const internal = (value: unknown, fallback: string, key: string): string => {
+    const v = defaultValue(value, fallback);
+    if (typeof v !== 'string' || !v.trim() || /[\0\r\n]/u.test(v) || isAbsolute(v) || relative(resolve(root), resolve(root, v)).startsWith('..')) throw new Error(`${key}은 프로젝트 내부 상대 경로여야 합니다`);
+    return v;
+  };
+  const docsRoot = internal(docs.root, 'docs', 'docs.root');
+  const protectedInternal = (value: unknown, fallback: string, key: string): string => {
+    const path = internal(value, fallback, key), target = resolve(root, path), docsPath = resolve(root, docsRoot);
+    const overlaps = target === docsPath || target.startsWith(docsPath + '/') || docsPath.startsWith(target + '/');
+    if (target === resolve(root) || overlaps) {
+      throw new Error(`${key}은 .pi/ 아래 또는 docs.root와 겹치지 않는 경로여야 합니다(프로젝트 루트·docs.root 조상 금지)`);
+    }
+    return path;
+  };
+  const install = strings(skills.install, bundledSkills, 'skills.install');
+  for (const name of install) if (!/^[a-z0-9]+(-[a-z0-9]+)*$/u.test(name) || !existsSync(new URL(`../../skills/${name}/SKILL.md`, import.meta.url))) throw new Error(`skills.install 에 없는 스킬: ${name}`);
+  const targets = strings(claudeMd.targets, ['CLAUDE.md'], 'claudeMd.targets');
+  if (!targets.length || new Set(targets).size !== targets.length || targets.some(t => !['CLAUDE.md', 'AGENTS.md'].includes(t))) throw new Error('claudeMd.targets는 CLAUDE.md·AGENTS.md의 중복 없는 비어 있지 않은 배열이어야 합니다');
   return {
+    interview: { enforce, roundSize: bounded(interview.roundSize, 6, 5, 8, 'interview.roundSize'), maxAsks: bounded(interview.maxAsks, 2, 1, 5, 'interview.maxAsks'), extraBankFile: protectedInternal(interview.extraBankFile, '.pi/interview-bank.md', 'interview.extraBankFile') },
+    docs: { root: docsRoot, overrideDir: protectedInternal(docs.overrideDir, '.pi/templates/docs', 'docs.overrideDir') },
+    skills: { target: internal(skills.target, '.claude/skills', 'skills.target'), install },
+    claudeMd: { targets: targets as HarnessConfig['claudeMd']['targets'] },
     brain: {
       command: command(brain.command, 'claude', 'brain.command'),
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
@@ -186,6 +225,9 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
   return value;
 }
 export async function setConfig(root: string, key: string, text: string): Promise<unknown> {
+  if (process.env.FODH_BRAIN === '1' && !/^(delegate|verify)\.[A-Za-z]/u.test(key)) {
+    throw new Error(`두뇌 세션은 이 설정을 바꿀 수 없습니다: ${key}. 판단대기 항목으로 올리세요`);
+  }
   const parts = keyParts(key), path = harnessPath(root, 'harness.json');
   let value: unknown;
   try { value = JSON.parse(text); } catch { value = text; }

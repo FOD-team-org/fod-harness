@@ -43,6 +43,9 @@ it('project-start는 없는 문서 생성·INTERVIEW 전이·프로젝트 이름
   const test = await setup();
   await test.command('project-start', '새 프로젝트');
   expect(await readState(test.root)).toMatchObject({ state: 'INTERVIEW', projectName: '새 프로젝트', autoTurns: 0 });
+  expect(JSON.parse(await readFile(join(test.root, '.pi/harness-interview.json'), 'utf8')).round).toBe(0);
+  expect(await readFile(join(test.root, 'CLAUDE.md'), 'utf8')).toContain('# 새 프로젝트');
+  expect(await readFile(join(test.root, '.claude/skills/fodh-workflow/SKILL.md'), 'utf8')).toContain('name: fodh-workflow');
   for (const name of ['backlog.md', '판단대기.md', '작업일지.md']) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
   expect(test.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: 'harness-orchestrator',
     content: expect.stringContaining('18 영역') }), { triggerTurn: true });
@@ -279,7 +282,7 @@ it.each(['SPEC', 'recovering'])('F7: %s followUp 전송 실패는 카운터를 �
   const after = await readState(test.root);
   expect(after.autoTurns).toBe(2); expect(after.state).toBe(state);
   expect(after.recoveryAutoResumed).toBe(before.recoveryAutoResumed);
-  expect(test.ctx.ui.notify).toHaveBeenCalledWith('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning');
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith('자동 재개 전송에 실패했습니다. This extension ctx is stale 다음 사용자 입력에서 다시 진행합니다.', 'warning');
   await test.end();
   expect(test.sendMessage).toHaveBeenCalledTimes(2); expect((await readState(test.root)).autoTurns).toBe(3);
   if (state === 'recovering') expect((await readState(test.root)).recoveryAutoResumed).toBe(true);
@@ -556,4 +559,48 @@ it('L6: 비활성 상태 memory-critical은 위임 거부 안내를 표시한다
   await t.decide(['memory-critical']);
   expect((await readState(t.root)).state).toBe('READY');
   expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('회복 전까지 새 위임을 거부합니다'), 'error');
+});
+
+it('P5 시작 준비 실패는 warning만 남기고 두뇌 턴을 시작한다', async () => {
+  const test = await setup();
+  await writeFile(join(test.root, 'CLAUDE.md'), '<!-- fodh:managed:begin v1 -->');
+  await test.command('project-start');
+  expect(test.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('준비에 실패'), 'warning');
+  expect((await readState(test.root)).state).toBe('INTERVIEW');
+  expect(test.sendMessage).toHaveBeenCalledTimes(1);
+  expect(await readFile(join(test.root,'CLAUDE.md'),'utf8')).toBe('<!-- fodh:managed:begin v1 -->');
+});
+it('P5 develop-start도 스킬과 CLAUDE.md를 설치한다', async () => {
+  const test=await setup();await test.command('develop-start');
+  expect(await readFile(join(test.root,'CLAUDE.md'),'utf8')).toContain('fodh-workflow');
+  expect(await readFile(join(test.root,'.claude/skills/fodh-workflow/.fodh-managed'),'utf8')).toContain('fod-harness');
+});
+
+it('M3 추가 은행 형식 오류는 IDLE 유지·file:line 알림·실패 원장',async()=>{
+  const t=await setup();await writeFile(join(t.root,'.pi/interview-bank.md'),'잘못된 줄\n');await t.command('project-start');
+  expect((await readState(t.root)).state).toBe('IDLE');expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('인터뷰 시작 불가: 인터뷰 은행 형식 오류:'),'error');
+  expect(t.ctx.ui.notify.mock.calls.at(-1)![0]).toContain('interview-bank.md:1');
+  expect((await readLedger(t.root)).at(-1)).toMatchObject({action:'project-start',status:'fail'});
+  await writeFile(join(t.root,'.pi/interview-bank.md'),'');await t.command('project-start');expect((await readState(t.root)).state).toBe('INTERVIEW');
+});
+it('M3 INTERVIEW 은행 오류여도 instruction·자동 전송은 수정 요청을 포함한다',async()=>{
+  const t=await setup();await updateState(t.root,{state:'INTERVIEW'});await writeFile(join(t.root,'.pi/interview-bank.md'),'잘못된 줄\n');
+  const text=await instruction(t.root,await readState(t.root));expect(text).toContain('인터뷰 은행 오류:');expect(text).toContain('interview-bank.md:1');expect(text).toContain('사용자에게 파일 수정을 요청하고 대기: 사용자');
+  await t.end();expect(t.sendMessage).toHaveBeenCalledWith(expect.objectContaining({content:expect.stringContaining('인터뷰 은행 오류:')}),expect.anything());
+});
+it('M1 답 없는 사용자 입력은 openRound를 유지한다',async()=>{
+  const {nextInterview,readInterview}=await import('../src/core/interview.ts');const t=await setup();await t.command('project-start');
+  const first=await nextInterview(t.root);await t.handlers.get('input')!({source:'interactive',text:'잠깐만'},t.ctx);
+  expect((await readInterview(t.root))?.openRound).toMatchObject({round:1,ids:first.questions.map(q=>q.id)});
+  expect(await nextInterview(t.root)).toMatchObject({round:1,repeated:true,questions:first.questions});
+});
+it('L6 develop-start에서 문서가 변경될 때만 커밋 필요 알림',async()=>{
+  const t=await setup();await t.command('develop-start');expect(t.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('커밋 필요'),'info');
+  t.ctx.ui.notify.mockClear();await t.command('develop-start');expect(t.ctx.ui.notify.mock.calls.some(c=>String(c[0]).includes('커밋 필요'))).toBe(false);
+});
+it('M3 자동 전송 예외는 원인 앞 120자를 알린다',async()=>{
+  const t=await setup();await updateState(t.root,{state:'INTERVIEW'});t.sendMessage.mockImplementation(()=>{throw new Error('전송 실패 원인 '+ 'x'.repeat(200));});await t.end();
+  const warning=t.ctx.ui.notify.mock.calls.find(c=>String(c[0]).includes('전송 실패 원인'));
+  expect(warning).toBeTruthy();expect(warning![0]).toContain('전송 실패 원인');expect(warning![0]).not.toContain('x'.repeat(121));
 });

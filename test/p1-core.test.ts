@@ -1,3 +1,4 @@
+import { setConfig } from '../src/core/config.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -35,6 +36,7 @@ it.each(Object.entries(graph))('전수 전이 행 %s: 나열되지 않은 모든
 });
 it.each(Object.entries(graph).flatMap(([from, next]) => next.map(to => [from, to])))('허용 전이 실제 저장 %s→%s', async (from, to) => {
   const root = await project(), t = await addTask(root, input); await setTask(root, t.id, evidence);
+  if (from === 'INTERVIEW' && to === 'RESEARCH') await setConfig(root, 'interview.enforce', 'false');
   const projectReview = from === 'REVIEW' && ['PROJECT_READY', 'INTERVIEW', 'WAIT_JUDGMENT'].includes(to);
   const projectResume = from === 'WAIT_JUDGMENT' && to !== 'PICK';
   await updateState(root, { state: from, phase: projectReview || projectResume ? 'project' : 'task',

@@ -162,3 +162,51 @@ it('P4 CLI 명령·인자 검증·dry-run·ledger 알림·빈 검증 exit 1', as
   expect((await cli(root, ['verify', 'run'])).code).toBe(1);
   expect((await cli(root, ['memory', 'status'])).code).toBe(0);
 });
+
+it('P5 기본값 전체 노출과 선택 설정', async () => {
+  const root = await project();
+  expect(await getConfig(root)).toMatchObject({ interview: { enforce: true, roundSize: 6, maxAsks: 2, extraBankFile: '.pi/interview-bank.md' },
+    docs: { root: 'docs', overrideDir: '.pi/templates/docs' }, skills: { target: '.claude/skills', install: ['fodh-workflow','fodh-spec-writing','fodh-review-checklist','fodh-judgment'] }, claudeMd: { targets: ['CLAUDE.md'] } });
+  await setConfig(root, 'interview.roundSize', '8'); await setConfig(root, 'interview.maxAsks', '5'); await setConfig(root, 'interview.enforce', 'false');
+  expect((await loadConfig(root)).interview).toMatchObject({ enforce: false, roundSize: 8, maxAsks: 5 });
+});
+it.each([
+  ['interview.enforce','1','interview.enforce는 불리언이어야 합니다'],
+  ['interview.roundSize','4','interview.roundSize는 5~8 사이 정수여야 합니다'], ['interview.roundSize','6.5','5~8'], ['interview.roundSize','9','5~8'],
+  ['interview.maxAsks','0','1~5'], ['interview.maxAsks','6','1~5'], ['interview.maxAsks','null','1~5'],
+  ['interview.extraBankFile','../outside','interview.extraBankFile은 프로젝트 내부 상대 경로여야 합니다'],
+  ['docs.root','/outside','docs.root은 프로젝트 내부 상대 경로여야 합니다'], ['docs.overrideDir','../outside','docs.overrideDir은 프로젝트 내부 상대 경로여야 합니다'],
+  ['skills.target','../outside','skills.target은 프로젝트 내부 상대 경로여야 합니다'], ['skills.install','["missing"]','skills.install 에 없는 스킬: missing'],
+  ['skills.install','[1]','문자열 배열'], ['claudeMd.targets','[]','claudeMd.targets'], ['claudeMd.targets','["other"]','claudeMd.targets'],
+  ['claudeMd.targets','["CLAUDE.md","CLAUDE.md"]','claudeMd.targets'],
+])('P5 %s 검증과 실패 시 무변경',async(key,value,message)=>{
+  const root=await project();await setConfig(root,'brain.model','fable');const path=join(root,'.pi/harness.json'),before=await readFile(path);
+  await expect(setConfig(root,key,value)).rejects.toThrow(message);expect(await readFile(path)).toEqual(before);
+});
+
+it.each(['interview.enforce','interview','requiresApproval','skills.target','claudeMd.targets','docs.overrideDir','brain.model','watch.pollSeconds','cleanup.keepPaths','notify.channels','custom'])('M2 두뇌의 %s 변경은 바이트 불변 거부',async key=>{
+  const root=await project();await setConfig(root,'brain.model','fable');const path=join(root,'.pi/harness.json'),before=await readFile(path);
+  vi.stubEnv('FODH_BRAIN','1');
+  try { await expect(setConfig(root,key,'false')).rejects.toThrow(`두뇌 세션은 이 설정을 바꿀 수 없습니다: ${key}. 판단대기 항목으로 올리세요`);expect(await readFile(path)).toEqual(before); }
+  finally { vi.unstubAllEnvs(); }
+});
+it('M2 두뇌 delegate/verify 하위 키만 허용하고 사용자 설정은 유지',async()=>{
+  const root=await project();vi.stubEnv('FODH_BRAIN','1');
+  try { await setConfig(root,'delegate.codex.workerModel','custom');await setConfig(root,'verify.commands','["node --version"]'); }
+  finally { vi.unstubAllEnvs(); }
+  await setConfig(root,'interview.enforce','false');expect((await loadConfig(root)).interview.enforce).toBe(false);
+});
+
+it.each(['docs.overrideDir', 'interview.extraBankFile'])('N9 %s는 루트·문서 겹침을 거부하고 전용 경로를 허용한다', async key => {
+  const root = await project(); await setConfig(root, 'docs.root', 'notes/project');
+  const path = join(root, '.pi/harness.json'), before = await readFile(path);
+  for (const value of ['.', './', 'custom/..', 'notes', 'notes/project', 'notes/project/child']) {
+    await expect(setConfig(root, key, value)).rejects.toThrow(`${key}은 .pi/ 아래 또는 docs.root와 겹치지 않는 경로`);
+    expect(await readFile(path)).toEqual(before);
+  }
+  for (const value of ['.pi/custom', 'custom/templates', 'notes/project-other']) await setConfig(root, key, value);
+  await expect(setConfig(root, 'docs.root', 'notes')).rejects.toThrow(key);
+  expect((await loadConfig(root)).docs.root).toBe('notes/project');
+  await setConfig(root, key, '.pi/custom');
+  await expect(setConfig(root, 'docs.root', '.pi/custom/docs')).rejects.toThrow(key);
+});

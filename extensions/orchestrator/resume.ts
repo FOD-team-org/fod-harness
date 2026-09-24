@@ -1,3 +1,6 @@
+import { redact } from '../../src/provider/privacy.ts';
+import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
+import { substitute, todayKst } from '../../src/core/template-values.ts';
 import { notify } from '../../src/core/notify.ts';
 import { readMeta } from '../../src/core/codex-record.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
@@ -14,10 +17,20 @@ export async function instruction(root: string, state: HarnessState, promptState
   if (!active.has(promptState)) throw new Error(`자동 진행할 수 없는 상태: ${promptState}`);
   const config = await loadConfig(root);
   const prompt = await readFile(join(templates, 'prompts', `${promptState}.md`), 'utf8');
+  let interviewSummary = '';
+  if (promptState === 'INTERVIEW') {
+    try {
+      const interview = await interviewStatus(root);
+      interviewSummary = interview.docFile ? `남은 필수 ${interview.remainingMust}개 — 영역 ${remainingAreas(interview) || '없음'}` : '인터뷰 기록 없음';
+    } catch (error) {
+      interviewSummary = `인터뷰 은행 오류: ${redact(error instanceof Error ? error.message : String(error))}. 사용자에게 파일 수정을 요청하고 대기: 사용자`;
+    }
+  }
   const values: Record<string, string> = {
+    docsRoot: config.docs.root, today: todayKst(), interviewSummary,
     taskId: state.taskId ?? '', judgmentFile: config.judgment.file, backlogFile: 'docs/backlog.md',
   };
-  const rendered = prompt.replace(/\{\{(taskId|judgmentFile|backlogFile)\}\}/gu, (_match, key: string) => values[key]!);
+  const rendered = substitute(prompt, values, false);
   return rendered;
 }
 
@@ -59,8 +72,8 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     }
     let content: string;
     try { content = await instruction(root, state); }
-    catch {
-      try { ctxLike.notify('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning'); } catch { /* disposed UI */ }
+    catch (error) {
+      try { ctxLike.notify(`자동 재개 전송에 실패했습니다. ${redact(error instanceof Error ? error.message : String(error)).slice(0, 120)} 다음 사용자 입력에서 다시 진행합니다.`, 'warning'); } catch { /* disposed UI */ }
       return { skipped: 'send-failed' };
     }
     const reminder = reason === 'agent_end' && state.delegation && state.delegationReminder !== state.delegation.runId
@@ -83,9 +96,9 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       pi.sendMessage({ customType: 'harness-orchestrator', content, display: true,
         details: { state: state.state, taskId: state.taskId } }, { triggerTurn: true, deliverAs: 'followUp' });
       return { resumed: true };
-    } catch {
+    } catch (error) {
       await updateState(root, beforeSend);
-      try { ctxLike.notify('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning'); }
+      try { ctxLike.notify(`자동 재개 전송에 실패했습니다. ${redact(error instanceof Error ? error.message : String(error)).slice(0, 120)} 다음 사용자 입력에서 다시 진행합니다.`, 'warning'); }
       catch { /* 세션 폐기 뒤에는 warning 알림도 사용할 수 없다. */ }
       return { skipped: 'send-failed' };
     }

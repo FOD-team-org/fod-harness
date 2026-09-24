@@ -216,7 +216,8 @@ describe('doctor와 CLI', () => {
     expect(check.args).not.toContain(join(packageRoot, 'templates/brain-rules.md'));
     expect(check.args[check.args.indexOf('--max-turns') + 1]).toBe('2');
     expect(check.args[check.args.indexOf('--settings') + 1]).toBe(join(root, '.claude/settings.json'));
-    expect(check.prompt).toContain('차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄만 답하고 끝내라');
+    expect(check.prompt).toContain('차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄을 답하고');
+    expect(check.prompt).toContain('CLAUDE.md의 `doctor 표식` 값을 `문서 확인 <값>` 한 줄로 답하라');
     expect(normal.args[normal.args.indexOf('--append-system-prompt-file') + 1]).toBe(join(packageRoot, 'templates/brain-rules.md'));
     expect(normal.args).not.toContain('--max-turns');
   });

@@ -19,6 +19,7 @@ export interface TurnOptions {
   lockHeld?: boolean; doctor?: boolean;
 }
 export interface TurnResult {
+  init?: { skills: string[]; memory_paths: string[] };
   reason: 'stop' | 'error' | 'aborted'; classification?: string; usage?: Record<string, number>; contextUsage?: boolean; runId: string;
 }
 export function claudeArgs(root: string, model: string, sid: string, resume: boolean, doctor = false): string[] {
@@ -69,10 +70,12 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
     let resume = !options.doctor && !!initial.sessionId;
     const suppliedEnv = options.env ?? process.env;
     const env = { ...suppliedEnv, BASH_DEFAULT_TIMEOUT_MS: suppliedEnv.BASH_DEFAULT_TIMEOUT_MS ?? '600000',
-      BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root };
+      BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root, FODH_BRAIN: '1',
+      FODH_PROTECTED_EXTRA: [config.interview.extraBankFile, config.docs.overrideDir].join(':') };
     for (let attempt = 0; attempt < 2; attempt++) {
       const action = `brain:${attempt}`;
       await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
+      let init: TurnResult['init'];
       let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
       let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
       const toolInputs = new Map<string, { tool_name: string; tool_input: unknown }>();
@@ -113,9 +116,11 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
               await patchState({ lastEventAt, runId }); lastPersisted = Date.now();
             }
             if (event.type === 'system' && event.subtype === 'init') {
+              const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+              init = { skills: strings(event.skills), memory_paths: strings(event.memory_paths && !Array.isArray(event.memory_paths) && typeof event.memory_paths === 'object' ? Object.values(event.memory_paths) : event.memory_paths) };
               const evidence = safeValue({
                 session_id: event.session_id, model: event.model, permissionMode: event.permissionMode,
-                apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
+                ...init, memory_paths: event.memory_paths, apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
               });
               await appendLedger(root, { runId, action: `system.init:${attempt}`, status: 'ok', evidence });
               if (event.apiKeySource !== 'none') return 'billing';
@@ -233,7 +238,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         const markerDenied = [...denials.values()].some(denial => denial.tool_name === 'Bash'
           && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
         if (!markerDenied) return { reason: 'error', classification: 'configError', runId };
-        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId };
+        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId, init };
       }
       if (!initialized || !result || outcome.code !== 0 || result.is_error) {
         await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });

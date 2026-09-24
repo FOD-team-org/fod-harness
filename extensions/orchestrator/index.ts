@@ -1,8 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import { redact } from '../../src/provider/privacy.ts';
+import { scaffoldDoc } from '../../src/core/docs.ts';
+import { startInterview, validateInterviewStart } from '../../src/core/interview.ts';
+import { installSkills } from '../../src/core/skills.ts';
+import { generateClaudeMd } from '../../src/core/claude-md.ts';
 import { readMeta } from '../../src/core/codex-record.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
-import { access, readFile } from 'node:fs/promises';
+import { access } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../src/core/config.ts';
 import { readState, updateState, transitionState, activeStates as active, doctorFresh } from '../../src/core/state.ts';
 import { listBacklog } from '../../src/core/backlog.ts';
@@ -18,21 +23,25 @@ import { autoResume, resumeContext, send } from './resume.ts';
 import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
 export { instruction } from './resume.ts';
 
-const templates = fileURLToPath(new URL('../../templates/', import.meta.url));
-
-
 async function exists(path: string): Promise<boolean> {
   try { await access(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
-async function initialize(root: string): Promise<void> {
-  for (const name of ['backlog.md', '작업일지.md']) {
-    const path = join(root, 'docs', name);
-    await withFileLock(path, async () => {
-      if (!await exists(path)) await atomicWrite(path, await readFile(join(templates, name), 'utf8'));
-    });
-  }
+export async function initialize(root: string): Promise<void> {
+  await scaffoldDoc(root, 'backlog', { ifMissing: true });
+  await scaffoldDoc(root, 'worklog', { ifMissing: true });
   await readJudgment(root);
+}
+async function prepareProject(root: string, ctx: ExtensionContext, reportChanges = false): Promise<void> {
+  for (const action of [async () => {
+    const result = await installSkills(root);
+    for (const name of result.conflicts) ctx.ui.notify(`사용자 스킬과 이름이 겹칩니다: ${name}`, 'warning');
+  }, async () => {
+    const generated = await generateClaudeMd(root);
+    if (reportChanges && 'files' in generated && generated.files?.some(file => file.changed)) ctx.ui.notify('CLAUDE.md 하네스 규칙이 바뀌었습니다. 커밋 필요', 'info');
+  }]) {
+    try { await action(); } catch { ctx.ui.notify('하네스 스킬 또는 CLAUDE.md 준비에 실패했습니다. fodh 명령으로 확인하세요.', 'warning'); }
+  }
 }
 
 export default function orchestrator(pi: ExtensionAPI): void {
@@ -46,9 +55,17 @@ export default function orchestrator(pi: ExtensionAPI): void {
     description: '프로젝트 인터뷰 시작',
     handler: async (args, ctx) => {
       if ((await readState(ctx.cwd)).state !== 'IDLE') throw new Error('project-start는 IDLE에서만 시작할 수 있습니다');
-      await initialize(ctx.cwd);
+      try { await validateInterviewStart(ctx.cwd); await initialize(ctx.cwd); }
+      catch (error) {
+        const message = redact(error instanceof Error ? error.message : String(error));
+        ctx.ui.notify(`인터뷰 시작 불가: ${message}`, 'error');
+        await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'project-start', status: 'fail', evidence: { error: message } });
+        return;
+      }
       const state = await transitionState(ctx.cwd, 'INTERVIEW');
       await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, ...(args.trim() ? { projectName: args.trim() } : {}) });
+      await startInterview(ctx.cwd);
+      await prepareProject(ctx.cwd, ctx);
       await send(pi, ctx.cwd, state);
     },
   });
@@ -61,6 +78,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       if (state.state === 'WAIT_RETRY' && state.retry?.nextAt && Date.parse(state.retry.nextAt) > Date.now()) {
         ctx.ui.notify(`${Math.ceil((Date.parse(state.retry.nextAt) - Date.now()) / 60000)}분 뒤 재시도 예정`, 'info'); return;
       }
+      await prepareProject(ctx.cwd, ctx, true);
       const missingBacklog = !await exists(join(ctx.cwd, 'docs/backlog.md'));
       const tasks = await listBacklog(ctx.cwd);
       if (missingBacklog) await initialize(ctx.cwd);

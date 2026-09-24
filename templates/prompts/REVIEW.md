@@ -1,10 +1,20 @@
 # REVIEW
-
-지금 할 일: `fodh state get`으로 프로젝트 문서 검수인지 작업 `{{taskId}}`의 교차검수인지 확인하고, task면 `fodh backlog get {{taskId}}`로 delegate·워크트리·대상 커밋 SHA를 확인한다.
-- task.delegate가 비어 있으면 codex로 간주한다. task.delegate가 codex면 Claude Agent(`model: opus`)가 읽기 전용으로 검수하여 `docs/검수/<날짜>-{{taskId}}-검수.md`를 쓴다. 워크트리 소스는 수정하지 않고 git·전체 테스트/빌드·비밀값·산출물·외부 발송을 금지한다.
-- task.delegate가 claude이거나 프로젝트 문서 검수면 `fodh codex review --spec <검수 요청 파일> [--task {{taskId}}] --wait`를 쓴다. 작업 소스가 워크트리에 있으면 `--cwd <등록 워크트리>`를 명시한다. 결과의 lastMessage를 검수 문서로 저장한다.
-산출물: `docs/검수/`에 대상 커밋 SHA·모델·effort·높음/중간/낮음 지적(파일:줄·재현·수정안)·APPROVE 또는 REQUEST_CHANGES. 검수 증거를 추정하지 않는다.
-끝내는 조건: 실제 검수가 완료되고 높음 결함이 0이다.
-다음 fodh 명령: 작업은 `fodh backlog set {{taskId}} --review-commit <sha> --review-high 0` 후 `fodh state transition MERGE --task {{taskId}}`; 반려 시 `fodh state transition FIX --task {{taskId}}`. 프로젝트는 `fodh state transition PROJECT_READY` 또는 추가 인터뷰를 위해 `fodh state transition INTERVIEW`. 프로젝트 미결이면 `fodh state transition WAIT_JUDGMENT`, task 판단은 `fodh judgment add … --blocks {{taskId}} --reclaim`.
-
-`--wait`가 진행 중 오류, 시간 초과, 중단 등 어떤 이유로든 결과 없이 끝나면 stderr의 `{"runId"}` 줄 또는 `fodh codex status`의 `delegation.runId`로 `대기: 위임 3f2c…`를 쓰고 턴을 끝낸다. `3f2c…` 대신 실제 runId 전체를 쓰며, `--wait`를 다시 부르지 않는다.
+## 지금 할 일
+1. `fodh state get`으로 프로젝트 또는 task 검수를 구분한다.
+2. task면 `fodh docs scaffold review-request --task {{taskId}}`와 `fodh docs scaffold review --task {{taskId}}`, 프로젝트면 `fodh docs scaffold review-request --subject 프로젝트`와 `fodh docs scaffold review --subject 프로젝트`를 만든다. 이미 있으면 기존 파일을 고친다.
+3. task는 `fodh backlog get {{taskId}}`로 delegate·워크트리·SHA를 확인한다.
+4. codex 산출물(delegate 없으면 codex)은 설정의 Claude Agent로 읽기 전용 검수한다.
+5. claude 산출물 또는 프로젝트 문서는 `fodh codex review --spec <검수 요청 파일> --wait`로 읽기 전용 위임한다. task면 --task와 등록 워크트리 --cwd를 명시한다.
+6. codex review 결과의 lastMessage를 {{docsRoot}}/검수/…-검수.md(scaffold 결과 path)에 저장한다.
+## 산출물
+{{docsRoot}}/검수/: 대상 SHA·모델·effort·서브에이전트 모델·심각도·파일:줄·재현·수정안·APPROVE 또는 REQUEST_CHANGES.
+## 끝내는 조건
+실제 교차검수 완료·높음 0·대상 SHA 일치.
+## 다음 fodh 명령
+- task 통과 → `fodh backlog set {{taskId}} --review-commit <sha> --review-high 0` 후 `fodh state transition MERGE --task {{taskId}}`
+- task 반려 → `fodh state transition FIX --task {{taskId}}`; 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim`
+- 프로젝트 통과 → `fodh state transition PROJECT_READY`; 질문 추가 → `fodh interview add --area NN --text "<질문>" --must` 후 `fodh state transition INTERVIEW`
+- 프로젝트 미결 → `fodh state transition WAIT_JUDGMENT`
+## 금지
+두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
+검수자 소스 수정·git·전체 테스트/빌드·비밀값·외부 발송 금지. --wait 무결과면 stderr runId 또는 `fodh codex status`로 `대기: 위임 <runId>` 후 종료하고 재호출하지 않는다.

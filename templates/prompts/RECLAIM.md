@@ -1,6 +1,14 @@
 # RECLAIM
-
-지금 할 일: 작업 `{{taskId}}`를 막는 `{{judgmentFile}}`의 A번호를 확인하고 작업 소유 프로세스를 회수한다. `fodh reclaim`은 내부에서 `fodh cleanup run --task {{taskId}} --scope processes`와 같은 공용 회수를 사용한다. 이 task의 위임은 먼저 cancel하며 워크트리·검수 증거를 보존한다.
-산출물: non-brain 소유 프로세스 잔존 0, blocked(A번호) 상태.
-끝내는 조건: 회수 결과가 확인되었다. 실패면 CLEANUP_FAILED를 보존하고 후속 작업을 시작하지 않는다.
-다음 fodh 명령: `fodh reclaim --task {{taskId}} --judgment <A번호>`; 성공하여 PICK이면 `fodh pick`.
+## 지금 할 일
+1. 작업 {{taskId}}를 막는 {{judgmentFile}}의 A번호를 확인한다.
+2. `fodh reclaim --task {{taskId}} --judgment <A번호>`로 회수한다. 내부 공용 cleanup은 task 위임을 먼저 cancel하고 워크트리·검수 증거를 보존한다.
+## 산출물
+non-brain 소유 프로세스 잔존 0·blocked(A번호).
+## 끝내는 조건
+회수 결과가 확인됐다.
+## 다음 fodh 명령
+- 성공하여 PICK → `fodh pick`
+- 실패 → `fodh cleanup report`로 잔존 확인
+## 금지
+두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
+실패면 CLEANUP_FAILED를 보존하고 후속 작업을 시작하지 않는다.

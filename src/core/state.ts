@@ -127,6 +127,13 @@ export async function transitionState(root: string, to: string, input: Transitio
       const resume = options.resume && current.state === 'PICK' && taskStates.includes(to)
         && current.resumeTask?.taskId === options.taskId && current.resumeTask?.resumeState === to;
       if (options.resume && !resume || !resume && !allowedTransition(current.state, to, options.system)) throw new TransitionError(transitionMessage(current.state, '허용되지 않는 전이'));
+      if (current.state === 'INTERVIEW' && to === 'RESEARCH' && (await loadConfig(root)).interview.enforce) {
+        const { interviewStatus, remainingAreas } = await import('./interview.ts');
+        const status = await interviewStatus(root);
+        if (!status.docFile) throw new TransitionError('인터뷰 기록이 없습니다. fodh interview start 를 먼저 실행하세요', 'interview');
+        if (!status.remainingMust && status.skipDue.length) throw new TransitionError(`한도에 도달한 선택 질문이 남아 있습니다: ${status.skipDue.join(', ')}. fodh interview skip <ID> --reason 한도 로 처리하세요`, 'interview');
+        if (!status.complete) throw new TransitionError(`인터뷰 필수 질문이 남아 있습니다: 영역 ${remainingAreas(status)}. fodh interview next 로 계속하세요`, 'interview');
+      }
       if (current.state === 'WAIT_JUDGMENT') {
         if (!options.system && !options.judgmentApplied) {
           const { readJudgment } = await import('./judgment.ts');

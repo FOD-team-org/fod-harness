@@ -1,9 +1,20 @@
 # INTERVIEW
-
-지금 할 일: 18 영역을 라운드당 5~8문항으로 나누어 확인한다. 유한 선택지는 `{{judgmentFile}}`에 `fodh judgment add`로 등록하고, 서술형은 채팅으로 질문한다. 문항마다 추천 기본값을 제시하고 모호한 답은 되묻는다. 나중에 결정할 내용은 판단대기로 이관한다.
-영역: 문제·목적, 사용자·시나리오, 범위·MVP, 플랫폼, 스택·기존 자산, 데이터·개인정보, 인증, 결제·광고, 인프라·비용, 외부 API, 디자인·브랜드, 일정, 지표, 비기능, 운영, 법무·심사, 팀 규칙(역할·모델·검수·정리·승인 목록), 리스크·가정.
-산출물: `docs/결정기록/YYYY-MM-DD-인터뷰.md`에 답과 미결 사항을 기록한다.
-끝내는 조건: 18 영역 모두 답이 있거나 판단대기로 이관되어 있다. 답을 임의로 추정하지 않는다.
-다음 fodh 명령: 판단대기에 등록한 유한 선택지의 답을 기다리면 `fodh state transition WAIT_JUDGMENT`, 인터뷰가 충족되면 `fodh state transition RESEARCH`.
-
-서술형 질문을 던지고 답을 기다릴 때는 `대기: 사용자` 를 적고 턴을 끝낸다. 필요하면 `fodh state await-user`로 대기를 기록한다.
+## 지금 할 일
+1. `fodh interview status`로 18 영역의 진행을 확인한다. 요약: {{interviewSummary}}.
+2. 답이 오면 문항마다 `fodh interview record <ID> --answer "<원문>"`으로 기록한다. 사용자가 "추천대로"라고 답한 경우만 `--source default`; 모호한 답은 기록하지 않는다.
+3. `fodh interview next`로 다음 라운드를 받는다. 같은 라운드가 오면(`repeated:true`) 횟수는 늘지 않는다. 질문을 그대로 다시 보여 주고 `대기: 사용자`로 멈춘다.
+4. choice 문항은 `next`가 이미 판단대기로 넘겼다(결과 `deferred`). 채팅에 '판단대기 A<n>로 올렸다' 한 줄만 알린다.
+5. free 문항은 번호·추천값과 함께 채팅으로 묻고 마지막 상태 줄 앞 `대기: 사용자`로 멈춘다.
+6. mustDefer는 전부 `fodh interview defer <ID>`, skipDue는 `fodh interview skip <ID> --reason 한도`로 처리한다.
+## 산출물
+상태 파일과 {{docsRoot}}/결정기록/인터뷰 기록 뷰.
+## 끝내는 조건
+모든 필수가 answered 또는 judgment이고 skipDue가 비어 complete:true이다.
+## 다음 fodh 명령
+- questions가 비고 mustDefer가 있으면 전부 defer 후 → `fodh state transition WAIT_JUDGMENT`
+- 판단 답 대기만 남으면 → `fodh state transition WAIT_JUDGMENT`
+- complete:true이고 판단 답을 기다릴 필요가 없으면 → `fodh state transition RESEARCH`
+## 금지
+두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
+답 추정·필수 skip·반복 한도 초과 질문 금지.
+가드 설정(`interview.*`)·은행 파일·템플릿을 바꾸지 않는다. 막히면 판단대기로 올린다.
