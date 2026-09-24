@@ -18,7 +18,7 @@ import { notify, setNotifyContext } from '../../src/core/notify.ts';
 import { applyJudgments, readJudgment, JudgmentConflict } from '../../src/core/judgment.ts';
 import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
-import { atomicWrite, harnessPath, withFileLock } from '../../src/core/storage.ts';
+import { atomicWrite, harnessPath, readJson, withFileLock } from '../../src/core/storage.ts';
 
 import { autoResume, resumeContext, send } from './resume.ts';
 import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
@@ -29,7 +29,11 @@ async function exists(path: string): Promise<boolean> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
 }
 export async function initialize(root: string): Promise<void> {
-  await ensureHarnessGitignore(root);
+  try { await ensureHarnessGitignore(root); }
+  catch (error) {
+    if (!(error instanceof GitignoreNotRegularError)) throw error;
+    await appendLedger(root, { runId: randomUUID(), action: 'init:gitignore', status: 'skipped', evidence: { skipped: error.skipped } });
+  }
   await scaffoldDoc(root, 'backlog', { ifMissing: true });
   await scaffoldDoc(root, 'worklog', { ifMissing: true });
   await readJudgment(root);
@@ -52,12 +56,28 @@ export default function orchestrator(pi: ExtensionAPI): void {
     try { await ensureHarnessGitignore(ctx.cwd); }
     catch (error) {
       const message = redact(error instanceof Error ? error.message : String(error));
-      try { await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'init:gitignore', status: 'fail',
+      try { await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'init:gitignore', status: error instanceof GitignoreNotRegularError ? 'skipped' : 'fail',
         evidence: { error: message, ...(error instanceof GitignoreNotRegularError ? { skipped: error.skipped } : {}) } }); }
       catch { /* An initialization diagnostic must not prevent the session from starting. */ }
-      try { await notify(ctx.cwd, { key: 'init:gitignore', title: '하네스 초기화', level: 'warning',
-        body: `.gitignore 갱신 실패: ${message}` }, resumeContext(ctx)); }
+      try {
+        const warn = () => notify(ctx.cwd, { key: 'init:gitignore', title: '하네스 초기화', level: 'warning',
+          body: `.gitignore 갱신 ${error instanceof GitignoreNotRegularError ? '건너뜀' : '실패'}: ${message}` }, resumeContext(ctx));
+        if (error instanceof GitignoreNotRegularError) {
+          const path = harnessPath(ctx.cwd, 'harness-init-warned.json');
+          await withFileLock(path, async () => {
+            if ((await readJson<{ gitignore?: string }>(path, {})).gitignore === 'not-regular-file') return;
+            await warn();
+            await atomicWrite(path, JSON.stringify({ gitignore: 'not-regular-file', at: new Date().toISOString() }) + '\n');
+          });
+        } else await warn();
+      }
       catch { /* Notification I/O is also best effort during session startup. */ }
+    }
+    try { await generateClaudeMd(ctx.cwd, { legacyWorklogOnly: true }); }
+    catch (error) {
+      try { await notify(ctx.cwd, { key: 'init:claude-md', title: '하네스 초기화', level: 'warning',
+        body: `CLAUDE.md 작업일지 규약 갱신 실패: ${redact(error instanceof Error ? error.message : String(error))}` }, resumeContext(ctx)); }
+      catch { /* Keep startup usable if migration diagnostics fail. */ }
     }
   });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
@@ -283,9 +303,9 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         const state = await readState(root);
         const waiting = state.awaitingSlot;
         const matching = waiting && batch.some(record => record.since === waiting.since && record.ownerRunId === waiting.owner.runId);
-        if (matching && (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot')) {
+        if (matching && (state.state === 'paused(slot)' || ['PICK', 'WAIT_RESOURCE'].includes(state.state) && state.lastPaused === 'slot')) {
           await updateState(root, { awaitingSlot: undefined, autoTurns: 0 });
-          await transitionState(root, 'PICK');
+          if (state.state !== 'PICK') await transitionState(root, 'PICK');
           resumed = (await autoResume(pi, root, context, kind)).resumed === true;
         }
         handled = true; resolve = true;

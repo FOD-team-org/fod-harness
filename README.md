@@ -131,10 +131,11 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 
 PROJECT_READY→PLANNING, DONE_ALL→PLANNING·IDLE 및 CLI `state transition --system`은 사용자 전용이며 `assertNotBrain`의 환경변수·잠금 소유자 자손 체인 검사로 두뇌를 거부한다. 오케스트레이터·워처·프로바이더의 내부 전이는 그대로다. 코어 전이가 PROJECT_READY·DONE_ALL·WAIT_*·CLEANUP_FAILED를 떠나면 `awaitingUser`를 해제한다.
 
-git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.worktrees` 등록이 모두 필요하고 `--cwd`도 그 워크트리 안이어야 한다. 비-git 프로젝트만 루트 폴백을 허용한다. 프로젝트 초기화와 첫 세션은 git 프로젝트의 `.gitignore`에 `.pi/harness.lock`, `.pi/*.lock`, `.pi/harness-*.json`, `.pi/harness-*.jsonl`, `.pi/scratch/`, `.pi/codex/`, `.pi/verify/`, `.pi/cleanup-last.json`, `.pi/harness-config-warned.json` 중 빠진 줄을 추가하며 기존 내용은 보존한다. 디렉터리·심링크인 `.gitignore`는 변경하지 않는다. 첫 세션에서 갱신에 실패하면 실패 원장과 알림만 남기고 세션 시작은 계속한다.
+git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.worktrees` 등록이 모두 필요하고 `--cwd`도 그 워크트리 안이어야 한다. 비-git 프로젝트만 루트 폴백을 허용한다. 프로젝트 초기화와 첫 세션은 git 프로젝트의 `.gitignore`에 `.pi/harness.lock`, `.pi/*.lock`, `.pi/harness-*.json`, `.pi/harness-*.jsonl`, `.pi/scratch/`, `.pi/codex/`, `.pi/verify/`, `.pi/cleanup-last.json`, `.pi/harness-config-warned.json` 중 빠진 줄을 추가하며 기존 내용은 보존한다. 디렉터리·심링크인 `.gitignore`는 변경하지 않는다. 비정규 파일은 초기화를 계속하며 skipped 원장과 프로젝트당 1회 경고를 남긴다. 그 밖의 세션 시작 시 갱신 오류는 실패 원장과 알림만 남기고 세션 시작을 계속한다.
 
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
+| 작업일지 규약 이행 | 기존 `docs/작업일지.md`는 읽거나 변경·삭제하지 않고 날짜별 새 규약만 사용한다. `fodh claude-md generate` 또는 session_start의 옛 작업일지 문구 감지 시 관리 블록만 재생성하며 사용자 영역은 보존한다. |
 | task 검수 면제(L4) | REVIEW→MERGE는 해당 task의 `kind: task, status: ok` meta 존재만으로 검수를 면제하며 시간 경계가 없다. 사소한 `codex task` 한 번으로도 면제될 수 있다. Claude Agent 검수 경로에서는 하네스가 검수 증거를 만들 수 없기 때문이다. 후속 P8 후보는 `fodh review record`로 Claude Agent 검수도 증거화하는 것이며 현재 제공되는 명령은 아니다 |
 | git 프로젝트 판정(L5) | F8은 프로젝트 루트의 `.git`만 확인한다. git 저장소의 하위 디렉터리를 프로젝트 루트로 쓰면 비-git으로 판정되어 루트 폴백이 적용된다 |
 | 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령과 `sh -c '…'`·셸로 넘기는 heredoc 본문 안의 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
@@ -152,13 +153,13 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 | 전이·명령 | 하네스가 확인·기록하는 증거 |
 |---|---|
-| VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
+| VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd, git worktree의 검증 당시 clean=true. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
 | DOCS → CLEANUP | `${docs.root}/작업일지/YYYY-MM-DD.md`의 오늘 또는 어제(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
 | `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 scope all 성공 보고서(processes·storage·worktrees 성공, 잔존 0). task.cleanup.ok 자동 기록(dry-run 제외) |
 | CLEANUP → PICK | `backlog set T --status done`의 DoD 충족 및 현재 task 완료, 마지막 정리 보고서와 프로세스 레지스트리 잔존 없음 |
 
 `--verify-ok`, `--docs-ok`, `--cleanup-ok` 자기 보고 옵션은 지원하지 않는다. 실패한 검사는 두뇌가 면제할 수 없으며 `fodh judgment add`로 사용자 판단을 받는다.
 
-검수 커밋은 등록 브랜치의 워크트리 HEAD이며 생성 base 이후 커밋이 1개 이상이고 미커밋 변경이 없어야 한다. 병합 커밋은 검수 커밋을 포함하고 루트 HEAD의 조상이어야 한다. 검수 커밋 자체를 쓰는 경우에는 루트 HEAD도 같아야 한다(fast-forward). 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 브랜치에서 diff 추가 줄과 1 MB 이하 텍스트 새 파일의 비밀 패턴을 검사한다. 큰 파일·바이너리는 이름만 원장에 남기고, `.pi/`를 add에서 제외하며 변경이 없으면 안내 결과를 반환한다.
+검수 커밋은 등록 브랜치의 워크트리 HEAD이며 생성 base 이후 커밋이 1개 이상이고 미커밋 변경이 없어야 한다. 병합 커밋은 검수 커밋을 포함하고 루트 HEAD의 조상이어야 한다. 검수 커밋 자체를 쓰는 경우에는 루트 HEAD도 같아야 한다(fast-forward). 루트는 생성 시 기록한 baseBranch 위에 있어야 하며, 업그레이드 전 등록에 baseBranch가 없으면 이 검사만 생략하고 경고 원장을 남긴다. 같은 task의 verify.head가 있으면 검수 커밋은 그 HEAD와 같아야 한다. 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 브랜치에서 diff 추가 줄과 1 MB 이하 텍스트 새 파일의 비밀 패턴을 검사한다. 큰 파일·바이너리는 이름만 원장에 남기고, `.pi/`를 add에서 제외하며 변경이 없으면 안내 결과를 반환한다.
 
 Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 소유자의 생존을 확인한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.

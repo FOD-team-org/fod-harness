@@ -125,8 +125,10 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
     if (!options.judgmentOnly) {
       const state = await readState(root);
       const waiting = state.awaitingSlot;
-      if (waiting && state.state !== 'paused(slot)') {
-        await updateState(root, current => current.state !== 'paused(slot)' && current.awaitingSlot?.since === waiting.since
+      const slotWait = (current: typeof state) => current.state === 'paused(slot)'
+        || ['PICK', 'WAIT_RESOURCE'].includes(current.state) && current.lastPaused === 'slot';
+      if (waiting && !slotWait(state)) {
+        await updateState(root, current => !slotWait(current) && current.awaitingSlot?.since === waiting.since
           && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});
         delete watch.slotCheck;
       } else if (waiting && (watch.slotCheck?.since !== waiting.since || watch.slotCheck.ownerRunId !== waiting.owner.runId

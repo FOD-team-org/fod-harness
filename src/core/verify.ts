@@ -17,6 +17,14 @@ import { parseGroupRssMB } from './codex-supervisor.ts';
 import { sampleMemory } from './memory.ts';
 import { appendLedger } from './ledger.ts';
 import { harnessPath, atomicWrite } from './storage.ts';
+async function gitSnapshot(cwd: string): Promise<{ head: string | null; clean: boolean | null }> {
+  const git = async (...args: string[]) => (await promisify(execFile)('git', ['-C', cwd, ...args], { timeout: 10000 })).stdout.trim();
+  let repository = false;
+  try { repository = await git('rev-parse', '--is-inside-work-tree') === 'true'; }
+  catch { /* Non-git projects have no commit evidence. Registered worktrees still require clean=true at the gate. */ }
+  if (!repository) return { head: null, clean: null };
+  return { head: await git('rev-parse', 'HEAD'), clean: (await git('status', '--porcelain')) === '' };
+}
 export async function runVerify(root: string, options: { heavy?: boolean; cwd?: string } = {}) {
   const state = await readState(root), config = await loadConfig(root);
   if (!['VERIFY', 'FIX'].includes(state.state)) return { ok: false, error: 'VERIFY 또는 FIX 상태에서만 검증할 수 있습니다' };
@@ -28,11 +36,12 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   const registered = await Promise.all((state.worktrees ?? []).map(w => realpath(w.path).catch(() => '')));
   if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
   if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
+  const snapshot = await gitSnapshot(cwd);
   async function finish<T extends { ok: boolean }>(report: T) {
     const finishedAt = new Date().toISOString();
-    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd };
+    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd, ...snapshot };
     await atomicWrite(harnessPath(root, `verify/${runId}/result.json`), `${JSON.stringify(result, null, 2)}\n`);
-    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd } });
+    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd, ...snapshot } });
     return result;
   }
   const commands = options.heavy ? config.verify.heavy : config.verify.commands;
@@ -48,7 +57,7 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   const before = await sampleMemory(config.cleanup.swapWarnGB);
   try {
     const dir = harnessPath(root, `verify/${runId}`); await mkdir(dir, { recursive: true });
-    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: 'pre', evidence: { heavy: !!options.heavy, cwd } });
+    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: 'pre', evidence: { heavy: !!options.heavy, cwd, ...snapshot } });
     for (const [index, cmd] of commands.entries()) {
       const argv = commandParts(cmd), file = await open(join(dir, `${index + 1}.log`), 'w+', 0o600);
       const start = Date.now(); let timedOut = false, residual = false, pid: number | undefined;

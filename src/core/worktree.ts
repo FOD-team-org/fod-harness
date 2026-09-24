@@ -43,6 +43,18 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
     if (sha !== 'none') throw new Error('비-git 프로젝트는 커밋 none만 허용합니다');
     return;
   }
+  const verify = (await readState(root)).verify;
+  if (kind === 'review' && verify?.taskId === taskId && verify.head && sha !== verify.head) {
+    throw new Error('검수 커밋이 검증 시점 HEAD 와 다릅니다');
+  }
+  if (kind === 'merge') {
+    const registered = (await readState(root)).worktrees?.find(item => item.taskId === taskId);
+    if (registered?.baseBranch) {
+      if ((await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim() !== registered.baseBranch) {
+        throw new Error(`루트 브랜치가 base 브랜치(${registered.baseBranch})가 아닙니다`);
+      }
+    } else await appendLedger(root, { runId: randomUUID(), taskId, action: 'merge-commit:base-branch-unknown', status: 'warn' });
+  }
   try {
     if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error();
     const cwd = kind === 'review' ? await taskWorktree(root, taskId, true) : root;
@@ -126,12 +138,14 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
     await getTask(root, taskId);
     const state = await readState(root), config = await loadConfig(root);
     const registered = state.worktrees?.find(item => item.taskId === taskId);
-    if (registered && await exists(registered.path)) return { ...registered, base: await registeredBase(root, registered), worktree: registered.path, created: false };
     const project = await realpath(root), branch = `${config.worktrees.prefix}${taskId}`;
     const path = await canonical(resolve(root, config.worktrees.root, branch));
     if (inside(project, path) || inside(path, project)) throw new Error('워크트리는 프로젝트 루트 밖의 별도 경로여야 합니다');
     try { if ((await git(root, ['rev-parse', '--is-inside-work-tree'])).trim() !== 'true') throw new Error(); }
     catch { throw new CodexError('git 저장소가 아닙니다', { worktree: null }); }
+    const baseBranch = (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    if (baseBranch === 'HEAD') throw new Error('루트가 브랜치 위에 있어야 합니다');
+    if (registered && await exists(registered.path)) return { ...registered, base: await registeredBase(root, registered), worktree: registered.path, created: false };
     const runId = randomUUID();
     await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'pre', evidence: { path, branch, base } });
     try {
@@ -140,7 +154,7 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
       const baseCommit = registered?.base ?? (await git(root, branchExists ? ['merge-base', `refs/heads/${branch}`, 'HEAD'] : ['rev-parse', `${base}^{commit}`])).trim();
       await git(root, ['worktree', 'prune']);
       await git(root, ['worktree', 'add', ...branchExists ? [path, branch] : ['-b', branch, path, base]]);
-      const record = { taskId, path, branch, base: baseCommit, createdAt: new Date().toISOString() };
+      const record = { taskId, path, branch, base: baseCommit, baseBranch: registered?.baseBranch ?? baseBranch, createdAt: new Date().toISOString() };
       await setTask(root, taskId, { worktree: path });
       await updateState(root, current => ({ worktrees: [...(current.worktrees ?? []).filter(item => item.taskId !== taskId), record] }));
       await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'ok', evidence: record });

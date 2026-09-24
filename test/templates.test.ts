@@ -105,7 +105,9 @@ it('F12/F15 자기 보고 플래그 대신 하네스 증거를 안내한다', as
   }
   const verify = await readFile('templates/prompts/VERIFY.md', 'utf8');
   expect(verify).toContain('두뇌가 면제하지 않는다');
-  expect(verify.indexOf('fodh worktree commit')).toBeLessThan(verify.indexOf('fodh state transition REVIEW'));
+  expect(verify.indexOf('fodh worktree commit')).toBeLessThan(verify.indexOf('fodh verify run'));
+  expect(verify.indexOf('fodh verify run')).toBeLessThan(verify.indexOf('fodh state transition REVIEW'));
+  expect(verify).toContain('커밋할 변경이 없습니다');
 });
 
 it('F16 위임 템플릿은 공식 슬롯 대기만 안내한다', async () => {

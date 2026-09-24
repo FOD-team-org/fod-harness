@@ -15,10 +15,10 @@ export interface HarnessState {
   awaitingSlot?: { kind: 'codex'; owner: import('./slots.ts').SlotOwner; since: string };
   delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string };
   awaitingDelegation?: boolean; delegationReminder?: string;
-  worktrees?: { taskId: string; path: string; branch: string; base?: string; createdAt: string }[];
+  worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
-  verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string };
+  verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string; head?: string | null; clean?: boolean | null };
   verifySince?: string; resumeVerifySince?: string;
   enteredAt?: string; reviewSince?: string; resumeReviewSince?: string;
   autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
@@ -230,6 +230,10 @@ export async function transitionState(root: string, to: string, input: Transitio
         && current.verify?.cwd !== await realpath(current.worktrees?.find(item => item.taskId === task?.id)?.path || task?.worktree || root)) {
         throw new Error('검증 증거가 다른 경로에서 만들어졌습니다');
       }
+      if (current.state === 'VERIFY' && to === 'REVIEW'
+        && (current.worktrees?.some(item => item.taskId === task?.id) || task?.worktree) && current.verify?.clean !== true) {
+        throw new Error('검증 당시 미커밋 변경이 있었습니다: fodh worktree commit 뒤 다시 fodh verify run');
+      }
       if (current.state === 'REVIEW' && (to === 'PROJECT_READY' || to === 'MERGE')
         && !await hasReviewEvidence(root, current.reviewSince ?? current.enteredAt, to === 'MERGE' ? task!.id : undefined)) {
         throw new Error('교차검수 증거가 없습니다: fodh codex review --wait 결과가 필요합니다');
@@ -254,7 +258,8 @@ export async function transitionState(root: string, to: string, input: Transitio
       const returning = to === 'PICK' && (isPaused(current.state) || ['recovering', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(current.state));
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
-      return { awaitingSlot: undefined, state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
+      return { awaitingSlot: to === 'paused(slot)' || to === 'WAIT_RESOURCE' || to === 'PICK' && current.lastPaused === 'slot'
+          ? current.awaitingSlot : undefined, state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
         ...(to === 'VERIFY' && (resume || current.state === 'WAIT_JUDGMENT') ? { verifySince: current.resumeVerifySince } : {}),
         ...(to === 'REVIEW' && (resume || current.state === 'WAIT_JUDGMENT') ? { reviewSince: current.resumeReviewSince } : {}),
         ...(current.state !== to && (['PROJECT_READY', 'DONE_ALL', 'CLEANUP_FAILED'].includes(current.state) || current.state.startsWith('WAIT_'))

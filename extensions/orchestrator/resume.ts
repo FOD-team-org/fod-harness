@@ -63,7 +63,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       state = await updateState(root, current => current.awaitingSlot?.since === waiting.since
         && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});
       if (state.awaitingSlot) return { skipped: 'slot' };
-      if (state.state === 'paused(slot)') state = await transitionState(root, 'PICK');
+      if (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot') state = await transitionState(root, 'PICK');
     }
     if (state.awaitingDelegation) return { skipped: 'delegation' };
     if (!active.has(state.state)) {

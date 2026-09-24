@@ -25,7 +25,7 @@ it('F12 실행 결과 파일·마지막 상태·자동 DoD와 FIX 재진입 무�
   const { root, task } = await taskProject();
   await setConfig(root, 'verify.commands', JSON.stringify([`${process.execPath} -e "process.exit(0)"`]));
   const report = await runVerify(root);
-  expect(report).toMatchObject({ ok: true, taskId: task.id, heavy: false, cwd: root });
+  expect(report).toMatchObject({ ok: true, taskId: task.id, heavy: false, cwd: root, head: null, clean: null });
   if (!('runId' in report)) throw new Error('결과 없음');
   expect(JSON.parse(await readFile(join(root, '.pi/verify', report.runId, 'result.json'), 'utf8'))).toEqual(report);
   await transitionState(root, 'REVIEW', task.id);
@@ -128,4 +128,28 @@ it('L1 T1 작업일지 게이트는 T10을 같은 task로 보지 않는다', asy
   await expect(transitionState(root, 'CLEANUP', task.id)).rejects.toThrow('작업일지·백로그');
   await writeFile(join(root, doc.path), `완료: [${task.id}]`);
   await transitionState(root, 'CLEANUP', task.id);
+});
+it('S3 processes 실패 후 CLEANUP 재진입·부분 재시도·all 성공으로 완료한다', async () => {
+  const { vi } = await import('vitest');
+  const identity = await import('../src/core/process-identity.ts');
+  const { registerProc, removeProc } = await import('../src/core/procs.ts');
+  const { setTask } = await import('../src/core/backlog.ts');
+  const { root, task } = await taskProject('CLEANUP');
+  await updateState(root, { enteredAt: '2000-01-01T00:00:00Z' });
+  vi.spyOn(identity, 'processIdentity').mockResolvedValue('unknown');
+  await registerProc(root, { pid: 99999999, pgid: 99999999, kind: 'verify', runId: 'retry', taskId: task.id, startedAt: 'spawn:unknown' });
+  expect((await runCleanup(root, { scope: 'processes', taskId: task.id })).ok).toBe(false);
+  await transitionState(root, 'CLEANUP_FAILED');
+  await transitionState(root, 'CLEANUP', task.id);
+  const enteredAt = (await readState(root)).enteredAt!;
+  expect(Date.parse(enteredAt)).toBeGreaterThan(Date.parse('2000-01-01T00:00:00Z'));
+  await removeProc(root, 99999999, 'retry');
+  expect((await runCleanup(root, { scope: 'processes', taskId: task.id })).ok).toBe(true);
+  expect((await getTask(root, task.id)).cleanup?.ok).not.toBe(true);
+  const all = await runCleanup(root, { scope: 'all', taskId: task.id });
+  expect(all.ok).toBe(true); expect(Date.parse(all.startedAt)).toBeGreaterThanOrEqual(Date.parse(enteredAt));
+  expect((await getTask(root, task.id)).cleanup?.ok).toBe(true);
+  await setTask(root, task.id, { verify: { ok: true }, review: { commit: 'none', high: 0 }, merge: { commit: 'none' }, docs: { ok: true } });
+  expect((await cli(root, ['backlog', 'set', task.id, '--status', 'done'])).code).toBe(0);
+  await transitionState(root, 'PICK');
 });

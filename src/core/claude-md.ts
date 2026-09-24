@@ -31,7 +31,7 @@ export function claudeMdHash(config: HarnessConfig): string {
   return createHash('sha256').update(JSON.stringify(visible)).digest('hex').slice(0, 8);
 }
 export const claudeMdMarker = (config: HarnessConfig): string => `FODH-DOC-${claudeMdHash(config)}`;
-export async function generateClaudeMd(root: string, options: { check?: boolean } = {}) {
+export async function generateClaudeMd(root: string, options: { check?: boolean; legacyWorklogOnly?: boolean } = {}) {
   const generate = async () => {
     const config = await loadConfig(root), state = await readState(root), status = await skillsStatus(root);
     const installed = [...status.updated, ...status.unchanged].sort();
@@ -53,6 +53,7 @@ export async function generateClaudeMd(root: string, options: { check?: boolean 
     const planned = [];
     for (const name of config.claudeMd.targets) {
       const path = await projectPath(root, name), old = await readText(path, '\0missing');
+      if (options.legacyWorklogOnly && !old.match(/<!-- fodh:managed:begin\b[^>]*-->[\s\S]*?<!-- fodh:managed:end -->/u)?.[0].includes('작업일지.md')) continue;
       const body = name === 'AGENTS.md' ? [verification, restrictions, docs, '`fodh` 를 실행하지 않는다, git 을 쓰지 않는다.'].join('\n') : sections.join('\n\n');
       const block = begin+'\n'+body+'\n'+end;
       const projectName = typeof state.projectName === 'string' && state.projectName ? state.projectName : basename(root);

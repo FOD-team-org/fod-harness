@@ -123,3 +123,25 @@ it.each([undefined, 'memory', 'error', 'billing', 'slot'])('L3 프로젝트 재�
   expect(result.outcome === 'RESUME').toBe(reason === 'slot');
   expect(result.reason.includes('슬롯 대기로')).toBe(reason === 'slot');
 });
+it('S2 paused(slot)→PICK→WAIT_RESOURCE 표지 유지 후 소유자 사망→slot-free→RESUME', async () => {
+  const root = await project('RESEARCH');
+  await updateState(root, { phase: 'project', awaitingSlot: waiting });
+  await transitionState(root, 'paused(slot)', { system: true });
+  expect((await readState(root)).awaitingSlot).toEqual(waiting);
+  await transitionState(root, 'PICK');
+  expect((await readState(root)).awaitingSlot).toEqual(waiting);
+  const identity = vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('owned');
+  const now = Date.now();
+  expect((await tick(root, { now })).emitted).toEqual([]);
+  expect((await readState(root)).awaitingSlot).toEqual(waiting);
+  expect((await runPick(root)).outcome).toBe('WAIT_RESOURCE');
+  expect((await readState(root)).awaitingSlot).toEqual(waiting);
+  identity.mockResolvedValue('gone');
+  const records = (await tick(root, { now: now + 60000 })).emitted;
+  expect(records).toHaveLength(1); expect(records[0].kind).toBe('slot-free');
+  const sendMessage = vi.fn(), ctx = { cwd: root, hasUI: true, isIdle: () => true, ui: { notify: vi.fn() } };
+  await decideInbox({ sendMessage } as unknown as ExtensionAPI, ctx as never, root, records);
+  expect((await readState(root)).awaitingSlot).toBeUndefined();
+  expect((await runPick(root)).outcome).toBe('RESUME');
+  expect((await readState(root)).state).toBe('RESEARCH');
+});
