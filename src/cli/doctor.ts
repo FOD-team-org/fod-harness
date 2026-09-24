@@ -1,3 +1,4 @@
+import { unlink } from 'node:fs/promises';
 import { claudeMdMarker as expectedMarker } from '../core/claude-md.ts';
 import { loadConfig } from '../core/config.ts';
 import { notify } from '../core/notify.ts';
@@ -27,9 +28,16 @@ export async function doctor(root: string, options: {
     }
     let responseText = '';
     const claudeMdMarker = expectedMarker(config);
-    const result = await runTurn('Bash 도구로 정확히 echo FODH_DOCTOR_MARKER 명령을 한 번 시도하라. 이것은 훅 차단 시험이다. 차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄을 답하고, 이어서 CLAUDE.md의 `doctor 표식` 값을 `문서 확인 <값>` 한 줄로 답하라(없으면 `문서 없음`).', {
+    let result: Awaited<ReturnType<typeof runTurn>>;
+    try { result = await runTurn('Bash 도구로 정확히 echo FODH_DOCTOR_MARKER 명령을 한 번 시도하라. 이어서 Write 도구로 src/FODH_DOCTOR_MARKER.ts에 내용 export {}를 쓰는 것을 한 번 시도하라. 두 도구를 같은 응답에서 호출하라. 이것은 훅 차단 시험이다. 두 시도가 차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄을 답하고, 이어서 CLAUDE.md의 `doctor 표식` 값을 `문서 확인 <값>` 한 줄로 답하라(없으면 `문서 없음`).', {
       ...options, root, model: 'haiku', doctor: true, lockHeld: true, onText: text => { responseText += text; },
-    });
+    }); } finally {
+      const removed = await unlink(join(root, 'src/FODH_DOCTOR_MARKER.ts')).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false;
+        throw error;
+      });
+      if (removed) throw new Error('configError: 훅 미적용으로 파일이 생성됐습니다');
+    }
     if (result.reason !== 'stop') throw new Error(`configError: 훅 실제 차단 시험에 실패했습니다(${result.classification}).`);
     const checkedAt = new Date().toISOString();
     await updateState(root, { doctor: { ok: true, checkedAt } });
@@ -39,7 +47,7 @@ export async function doctor(root: string, options: {
     const claudeMdLoaded = markers.length > 0;
     const claudeMdStale = markers.some(marker => marker !== claudeMdMarker);
     if (skillsMissing.length || !claudeMdLoaded || claudeMdStale) await notify(root, { key: 'doctor:skills-memory', level: 'warning', title: '하네스 문서 로드 확인', body: `누락 스킬: ${skillsMissing.join(', ') || '없음'}, CLAUDE.md 로드: ${claudeMdLoaded}${claudeMdStale ? ', 낡음(재생성 필요)' : ''}` });
-    return { ok: true, hookDenials: 1, checkedAt, skills, memory_paths, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
+    return { ok: true, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
   } catch (error) {
     await updateState(root, { doctor: { ok: false, checkedAt: new Date().toISOString() } });
     await notify(root, { key: 'doctor:fail', level: 'error', title: 'doctor 실패', body: 'doctor 검증에 실패했습니다. 오류를 확인하세요' });

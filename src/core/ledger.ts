@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { harnessPath, parseJsonLines, readText, withFileLock } from './storage.ts';
 
 export interface LedgerEntry {
-  runId: string; action: string; status: 'pre' | 'running' | 'ok' | 'fail' | 'unknown' | 'skip';
+  runId: string; action: string; status: 'pre' | 'running' | 'ok' | 'fail' | 'unknown' | 'skip' | 'warn';
   taskId?: string; state?: string; evidence?: unknown; at?: string;
 }
 

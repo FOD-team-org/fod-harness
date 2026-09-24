@@ -1,6 +1,6 @@
 import { it, expect, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
 const roots: string[] = [];
@@ -8,21 +8,30 @@ interface HookOptions {
   env?: NodeJS.ProcessEnv;
   projectEnv?: 'FODH_PROJECT_ROOT' | 'CLAUDE_PROJECT_DIR';
   approval?: string[];
+  setup?: (root: string) => Promise<void>;
+  worktrees?: boolean; stateFile?: 'missing' | 'invalid'; configFile?: 'invalid' | 'missing';
 }
 async function invoke(tool_name: string, tool_input: unknown, state = 'IMPLEMENT', options: HookOptions = {}) {
   const root = await mkdtemp('/private/tmp/fodh-hook-');
   roots.push(root);
   await mkdir(join(root, '.pi'));
-  await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state }));
+  await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state, worktrees: options.worktrees ? [{ path: join(root, 'wt') }, { path: root + '-wt' }] : [] }));
+  await writeFile(join(root, '.pi/harness.json'), '{}');
+  if (options.stateFile === 'missing') await rm(join(root, '.pi/harness-state.json'));
+  if (options.stateFile === 'invalid') await writeFile(join(root, '.pi/harness-state.json'), '{');
+  if (options.configFile === 'invalid') await writeFile(join(root, '.pi/harness.json'), '{');
+  if (options.configFile === 'missing') await rm(join(root, '.pi/harness.json'));
   if (options.approval) {
     await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ requiresApproval: options.approval }));
   }
+  await options.setup?.(root);
   const cwd = options.projectEnv ? join(root, 'worktree') : root;
   if (options.projectEnv) await mkdir(cwd);
   const env = { ...process.env };
   delete env.FODH_PROJECT_ROOT;
   delete env.CLAUDE_PROJECT_DIR;
   delete env.FODH_TEST_MARKERS;
+  delete env.FODH_BRAIN; delete env.FODH_DOCS_ROOT; delete env.FODH_CODEX_CHILD;
   if (options.projectEnv) env[options.projectEnv] = root;
   Object.assign(env, options.env);
   const input = JSON.parse(JSON.stringify(tool_input)
@@ -39,6 +48,42 @@ async function invoke(tool_name: string, tool_input: unknown, state = 'IMPLEMENT
 }
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+it.each([
+  ['grep -q foo <<< "$v"\nrm -rf .git', '[경계]'],
+  ['cat <<< x\nprisma migrate deploy', '[승인]'],
+  ['echo $((1<<2))\ncodex exec fixture', '[경계]'],
+  ['((a = (1 << 2)))\ncodex exec fixture', '[경계]'],
+])('N1 here-string·산술식 다음 줄도 검사한다: %s', async (command, label) => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining(label) });
+});
+it.each(['cat <<< x', 'echo $((1<<2))', '((a = (8 >> 1) > 0 && 1 < 2))', "cat <<'EOF'\nhello\nEOF"])(
+  'N1 단독 here-string·산술식·완료 heredoc은 허용: %s', async command => {
+    expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+  },
+);
+it.each(["cat <<'EOF'\n본문", 'cat <<EOF', 'cat <<EOF\n'])('N1 미종료 heredoc은 두뇌 보호 거부·사용자 허용: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+    .toMatchObject({ code: 2, stderr: '하네스 가드[보호]: heredoc 종료 표지를 찾을 수 없습니다\n' });
+  expect((await invoke('Bash', { command })).code).toBe(0);
+});
+it.each(["cat <<'EOF' > src/x.ts\nhello\nEOF", "cat <<'EOF'>src/x.ts\nhello\nEOF"])(
+  'N1 heredoc 표지 뒤 리다이렉트도 경계 검사: %s', async command => {
+    expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+      .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+  },
+);
+it.each([true, false])('N3 순환 symlink는 두뇌 경계 거부·사용자 lexical 비교: brain=%s', async isBrain => {
+  const result = await invoke('Write', { file_path: 'loop/file.ts', content: 'fixture' }, 'IMPLEMENT', {
+    env: { FODH_BRAIN: isBrain ? '1' : '0' },
+    setup: async root => { await symlink('loop', join(root, 'loop')); },
+  });
+  if (isBrain) expect(result).toMatchObject({
+    code: 2, stderr: expect.stringMatching(/^하네스 가드\[경계\]: 경로를 확인할 수 없습니다: .*\/loop\/file\.ts\n$/),
+  });
+  else expect(result).toMatchObject({ code: 0, stderr: '' });
 });
 
 it.each([
@@ -196,4 +241,141 @@ it('보정2 짧은 접두·최소 길이 미만·AKIA와 ghp 단어 경계 밖�
     expect((await invoke('Write', { file_path: 'docs/test.md', content: sample })).code).toBe(0);
     expect((await invoke('Bash', { command: `echo '${sample}'` })).code).toBe(0);
   }
+});
+
+const brain = { env: { FODH_BRAIN: '1' }, worktrees: true };
+it.each(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])('P6 %s 경로 경계·워크트리·외부·문서 예외', async tool => {
+  for (const path of ['docs/a.md', '.pi/scratch/a.ts', 'CLAUDE.md', 'AGENTS.md', 'README.md', 'wt/src/x.ts', '@root@-wt/src/x.ts'])
+    expect((await invoke(tool, { [tool === 'NotebookEdit' ? 'notebook_path' : 'file_path']: path }, 'IMPLEMENT', brain)).code, path).toBe(0);
+  for (const path of ['src/x.ts', 'docs-other/x.md', '/tmp/x.ts', '.claude/skills/a/SKILL.md'])
+    expect((await invoke(tool, { file_path: path }, 'IMPLEMENT', brain)).code, path).toBe(2);
+});
+it('P6 사용자는 경로 가드 면제, 미초기화 두뇌는 적용, 손상 상태·설정은 fail closed', async () => {
+  expect((await invoke('Write', { file_path: 'src/x.ts' })).code).toBe(0);
+  for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+    const key = tool === 'NotebookEdit' ? 'notebook_path' : 'file_path';
+    expect((await invoke(tool, { [key]: 'src/x.ts' }, 'IDLE', { ...brain, stateFile: 'missing' })).code).toBe(2);
+    expect((await invoke(tool, { [key]: 'docs/a.md' }, 'IDLE', { ...brain, stateFile: 'missing' })).code).toBe(0);
+  }
+  expect((await invoke('Bash', { command: 'echo x > src/x.ts' }, 'IDLE', { ...brain, stateFile: 'missing' })).code).toBe(2);
+  expect((await invoke('Bash', { command: 'echo x > docs/a.md' }, 'IDLE', { ...brain, stateFile: 'missing' })).code).toBe(0);
+  expect((await invoke('Write', { file_path: 'wt/src/x.ts' }, 'IDLE', { ...brain, stateFile: 'missing' })).code).toBe(2);
+  for (const bad of [{ stateFile: 'invalid' }, { configFile: 'invalid' }, { configFile: 'missing' }] as const)
+    expect((await invoke('Write', { file_path: 'docs/x.md' }, 'IDLE', { ...brain, ...bad })).code).toBe(2);
+});
+it('P6 docs.root 환경 경로만 문서로 허용한다', async () => {
+  const options = { env: { FODH_BRAIN: '1', FODH_DOCS_ROOT: 'notes' } };
+  expect((await invoke('Write', { file_path: 'notes/x.md' }, 'IDLE', options)).code).toBe(0);
+  expect((await invoke('Write', { file_path: 'docs/x.md' }, 'IDLE', options)).code).toBe(2);
+});
+it.each(['sed -i x src/x.ts', 'echo hi>src/x.ts', 'echo hi >> src/x.ts', 'tee src/x.ts', 'cp a src/b', 'mv docs/a src/b',
+  'touch src/x', 'install a src/b', 'truncate -s 0 src/x', 'dd if=docs/a of=src/b', 'rsync docs/a src/b', 'patch src/x.ts', 'git apply src/a.patch',
+  'git checkout -- src/x.ts', 'git restore src/x.ts', 'git stash'])('P6 Bash 소스 쓰기 거부: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each(['echo ok > docs/a.md', 'echo ok >>docs/a.md', 'sed -i x docs/a.md', "sed -i '' 's/a/b/' docs/a.md", 'cp docs/a wt/src/b', 'rm docs/a.md',
+  'rm -rf @root@/wt/build', 'rm -rf @root@-wt/build', 'git -C wt clean -fdx'])('P6 문서·워크트리 쓰기 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each(['rm -rf /tmp/x', 'rm -rf .', 'rm -rf .git', 'rm -rf .pi', 'find docs -delete', 'git clean -fdx'])('P6 삭제 경계: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it('P6 직접 worktree 변경은 두뇌만 거부하고 fodh 경로를 안내한다', async () => {
+  for (const action of ['add', 'remove', 'prune']) {
+    expect(await invoke('Bash', { command: `git worktree ${action} example` }, 'MERGE', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('fodh worktree') });
+    expect((await invoke('Bash', { command: `git worktree ${action} example` }, 'MERGE')).code).toBe(0);
+  }
+});
+it('P6 파괴적 git은 승인 목록을 비워도 두뇌 거부', async () => {
+  for (const command of ['git branch -D example', 'git reset --hard', 'git push --force-with-lease origin feature', 'git push -f'])
+    expect((await invoke('Bash', { command }, 'MERGE', { ...brain, approval: [] })).code).toBe(2);
+});
+it('P6 Codex 자식 fodh 훅 거부는 조기 허용보다 먼저 적용한다', async () => {
+  for (const command of ['fodh config get', 'npx fodh state get', '/opt/bin/fodh state get', 'env FOO=x fodh config get'])
+    expect((await invoke('Bash', { command }, 'IDLE', { env: { FODH_CODEX_CHILD: '1' } })).code).toBe(2);
+});
+it.each([
+  ['shell', ["sh -c 'unset FODH_BRAIN; fodh config set verify.commands true'", "bash -c 'unset FODH_BRAIN'", "zsh -c 'echo FODH_BRAIN'"]],
+  ['node', ['node -e "delete process.env.FODH_BRAIN"', 'node --eval="delete process.env.FODH_BRAIN"']],
+  ['python/perl', ["python3 -c 'FODH_BRAIN'", "perl -e 'FODH_BRAIN'"]],
+])('P6 N10 %s 인라인 환경 우회 거부', async (_, commands) => {
+  for (const command of commands) expect(await invoke('Bash', { command })).toMatchObject({ code: 2, stderr: expect.stringContaining('하네스 환경변수는 바꿀 수 없습니다') });
+});
+
+it('P6 사용자 대화형 세션의 삭제는 규칙 2·4 범위 밖이며 기존 승인 가드는 유지한다', async () => {
+  expect((await invoke('Bash', { command: 'rm -rf /tmp/fixture' })).code).toBe(0);
+  expect((await invoke('Bash', { command: 'rm -rf .git' })).code).toBe(0);
+  expect((await invoke('Bash', { command: 'echo FODH_DOCTOR_MARKER' })).code).toBe(2);
+});
+it('P6 doctor Write 표식은 특별 규칙 없이 일반 소스 경계로 차단한다', async () => {
+  expect(await invoke('Write', { file_path: 'src/FODH_DOCTOR_MARKER.ts', content: 'export {}' }, 'IDLE', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('소스 파일은 두뇌가 쓰지 않습니다') });
+  expect((await invoke('Write', { file_path: 'src/FODH_DOCTOR_MARKER.ts' })).code).toBe(0);
+});
+
+it.each([
+  ['Bash', { command: 'echo FODH_DOCTOR_MARKER' }, '승인'],
+  ['Write', { file_path: 'src/x.ts' }, '경계'],
+  ['Write', { file_path: '.pi/harness.json' }, '보호'],
+])('H1 훅 stderr 분류 접두 %s %j', async (tool, input, label) => {
+  expect(await invoke(tool, input, 'IMPLEMENT', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining(`하네스 가드[${label}]:`) });
+});
+
+it.each(['ls docs 2>/dev/null', 'fodh state get 2>/dev/null', 'cmd &>/dev/null', 'tee /dev/stdout', 'tee /dev/fd/1', 'tee docs/a.md 2>/dev/null',
+  'python3 -m json.tool < .pi/harness-state.json', 'node scripts/check.mjs', 'perl src/a.pl', 'ruby src/a.rb',
+  'sh scripts/check.sh arg', 'git stash list', 'git stash show', 'echo ok > /tmp/fixture'])('M1 Bash 읽기·디바이스·외부 리다이렉트 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each(["EOF", "'EOF'", '"EOF"', '-EOF'])('M1 heredoc %s 본문은 명령이 아니며 헤더 쓰기는 검사한다', async marker => {
+  const command = `cat > docs/a.md <<${marker}\n> 인용\ncodex x\n${marker === '-EOF' ? '\t' : ''}EOF`;
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+  expect((await invoke('Bash', { command: command.replace('docs/a.md', 'src/x.ts') }, 'IMPLEMENT', brain)).code).toBe(2);
+  expect((await invoke('Bash', { command: command + '\ncodex x' }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  ['git apply .pi/scratch/fix.patch', 2], ['patch -p1 < docs/x.diff', 2],
+  ['git -C @root@/wt apply x.patch', 0], ['git apply --directory=@root@/wt docs/x.patch', 0],
+  ['patch -d @root@/wt -p1 < docs/x.diff', 0], ['patch --directory=@root@/wt -p1 < docs/x.diff', 0],
+  ['git apply --check x.patch', 0], ['git apply --stat x.patch', 0], ['git apply --numstat x.patch', 0],
+  ['git apply --summary x.patch', 0], ['patch --dry-run', 0],
+])('M2 패치 대상 트리 판정: %s', async (command, code) => {
+  const result = await invoke('Bash', { command }, 'IMPLEMENT', brain);
+  expect(result.code).toBe(code); if (code === 2) expect(result.stderr).toContain('하네스 가드[경계]: 패치 적용은 워크트리에서만');
+});
+
+it.each(['fodh memory reset', 'npx fodh memory reset', '/opt/bin/fodh memory reset'])('M4 두뇌 memory reset 보호: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IDLE', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('하네스 가드[보호]') });
+  expect((await invoke('Bash', { command }, 'IDLE')).code).toBe(0);
+});
+
+it.skipIf(process.platform !== 'darwin')('L5 darwin .pi/HARNESS.json은 대소문자 무관 보호', async () => {
+  expect(await invoke('Write', { file_path: '.pi/HARNESS.json' }, 'IDLE', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+});
+it.each(['existing', 'dangling', 'parent'] as const)('L5 문서 symlink %s를 통한 소스 쓰기는 경계 거부', async kind => {
+  const options: HookOptions = { ...brain, setup: async root => {
+    await mkdir(join(root, 'docs')); await mkdir(join(root, 'src'));
+    if (kind === 'existing') await writeFile(join(root, 'src/a.ts'), 'existing');
+    await symlink(kind === 'parent' ? '../src' : '../src/a.ts', join(root, 'docs/link'));
+  } };
+  const file_path = kind === 'parent' ? 'docs/link/new.ts' : 'docs/link';
+  expect(await invoke('Write', { file_path }, 'IDLE', options)).toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+});
+it.each(["bash -lc 'unset FODH_BRAIN'", "sh -ec 'unset FODH_BRAIN'", "zsh -xc 'unset FODH_BRAIN'",
+  'eval "unset FODH_BRAIN"', 'source "FODH_ENV.sh"', '. "FODH_ENV.sh"'])('L6 결합 셸 플래그·eval 환경 우회 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IDLE', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+});
+it.each(['Read', 'Grep'])('L7 상태 손상이어도 사용자 %s는 허용, 두뇌는 거부', async tool => {
+  expect((await invoke(tool, { file_path: 'docs/a.md' }, 'IDLE', { stateFile: 'invalid' })).code).toBe(0);
+  expect((await invoke(tool, { file_path: 'docs/a.md' }, 'IDLE', { ...brain, stateFile: 'invalid' })).code).toBe(2);
+  for (const name of ['Write', 'Bash']) expect((await invoke(name, { file_path: 'docs/a.md', command: 'ls' }, 'IDLE', { stateFile: 'invalid' })).code).toBe(2);
+});
+it.each([
+  ['rm -rf .pi/scratch/task', 0], ['rm -rf .pi', 2], ['rm -rf docs', 2], ['rm -rf notes', 2],
+  ['git clean -nd', 0], ['git clean --dry-run -fdx', 0],
+])('L9 scratch 정리·문서 트리·clean dry-run: %s', async (command, code) => {
+  const env = { FODH_BRAIN: '1', ...(command === 'rm -rf notes' ? { FODH_DOCS_ROOT: 'notes' } : {}) };
+  expect((await invoke('Bash', { command }, 'IDLE', { env })).code).toBe(code);
+});
+it.each(['rm -rf .pi', 'rm -rf /tmp/example', 'find docs -delete', 'git clean -fdx'])('L11 미초기화에도 삭제 규칙 적용: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IDLE', { ...brain, stateFile: 'missing' })).toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
 });

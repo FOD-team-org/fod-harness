@@ -23,3 +23,27 @@ export async function processGroup(pid: number): Promise<number | undefined> {
     return Number.isSafeInteger(pgid) && pgid > 1 ? pgid : undefined;
   } catch { return undefined; }
 }
+
+export async function processParent(pid: number): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync('/bin/ps', ['-p', String(pid), '-o', 'ppid='], { timeout: 1000 });
+    const parent = Number(stdout.trim());
+    return stdout.trim() && Number.isSafeInteger(parent) && parent >= 0 ? parent : undefined;
+  } catch { return undefined; }
+}
+
+// undefined means that ancestry could not be verified (including restricted ps).
+export async function descendantOf(pid: number, ancestor: number,
+  parentOf: (pid: number) => Promise<number | undefined> = processParent): Promise<boolean | undefined> {
+  const seen = new Set<number>();
+  for (let depth = 0; depth < 128; depth++) {
+    if (pid === ancestor) return true;
+    if (pid <= 1) return false;
+    if (seen.has(pid)) return undefined;
+    seen.add(pid);
+    const parent = await parentOf(pid);
+    if (parent === undefined) return undefined;
+    pid = parent;
+  }
+  return undefined;
+}

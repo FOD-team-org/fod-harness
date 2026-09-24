@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { auditPaths } from '../core/audit.ts';
+import { join, resolve } from 'node:path';
 import { access } from 'node:fs/promises';
 import { loadConfig } from '../core/config.ts';
 import { readState, updateState } from '../core/state.ts';
@@ -12,6 +13,7 @@ import { addJudgment } from '../core/judgment.ts';
 import { runProcess, type ProcessResult } from './runner.ts';
 import { checkBillingEnvironment } from './preflight.ts';
 import { redact, safeValue } from './privacy.ts';
+const notifiedAuditPaths = new Set<string>();
 export const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
 export interface TurnOptions {
   root: string; model?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv;
@@ -19,6 +21,7 @@ export interface TurnOptions {
   lockHeld?: boolean; doctor?: boolean;
 }
 export interface TurnResult {
+  hookDenials?: number;
   init?: { skills: string[]; memory_paths: string[] };
   reason: 'stop' | 'error' | 'aborted'; classification?: string; usage?: Record<string, number>; contextUsage?: boolean; runId: string;
 }
@@ -27,7 +30,7 @@ export function claudeArgs(root: string, model: string, sid: string, resume: boo
     '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     ...doctor ? [] : ['--append-system-prompt-file', join(packageRoot, 'templates/brain-rules.md')],
     '--settings', join(root, '.claude/settings.json'), '--model', model,
-    ...doctor ? ['--max-turns', '2'] : []];
+    ...doctor ? ['--max-turns', '3'] : []];
 }
 export async function buildPrompt(root: string, latest: string, runId: string): Promise<string> {
   const state = await readState(root);
@@ -53,6 +56,8 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
   const { root } = options;
   const runId = randomUUID();
   let release: (() => Promise<void>) | undefined;
+  let unclassifiedLogged = false;
+  const turnSuspicions = new Set<string>();
   const pendingDenials: (() => Promise<void>)[] = [];
   const patchState = (patch: Parameters<typeof updateState>[1]) =>
     options.doctor ? Promise.resolve(undefined) : updateState(root, patch);
@@ -70,7 +75,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
     let resume = !options.doctor && !!initial.sessionId;
     const suppliedEnv = options.env ?? process.env;
     const env = { ...suppliedEnv, BASH_DEFAULT_TIMEOUT_MS: suppliedEnv.BASH_DEFAULT_TIMEOUT_MS ?? '600000',
-      BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root, FODH_BRAIN: '1',
+      BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root, FODH_BRAIN: '1', FODH_DOCS_ROOT: config.docs.root,
       FODH_PROTECTED_EXTRA: [config.interview.extraBankFile, config.docs.overrideDir].join(':') };
     for (let attempt = 0; attempt < 2; attempt++) {
       const action = `brain:${attempt}`;
@@ -80,15 +85,26 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
       const toolInputs = new Map<string, { tool_name: string; tool_input: unknown }>();
       const denials = new Map<string, any>();
-      const rememberDenial = (denial: any) => {
-        const safe = safeValue(denial);
-        denials.set(canonical({ tool: safe.tool_name, input: safe.tool_input }), safe);
+      type DenialKind = 'approval' | 'boundary' | 'guard' | 'unknown';
+      const rememberDenial = (denial: any, kind: DenialKind = 'unknown', toolUseId?: string) => {
+        const safe = safeValue(denial), key = canonical({ tool: safe.tool_name, input: safe.tool_input });
+        const previous = denials.get(key);
+        denials.set(key, { ...safe, kind: kind === 'unknown' ? previous?.kind ?? kind : kind,
+          tool_use_id: toolUseId ?? previous?.tool_use_id ?? safe.tool_use_id ?? `result-${denials.size}` });
       };
       const persistDenials = async () => {
         if (options.doctor) return;
         const state = await readState(root);
         let firstId: string | undefined;
         for (const [key, safe] of denials) {
+          const action = safe.kind === 'approval' ? `hook:${attempt}:${safe.tool_use_id}`
+            : `hook:${safe.kind}:${attempt}:${safe.tool_use_id}`;
+          await appendLedger(root, { runId, action, status: 'ok', evidence: safeValue(safe) });
+          if (safe.kind === 'unknown' && !unclassifiedLogged) {
+            await appendLedger(root, { runId, action: 'hook:unclassified', status: 'warn' });
+            unclassifiedLogged = true;
+          }
+          if (safe.kind !== 'approval') continue;
           const dedupeKey = createHash('sha256').update(key).digest('hex');
           const { item } = await addJudgment(root, {
             title: `${safe.tool_name}: ${safe.tool_input?.command ?? JSON.stringify(safe.tool_input)}`,
@@ -164,11 +180,18 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                     length: content.length, sha256: createHash('sha256').update(content).digest('hex') },
                 });
                 if (block.is_error && /hook error|PreToolUse/i.test(content)) {
-                  text('\n[훅 차단] 승인 필요: 판단대기 항목을 확인하세요.\n');
+                  const label = /\[(승인|경계|보호)\]/u.exec(content)?.[1];
+                  const kind: DenialKind = label === '승인' ? 'approval' : label === '경계' ? 'boundary' : label === '보호' ? 'guard' : 'unknown';
+                  const message = {
+                    approval: '승인 필요: 판단대기 항목을 확인하세요.',
+                    boundary: '경계: 같은 동작을 다시 시도하지 말고 위임(fodh codex task / Claude Agent)으로 바꾸세요.',
+                    guard: '보호: 이 동작은 포기하세요.', unknown: '분류 없음: 원장을 확인하세요.',
+                  }[kind];
+                  text(`\n[훅 차단] ${message}\n`);
                   const denial = toolInputs.get(block.tool_use_id);
-                  if (denial) rememberDenial(denial);
-                  await appendLedger(root, { runId, action: `hook:${attempt}:${block.tool_use_id}`, status: 'ok',
-                    evidence: safeValue({ tool_use_id: block.tool_use_id, ...denial }) });
+                  if (denial) rememberDenial(denial, kind, block.tool_use_id);
+                  if (options.doctor) await appendLedger(root, { runId, action: `hook:${attempt}:${block.tool_use_id}`, status: 'ok',
+                    evidence: safeValue({ tool_use_id: block.tool_use_id, ...denial, kind }) });
                 }
               }
             } else if (event.type === 'result') {
@@ -178,12 +201,32 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                 is_error: event.is_error, api_error_status: event.api_error_status, permission_denials: event.permission_denials ?? [],
                 usage: event.usage,
               }) });
-              for (const denial of event.permission_denials ?? []) rememberDenial(denial);
+              for (const denial of event.permission_denials ?? []) {
+                if (!denials.has(canonical(safeValue({ tool: denial.tool_name, input: denial.tool_input })))) {
+                  text('\n[훅 차단] 분류 없음: 원장을 확인하세요.\n');
+                }
+                rememberDenial(denial);
+              }
             }
           },
         });
       } finally {
         if (lastEventAt) await patchState({ lastEventAt, runId });
+      }
+      if (!options.doctor) {
+        const suspicious = new Set<string>();
+        const worktrees = (await readState(root)).worktrees ?? [];
+        for (const tool of toolInputs.values()) {
+          if (denials.has(canonical(safeValue({ tool: tool.tool_name, input: tool.tool_input })))) continue;
+          for (const path of auditPaths(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
+            root, docsRoot: config.docs.root, worktrees,
+          })) suspicious.add(redact(path));
+        }
+        for (const path of suspicious) {
+          if (turnSuspicions.has(path)) continue;
+          turnSuspicions.add(path);
+          await appendLedger(root, { runId, action: 'audit:path-boundary', status: 'warn', evidence: { path } });
+        }
       }
       const configError = outcome.abortKind === 'configError'
         || /requires --verbose|unknown (?:option|model)|invalid (?:settings|model)/i.test(outcome.stderr);
@@ -237,8 +280,11 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       if (options.doctor) {
         const markerDenied = [...denials.values()].some(denial => denial.tool_name === 'Bash'
           && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
-        if (!markerDenied) return { reason: 'error', classification: 'configError', runId };
-        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId, init };
+        const pathDenied = [...denials.values()].some(denial => denial.tool_name === 'Write'
+          && typeof denial.tool_input?.file_path === 'string'
+          && resolve(root, denial.tool_input.file_path) === resolve(root, 'src/FODH_DOCTOR_MARKER.ts'));
+        if (!initialized || !markerDenied || !pathDenied) return { reason: 'error', classification: 'configError', runId };
+        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId, init, hookDenials: 2 };
       }
       if (!initialized || !result || outcome.code !== 0 || result.is_error) {
         await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });
@@ -254,7 +300,16 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
     }
     throw error;
   } finally {
-    try { for (const persist of pendingDenials) await persist(); } finally { await release?.(); }
+    try {
+      for (const persist of pendingDenials) await persist();
+      const fresh = [...turnSuspicions].filter(path => !notifiedAuditPaths.has(`${resolve(root)}\0${path}`));
+      if (fresh.length && options.notify) {
+        try {
+          await options.notify(`훅이 놓친 소스 쓰기 의심 ${fresh.length}건: ${fresh.slice(0, 3).join(', ')}${fresh.length > 3 ? '…' : ''} (fodh ledger list)`);
+          for (const path of fresh) notifiedAuditPaths.add(`${resolve(root)}\0${path}`);
+        } catch { await appendLedger(root, { runId, action: 'audit:notify', status: 'fail' }); }
+      }
+    } finally { await release?.(); }
   }
 }
 export function latestMessage<T extends {

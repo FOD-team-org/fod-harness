@@ -25,6 +25,7 @@ async function project(maxTurnMinutes = 0.2) {
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
   await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { command: fake, switchCommand: [fakeSwitch], model: 'haiku', maxTurnMinutes } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
+  await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state: 'IDLE', autoTurns: 0 }));
   return root;
 }
 const environment = (root: string, scenario = 'first') => ({ ...childEnv(), HOME: root, FAKE_CLAUDE_SCENARIO: scenario, FODH_PACKAGE_ROOT: packageRoot });
@@ -184,7 +185,7 @@ describe('doctor와 CLI', () => {
     await expect(readFile(join(root, '.pi/fake-calls.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('실제 훅 차단 검증 성공, 훅이 빠지면 실패', async () => {
-    const root = await project(); expect(await doctor(root, { env: environment(root) })).toMatchObject({ ok: true, hookDenials: 1 });
+    const root = await project(); expect(await doctor(root, { env: environment(root) })).toMatchObject({ ok: true, hookDenials: 2 });
     await writeFile(join(root, '.claude/settings.json'), '{}');
     await expect(doctor(root, { env: environment(root) })).rejects.toThrow('configError');
     expect((await readState(root)).doctor).toMatchObject({ ok: false });
@@ -192,7 +193,7 @@ describe('doctor와 CLI', () => {
   });
   it.each(['doctor-max-turns', 'doctor-max-turns-tool-result'])('F8: %s 차단→다른 도구 성공→max_turns/exit 1도 doctor 성공', async scenario => {
     const root = await project();
-    expect(await doctor(root, { env: environment(root, scenario) })).toMatchObject({ ok: true, hookDenials: 1 });
+    expect(await doctor(root, { env: environment(root, scenario) })).toMatchObject({ ok: true, hookDenials: 2 });
     expect((await readState(root)).doctor).toMatchObject({ ok: true });
     const ledger = await readLedger(root);
     expect(ledger.find(entry => entry.action === 'hook:0:doctor-marker')?.evidence).toMatchObject({ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } });
@@ -208,13 +209,13 @@ describe('doctor와 CLI', () => {
     expect((await readState(root)).doctor).toMatchObject({ ok: false });
     expect((await readLedger(root)).some(entry => entry.action.startsWith('hook:'))).toBe(false);
   });
-  it('F8: doctor만 brain-rules를 제외하고 max-turns 2와 전용 프롬프트를 사용한다', async () => {
+  it('F8: doctor만 brain-rules를 제외하고 max-turns 3과 전용 프롬프트를 사용한다', async () => {
     const root = await project(); await doctor(root, { env: environment(root) });
     await runTurn('일반 턴', { root, model: 'haiku', env: environment(root) });
     const [check, normal] = await records(root, 'fake-calls.jsonl');
     expect(check.args).not.toContain('--append-system-prompt-file');
     expect(check.args).not.toContain(join(packageRoot, 'templates/brain-rules.md'));
-    expect(check.args[check.args.indexOf('--max-turns') + 1]).toBe('2');
+    expect(check.args[check.args.indexOf('--max-turns') + 1]).toBe('3');
     expect(check.args[check.args.indexOf('--settings') + 1]).toBe(join(root, '.claude/settings.json'));
     expect(check.prompt).toContain('차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄을 답하고');
     expect(check.prompt).toContain('CLAUDE.md의 `doctor 표식` 값을 `문서 확인 <값>` 한 줄로 답하라');

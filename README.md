@@ -93,7 +93,7 @@ P5 인터뷰·문서·스킬:
 
 `/project-start`는 은행·판단대기 사전 검증 실패 시 error와 실패 원장을 남기고 IDLE을 유지한다. 검증 후 인터뷰를 시작하며, 두 시작 명령은 스킬 설치·CLAUDE.md 생성을 수행한다(이 준비 실패는 warning). doctor의 `skillsMissing`·`claudeMdLoaded`는 훅 성공 여부와 별도로 알린다. 프로젝트 스킬 로드는 [Fable 1차 실기](docs/검수/2026-09-24-P5-Fable-실기.md)에서 관측됐다. 2차 doctor 표식 프로토콜은 별도 실기 확인이 필요하다.
 
-P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. 두뇌의 config set은 `delegate.*`·`verify.*`만 허용한다. `interview.*`, `requiresApproval`, `skills.*`, `claudeMd.*`, `docs.*`, `brain.*`, `watch.*`, `cleanup.*` 등 나머지 키는 거부하고 판단대기로 안내한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI 설정 권한은 유지한다.
+P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. P6부터 두뇌의 config set은 `delegate.*`·`verify.*`를 포함한 모든 키를 거부하고 판단대기로 안내한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI는 아래 승인 전용 네 키에 `--approve`가 필요하다.
 
 doctor는 memory_paths를 CLAUDE.md 목록으로 해석하지 않는다. 배열·객체 원형은 원장에 안전하게 보존하고, 결과는 문자열 배열로 정규화한다. 관리 블록의 `FODH-DOC-<해시8자>`에 대해 두뇌가 `문서 확인 <표식>`으로 답하면 claudeMdLoaded=true, 다른 해시면 claudeMdStale=true다. 기대값은 claudeMdMarker로 반환하며, 스킬 누락·문서 확인 실패·낡은 표식은 경고만 낸다. 다른 해시도 문서 로드는 true이며 낡음(재생성 필요)으로 구분한다. 해시는 실제 표시하는 설정으로만 계산하고, develop-start에서 문서가 바뀌면 “커밋 필요”를 알린다.
 
@@ -102,3 +102,39 @@ doctor는 memory_paths를 CLAUDE.md 목록으로 해석하지 않는다. 배열�
 인터뷰 record는 비밀 패턴 답을 거부하고 기록 뷰·검증 명령 문서는 redact한다. free 문항의 “직접 답하기” 판단은 실제 답이 아니므로 다시 open으로 묻는다. 완료·skip 문항은 defer할 수 없다. 프로젝트 검수는 --subject, task 검수는 --task를 사용하며 위임 경로는 scaffold가 반환한 path를 그대로 사용한다.
 
 P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환하고 free만 열린 라운드로 유지한다. Bash의 FODH_ 환경변수 대입·unset·env 제거는 차단하며, 공용 redact와 훅은 OpenAI·Stripe·Google·Slack·GitHub·AWS·Anthropic 키 및 개인키·Bearer 패턴을 같은 정규식으로 검사한다. docs.overrideDir·interview.extraBankFile은 프로젝트 내부에서 docs.root와 겹치거나 그 조상이 되는 경로·프로젝트 루트를 거부한다.
+
+
+## P6 가드레일
+
+`hooks/pretooluse.mjs`는 Node 내장 모듈만 사용하는 단일 훅이다. 두뇌·doctor는 `FODH_BRAIN=1`과 설정의 `FODH_DOCS_ROOT`를 받는다. 등록 워크트리는 상태의 `worktrees[].path`를 따른다. 미초기화도 `FODH_BRAIN=1` 이면 규칙 2·4 적용(등록 워크트리 없음). 상태 손상은 두뇌·편집 도구·Bash에서 거부하며 사용자 Read·Grep은 허용한다. 초기화된 두뇌 세션의 설정 읽기 실패는 거부한다.
+
+| 규칙 | 동작 |
+|---|---|
+| 1. 비밀값 | Write/Edit/MultiEdit/NotebookEdit 및 Bash 입력의 비밀 패턴 거부 |
+| 2. 삭제 경계 | 두뇌의 루트 밖·루트 자체·문서 트리 자체·.git·.pi 대상 rm -r/-f, find -delete, 등록 워크트리 밖 git clean 거부. 등록 워크트리와 .pi/scratch/** 삭제, git clean dry-run 허용 |
+| 3. 승인 필수 | requiresApproval 패턴을 [승인]으로 거부하고 판단대기 안내. 승인 거부만 판단·작업 회수로 연결 |
+| 4. 쓰기 경계 | 두뇌는 docs.root·.pi(보호 파일 제외)·CLAUDE.md·AGENTS.md·README.md와 등록 워크트리만 쓰기 허용. Write/Edit 루트 밖은 .pi/scratch 안내. .claude/skills는 fodh skills install 전용. Bash는 루트 안 소스 쓰기를 검사하며 디바이스·외부 리다이렉트·인터프리터 실행 인자는 제외. heredoc 본문은 명령으로 해석하지 않음. git apply/patch 실제 적용은 대상 워크트리에서만 허용 |
+| 5. 상태·직접 실행 | commit의 기존 문서 상태 예외 유지, push/merge는 MERGE·DOCS만. 직접 codex 금지. 두뇌의 git worktree add/remove/prune는 fodh worktree 안내, branch -D/reset --hard/force push는 승인 설정과 무관하게 거부 |
+| 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
+
+`fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
+
+`fodh memory reset`은 사용자 터미널 전용이다. 두뇌 env·부모 체인 판정과 훅에서 거부하며 두뇌용 CLAUDE.md 명령 목록에서도 제외한다. 이 명령은 메모리 경보·5분 타이머와 이전 미처리 pressure/critical 이벤트를 해제하고 `memory:reset` 원장을 남긴다. paused(memory) 또는 WAIT_RESOURCE(lastPaused=memory)이면 memory-recovered 인박스를 통해 기존 PICK 회복 경로를 탄다. 실제 스왑을 줄이는 명령은 아니며 초과 표본이 계속되면 다시 5분 뒤 중단된다.
+
+훅은 `[승인]`·`[경계]`·`[보호]` 접두로 이유를 분류한다. 경계 거부는 판단 없이 위임으로 바꾸고, 보호 거부는 그 동작을 포기한다. 분류 없는 거부는 원장과 `hook:unclassified` 경고만 남긴다. 경계·보호·미분류 때문에 활성 위임을 회수하지 않는다.
+
+턴 종료 시 tool_use의 Write 경로와 Bash의 쓰기 문맥만 사후 검사한다. 누락 의심은 경로별 `audit:path-boundary warn` 원장과 턴당 TUI 알림 1건(최대 3경로)으로 남긴다. 같은 root·경로는 프로세스 수명 동안 한 번만 알리고 원장은 계속 남긴다. 이미 거부된 도구는 제외하고, 감사만으로 판단대기를 생성하거나 실행을 되돌리지는 않는다. doctor는 Bash 표식과 `src/FODH_DOCTOR_MARKER.ts` Write의 서로 다른 차단 증거 2건을 요구한다. doctor의 --max-turns는 3이며 표식 파일이 실제 생성되면 삭제하고 실패한다. 실패하면 기존 IMPLEMENT·MERGE 게이트가 계속 차단한다.
+
+## 알려진 한계
+
+| 경우 | 현재 범위와 남은 한계 |
+|---|---|
+| 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령과 `sh -c '…'`·셸로 넘기는 heredoc 본문 안의 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
+| 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다 |
+| MCP 도구 쓰기 | MCP 고유 도구명·입력 형식은 경로 가드와 감사의 일반 Write/Bash 판정 밖이다 |
+| 변수·인용·경로 확장 | 토큰을 cwd 기준으로 resolve하며 셸 변수·glob·치환·cd 효과는 실행/추적하지 않는다. 훅은 기존 조상과 symlink를 realpath로 확인하지만 사후 감사는 리터럴 경로 기준이다. 인용된 인라인 코드는 일부만 감사한다 |
+| Codex 자식 | Codex는 Claude 훅 밖이다. FODH_CODEX_CHILD=1의 훅 거부는 보조이며 실제 방어는 CLI 진입 거부다 |
+| 100개 이상 삭제 | 훅은 삭제 개수를 세지 않는다. 대량 삭제 판정은 사후 검수 몫이며 자동 100개 임계 감사는 구현하지 않는다 |
+| 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다 |
+| 부모 프로세스 확인 | 살아 있는 Pi 잠금 중 ps 조회가 막히면 사용자 CLI의 설정 변경·memory reset도 거부될 수 있다. 이중 fork로 부모 체인에서 벗어난 자식은 이 판정만으로 막지 못한다. 실제 부모 체인 실기는 별도 확인이 필요하다 |
+| Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다 |

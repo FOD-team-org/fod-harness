@@ -29,7 +29,7 @@ export interface WatchState {
   stalledSince?: string;
   childTimeouts: number;
 }
-interface WatcherFile {
+export interface WatcherFile {
   judgment?: { expectedHash?: string; externalPending?: { hash: string; at: string }; [key: string]: unknown };
   watch?: WatchState;
   [key: string]: unknown;

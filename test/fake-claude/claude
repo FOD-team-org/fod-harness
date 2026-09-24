@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const args = process.argv.slice(2);
@@ -31,7 +31,7 @@ if (args.includes('--hang-orphan-child')) {
   const stripped = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
     'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'];
   appendFileSync('.pi/fake-calls.jsonl', JSON.stringify({
-    args, prompt, projectRoot: process.env.FODH_PROJECT_ROOT, brain: process.env.FODH_BRAIN, protectedExtra: process.env.FODH_PROTECTED_EXTRA, forbiddenEnvPresent: stripped.filter(key => key in process.env),
+    args, prompt, projectRoot: process.env.FODH_PROJECT_ROOT, brain: process.env.FODH_BRAIN, docsRoot: process.env.FODH_DOCS_ROOT, protectedExtra: process.env.FODH_PROTECTED_EXTRA, forbiddenEnvPresent: stripped.filter(key => key in process.env),
   }) + '\n');
   const fixtureName = scenario === 'resume' ? 'resume-run' : 'first-run-hook-deny';
   const path = new URL(`../fixtures/claude-stream-json/${fixtureName}.jsonl`, import.meta.url);
@@ -51,7 +51,22 @@ if (args.includes('--hang-orphan-child')) {
     if (scenario === 'api-key' && event.subtype === 'init') event = { ...event, apiKeySource: 'ANTHROPIC_API_KEY' };
     process.stdout.write(JSON.stringify({ ...event, session_id: sid }) + '\n');
   };
-  if (['hang', 'hang-stubborn', 'hang-orphan', 'denial-hang'].includes(scenario)) {
+  if (['p6-boundary', 'p6-approval', 'p6-guard', 'p6-unknown'].includes(scenario)) {
+    const tool = scenario === 'p6-approval' ? { tool_name: 'Bash', tool_input: { command: 'echo FORBIDDEN_MARKER' } }
+      : scenario === 'p6-guard' ? { tool_name: 'Write', tool_input: { file_path: '.pi/harness.json', content: '{}' } }
+      : { tool_name: 'Write', tool_input: { file_path: 'src/x.ts', content: 'export {}' } };
+    const settings = JSON.parse(readFileSync(get('--settings'), 'utf8'));
+    const hooks = settings.hooks?.PreToolUse?.flatMap(entry => entry.hooks ?? []) ?? [];
+    const results = hooks.map(hook => spawnSync('/bin/sh', ['-c', hook.command], {
+      input: JSON.stringify({ ...tool, cwd: process.cwd() }), encoding: 'utf8',
+    }));
+    const denial = results.find(r => r.status === 2);
+    emit(events.find(event => event.subtype === 'init'));
+    emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p6-denied', name: tool.tool_name, input: tool.tool_input }] } });
+    if (denial) emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'p6-denied', is_error: true,
+      content: 'PreToolUse hook error: ' + (scenario === 'p6-unknown' ? 'legacy error' : denial.stderr) }] } });
+    emit({ type: 'result', is_error: false, permission_denials: denial ? [tool] : [], usage: {} });
+  } else if (['hang', 'hang-stubborn', 'hang-orphan', 'denial-hang'].includes(scenario)) {
     recordPid();
     if (scenario === 'hang-stubborn') process.on('SIGTERM', () => {});
     if (scenario === 'hang-orphan') {
@@ -63,7 +78,7 @@ if (args.includes('--hang-orphan-child')) {
         { type: 'tool_use', id: 'denied', name: 'Bash', input: { command: 'codex exec test' } },
       ] } });
       emit({ type: 'user', message: { content: [
-        { type: 'tool_result', tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error' },
+        { type: 'tool_result', tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error: 하네스 가드[승인]: 승인이 필요한 동작입니다 (fixture)' },
       ] } });
     }
     setInterval(() => {}, 1000);
@@ -92,7 +107,15 @@ if (args.includes('--hang-orphan-child')) {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' }, cwd: process.cwd() }),
         encoding: 'utf8',
       }).status === 2);
+      const writeInput = { file_path: 'src/FODH_DOCTOR_MARKER.ts', content: 'export {}' };
+      const pathDenied = hooks.some(hook => spawnSync('/bin/sh', ['-c', hook.command], {
+        input: JSON.stringify({ tool_name: 'Write', tool_input: writeInput, cwd: process.cwd() }), encoding: 'utf8',
+      }).status === 2);
+      if (!pathDenied) { mkdirSync('src', { recursive: true }); writeFileSync(writeInput.file_path, writeInput.content); }
       emit(events.find(event => event.subtype === 'init'));
+      emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'doctor-path', name: 'Write', input: writeInput }] } });
+      emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'doctor-path', is_error: pathDenied,
+        content: pathDenied ? 'PreToolUse hook error: path denied' : 'fixture write allowed' }] } });
       if (scenario.startsWith('p5-skills-')) {
         let marker;
         try { marker = readFileSync('CLAUDE.md', 'utf8').match(/^- doctor 표식: (FODH-DOC-[a-f0-9]{8})$/m)?.[1]; } catch {}
@@ -111,7 +134,7 @@ if (args.includes('--hang-orphan-child')) {
         process.exitCode = 1;
       } else {
         emit({ type: 'result', is_error: false, permission_denials: denied
-          ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] : [], usage: {} });
+          ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }, ...(pathDenied ? [{ tool_name: 'Write', tool_input: writeInput }] : [])] : [], usage: {} });
       }
     } else {
       if (scenario === 'ack') {
@@ -134,6 +157,11 @@ if (args.includes('--hang-orphan-child')) {
       }
       for (const original of events) {
         const event = structuredClone(original);
+        if (event.type === 'user') for (const block of event.message?.content ?? []) {
+          if (block.type === 'tool_result' && typeof block.content === 'string' && /PreToolUse|hook error/i.test(block.content)) {
+            block.content = block.content.replace('하네스 가드:', '하네스 가드[승인]:');
+          }
+        }
         if (scenario === 'api-key' && event.subtype === 'init') event.apiKeySource = 'ANTHROPIC_API_KEY';
         if (scenario === 'pem-result' && event.type === 'user') {
           for (const block of event.message?.content ?? []) if (block.type === 'tool_result') {

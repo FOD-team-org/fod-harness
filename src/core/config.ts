@@ -1,3 +1,4 @@
+import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
 import { commandParts } from '../provider/runner.ts';
 import { isAbsolute, relative, resolve } from 'node:path';
@@ -149,6 +150,13 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
     return v;
   };
   const docsRoot = internal(docs.root, 'docs', 'docs.root');
+  const docsPathKey = (path: string) => process.platform === 'darwin' ? path.toLowerCase() : path;
+  const docsTarget = docsPathKey(resolve(root, docsRoot));
+  if (docsTarget === docsPathKey(resolve(root)) || ['.pi', '.git', '.claude'].some(name => {
+    const protectedPath = docsPathKey(resolve(root, name));
+    return protectedPath === docsTarget || protectedPath.startsWith(docsTarget + '/');
+  })) throw new Error('docs.root은 프로젝트 루트나 .pi·.git·.claude의 조상 또는 그 자체일 수 없습니다');
+
   const protectedInternal = (value: unknown, fallback: string, key: string): string => {
     const path = internal(value, fallback, key), target = resolve(root, path), docsPath = resolve(root, docsRoot);
     const overlaps = target === docsPath || target.startsWith(docsPath + '/') || docsPath.startsWith(target + '/');
@@ -224,9 +232,12 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
   }
   return value;
 }
-export async function setConfig(root: string, key: string, text: string): Promise<unknown> {
-  if (process.env.FODH_BRAIN === '1' && !/^(delegate|verify)\.[A-Za-z]/u.test(key)) {
-    throw new Error(`두뇌 세션은 이 설정을 바꿀 수 없습니다: ${key}. 판단대기 항목으로 올리세요`);
+export const approvalConfigKeys = ['delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
+export async function setConfig(root: string, key: string, text: string,
+  options: { fromCli?: boolean; approve?: boolean } = {}): Promise<unknown> {
+  await assertNotBrain(root, `config set ${key}`);
+  if (options.fromCli && !options.approve && approvalConfigKeys.some(k => k === key || k.startsWith(`${key}.`))) {
+    throw new Error(`승인 전용 키입니다: ${key}. --approve 를 붙여 사용자 터미널에서 실행하세요`);
   }
   const parts = keyParts(key), path = harnessPath(root, 'harness.json');
   let value: unknown;

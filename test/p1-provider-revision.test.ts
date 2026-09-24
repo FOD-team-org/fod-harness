@@ -22,7 +22,7 @@ const denial = { tool_name: 'Bash', tool_input: { command: 'sensitive-action fix
 const done = { type: 'result', is_error: false, usage: {}, permission_denials: [] };
 const deniedEvents = [init,
   { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'denied', name: 'Bash', input: denial.tool_input }] } },
-  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error' }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error: 하네스 가드[승인]: 승인이 필요한 동작입니다 (fixture)' }] } },
   { ...done, permission_denials: [denial] },
 ];
 function emulate(events: Record<string, unknown>[], terminal: Partial<ProcessResult> = {}) {

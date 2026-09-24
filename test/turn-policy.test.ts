@@ -73,7 +73,10 @@ it.each(['success', 'quota'])('정책: doctor %s는 짧은 deadline과 상태 �
   const original = { state: 'IMPLEMENT', sessionId: 'saved', actualModel: 'saved-model', rateLimitInfo: { saved: true } };
   await updateState(root, original);
   emulate([init, scenario === 'quota' ? { type: 'result', is_error: true, result: 'limit reached' } : {
-    ...done, permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'printf FODH_DOCTOR_MARKER extra' } }],
+    ...done, permission_denials: [
+      { tool_name: 'Bash', tool_input: { command: 'printf FODH_DOCTOR_MARKER extra' } },
+      { tool_name: 'Write', tool_input: { file_path: 'src/FODH_DOCTOR_MARKER.ts', content: 'export {}' } },
+    ],
   }]);
   if (scenario === 'success') expect(await doctor(root, { env: environment(root) })).toMatchObject({ ok: true });
   else await expect(doctor(root, { env: environment(root) })).rejects.toThrow('configError: quota');
@@ -96,8 +99,8 @@ it('정책: PEM 제거와 도구 결과 요약 및 마지막 호출 usage를 함
 it('정책: result 없이 종료돼도 이미 수집한 훅 denial을 저장한다', async () => {
   const root = await project();
   emulate([init, { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'denied', name: 'Bash',
-    input: { command: 'codex exec test' } }] } }, { type: 'user', message: { content: [{ type: 'tool_result',
-    tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error' }] } }]);
+    input: { command: 'echo FORBIDDEN_MARKER' } }] } }, { type: 'user', message: { content: [{ type: 'tool_result',
+    tool_use_id: 'denied', is_error: true, content: 'PreToolUse hook error: 하네스 가드[승인]: 시험' }] } }]);
   await runTurn('검사', { root, model: 'haiku', env: environment(root) });
   expect((await readJudgment(root)).items).toHaveLength(1);
 });

@@ -259,7 +259,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
       } else if (kind === 'memory-critical') {
         const wasActive = active.has((await readState(root)).state);
         if (wasActive) await transitionState(root, 'paused(memory)', { system: true });
-        await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}` }, context);
+        await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}. 해제: fodh memory reset(스왑이 실제로 줄지 않으면 다시 걸린다)` }, context);
         handled = true;
       } else if (kind === 'memory-recovered') {
         const state = await readState(root);
@@ -269,7 +269,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
           await transitionState(root, 'PICK');
           resumed = (await autoResume(pi, root, context, kind)).resumed === true;
         }
-        await notify(root, { key: kind, level: 'info', title: '메모리 회복', body: '스왑 사용량이 회복 기준을 5분 동안 유지했습니다' }, context);
+        await notify(root, { key: kind, level: 'info', title: '메모리 회복', body: batch.some(record => record.manualReset) ? '메모리 정지를 수동 해제했습니다. 스왑이 실제로 줄지 않으면 다시 걸립니다' : '스왑 사용량이 회복 기준을 5분 동안 유지했습니다' }, context);
         handled = true;
       } else if (kind === 'stalled') {
         const state = await readState(root);

@@ -3,6 +3,7 @@ export const commandTable: { group: string; action?: string }[] = [
   { group: 'cleanup', action: 'run' },
   { group: 'verify', action: 'run' },
   { group: 'memory', action: 'status' },
+  { group: 'memory', action: 'reset' },
   { group: 'notify', action: 'send' },
   { group: 'codex', action: 'status' },
   { group: 'codex', action: 'result' },

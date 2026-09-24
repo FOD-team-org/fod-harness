@@ -187,12 +187,12 @@ it.each([
 it.each(['interview.enforce','interview','requiresApproval','skills.target','claudeMd.targets','docs.overrideDir','brain.model','watch.pollSeconds','cleanup.keepPaths','notify.channels','custom'])('M2 두뇌의 %s 변경은 바이트 불변 거부',async key=>{
   const root=await project();await setConfig(root,'brain.model','fable');const path=join(root,'.pi/harness.json'),before=await readFile(path);
   vi.stubEnv('FODH_BRAIN','1');
-  try { await expect(setConfig(root,key,'false')).rejects.toThrow(`두뇌 세션은 이 설정을 바꿀 수 없습니다: ${key}. 판단대기 항목으로 올리세요`);expect(await readFile(path)).toEqual(before); }
+  try { await expect(setConfig(root,key,'false')).rejects.toThrow(`두뇌 세션은 config set ${key} 을 실행할 수 없습니다. 사용자 터미널에서 실행하세요`);expect(await readFile(path)).toEqual(before); }
   finally { vi.unstubAllEnvs(); }
 });
-it('M2 두뇌 delegate/verify 하위 키만 허용하고 사용자 설정은 유지',async()=>{
+it('M2/P6 두뇌 delegate/verify 하위 키도 거부하고 사용자 설정은 유지',async()=>{
   const root=await project();vi.stubEnv('FODH_BRAIN','1');
-  try { await setConfig(root,'delegate.codex.workerModel','custom');await setConfig(root,'verify.commands','["node --version"]'); }
+  try { await expect(setConfig(root,'delegate.codex.workerModel','custom')).rejects.toThrow('두뇌 세션');await expect(setConfig(root,'verify.commands','["node --version"]')).rejects.toThrow('두뇌 세션'); }
   finally { vi.unstubAllEnvs(); }
   await setConfig(root,'interview.enforce','false');expect((await loadConfig(root)).interview.enforce).toBe(false);
 });
@@ -209,4 +209,21 @@ it.each(['docs.overrideDir', 'interview.extraBankFile'])('N9 %s는 루트·문�
   expect((await loadConfig(root)).docs.root).toBe('notes/project');
   await setConfig(root, key, '.pi/custom');
   await expect(setConfig(root, 'docs.root', '.pi/custom/docs')).rejects.toThrow(key);
+});
+
+it('L2 doctor는 max-turns 3, 일반 두뇌는 턴 제한 인자 없음', () => {
+  const args = claudeArgs('/project', 'haiku', 'sid', false, true);
+  expect(args[args.indexOf('--max-turns') + 1]).toBe('3');
+  expect(claudeArgs('/project', 'haiku', 'sid', false)).not.toContain('--max-turns');
+});
+
+it.each(['.', '', './', '../outside', '/outside', '.pi', '.git', '.claude', 'nested/..'])('L8 docs.root %j는 경계 약화 없이 거부한다', async value => {
+  const root = await project(); await setConfig(root, 'brain.model', 'fable');
+  const path = join(root, '.pi/harness.json'), before = await readFile(path);
+  await expect(setConfig(root, 'docs.root', JSON.stringify(value))).rejects.toThrow('docs.root');
+  expect(await readFile(path)).toEqual(before);
+});
+it('L8 일반 문서 하위 경로는 계속 허용한다', async () => {
+  const root = await project(); await setConfig(root, 'docs.root', 'notes/project');
+  expect((await loadConfig(root)).docs.root).toBe('notes/project');
 });

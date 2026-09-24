@@ -7,6 +7,7 @@ import { installSkills, skillsStatus } from '../core/skills.ts';
 import { runCleanup, type CleanupScope } from '../core/cleanup.ts';
 import { runVerify } from '../core/verify.ts';
 import { notify } from '../core/notify.ts';
+import { resetMemory } from '../core/memory.ts';
 import { memoryStatus } from '../core/watcher.ts';
 import { resolveCliRoot } from './root.ts';
 import { startCodex, status as codexStatus, result as codexResult, cancel as cancelCodex, CodexError } from '../core/codex.ts';
@@ -32,7 +33,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
     root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
-      count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
+      approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
       base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
@@ -69,6 +70,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'skills' && action === 'status') { exact(0); result = await skillsStatus(root); }
     else if (group === 'cleanup' && action === 'run') { exact(0); result = await runCleanup(root, { scope: (values.scope ?? 'all') as CleanupScope, taskId: values.task, dryRun: values['dry-run'] }); }
     else if (group === 'verify' && action === 'run') { exact(0); result = await runVerify(root, { heavy: values.heavy, cwd: values.cwd }); }
+    else if (group === 'memory' && action === 'reset') { exact(0); result = await resetMemory(root); }
     else if (group === 'memory' && action === 'status') { exact(0); result = await memoryStatus(root); }
     else if (group === 'notify' && action === 'send') {
       exact(0); const level = values.level ?? 'info';
@@ -92,7 +94,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.');
       result = await getConfig(root, rest[0]);
     } else if (group === 'config' && action === 'set') {
-      exact(2); result = await setConfig(root, rest[0], rest[1]);
+      exact(2); result = await setConfig(root, rest[0], rest[1], { fromCli: true, approve: values.approve });
     }
     else if (group === 'watch' && action === 'tick') { exact(0); result = await tick(root); }
     else if (group === 'watch' && action === 'status') { exact(0); result = await watcherStatus(root); }
