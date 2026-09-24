@@ -51,7 +51,8 @@ function command(value: unknown, fallback: string | string[], label: string): st
   throw new Error(`${label} 명령이 올바르지 않습니다`);
 }
 
-export async function loadConfig(root: string, candidate?: unknown): Promise<HarnessConfig> {
+const warnedKeysHash = new Map<string, string>();
+export async function loadConfig(root: string, candidate?: unknown, options: { dryRun?: boolean } = {}): Promise<HarnessConfig> {
   const raw = object(candidate === undefined ? await readJson<unknown>(harnessPath(root, 'harness.json'), {}) : candidate, '하네스');
   const brain = object(defaultValue(raw.brain, {}), 'brain');
   const judgment = object(defaultValue(raw.judgment, {}), 'judgment');
@@ -201,16 +202,24 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
     unknown.push(...Object.keys(values).filter(key => !Object.hasOwn(known, key)).map(key => `${prefix}.${key}`));
   }
   const warnedPath = harnessPath(root, 'harness-config-warned.json');
-  if (unknown.length || existsSync(warnedPath)) {
+  const cacheKey = resolve(warnedPath);
+  const keysHash = unknown.length ? createHash('sha256').update(JSON.stringify(unknown.sort())).digest('hex') : '';
+  if (!options.dryRun && warnedKeysHash.get(cacheKey) !== keysHash) {
     try {
+      if (!unknown.length && !existsSync(warnedPath)) { warnedKeysHash.set(cacheKey, keysHash); return config; }
       const shouldNotify = await withFileLock(warnedPath, async () => {
+        // A concurrent load may have completed while this call waited for the lock.
+        if (warnedKeysHash.get(cacheKey) === keysHash) return false;
         if (!unknown.length) {
           await unlink(warnedPath).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+          warnedKeysHash.set(cacheKey, keysHash);
           return false;
         }
-        const keysHash = createHash('sha256').update(JSON.stringify(unknown.sort())).digest('hex');
-        if ((await readJson<{ keysHash: string } | undefined>(warnedPath, undefined))?.keysHash === keysHash) return false;
+        if ((await readJson<{ keysHash: string } | undefined>(warnedPath, undefined))?.keysHash === keysHash) {
+          warnedKeysHash.set(cacheKey, keysHash); return false;
+        }
         await atomicWrite(warnedPath, JSON.stringify({ keysHash, at: new Date().toISOString() }) + '\n');
+        warnedKeysHash.set(cacheKey, keysHash);
         return true;
       });
       if (shouldNotify) await sendNotification(root, { key: 'config:unknown-key', level: 'warning', title: '하네스 설정',
@@ -279,7 +288,7 @@ export async function setConfig(root: string, key: string, text: string,
       parent = object(parent[part], parts.join('.'));
     }
     parent[parts.at(-1)!] = value;
-    await loadConfig(root, raw);
+    await loadConfig(root, raw, { dryRun: true });
     await atomicWrite(path, JSON.stringify(raw, null, 2) + '\n');
     return value;
   });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { redact } from '../../src/provider/privacy.ts';
 import { scaffoldDoc } from '../../src/core/docs.ts';
-import { ensureHarnessGitignore } from '../../src/core/project-init.ts';
+import { ensureHarnessGitignore, GitignoreNotRegularError } from '../../src/core/project-init.ts';
 import { startInterview, validateInterviewStart } from '../../src/core/interview.ts';
 import { installSkills } from '../../src/core/skills.ts';
 import { generateClaudeMd } from '../../src/core/claude-md.ts';
@@ -49,7 +49,16 @@ async function prepareProject(root: string, ctx: ExtensionContext, reportChanges
 export default function orchestrator(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     setNotifyContext(ctx.cwd, resumeContext(ctx));
-    await ensureHarnessGitignore(ctx.cwd);
+    try { await ensureHarnessGitignore(ctx.cwd); }
+    catch (error) {
+      const message = redact(error instanceof Error ? error.message : String(error));
+      try { await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'init:gitignore', status: 'fail',
+        evidence: { error: message, ...(error instanceof GitignoreNotRegularError ? { skipped: error.skipped } : {}) } }); }
+      catch { /* An initialization diagnostic must not prevent the session from starting. */ }
+      try { await notify(ctx.cwd, { key: 'init:gitignore', title: '하네스 초기화', level: 'warning',
+        body: `.gitignore 갱신 실패: ${message}` }, resumeContext(ctx)); }
+      catch { /* Notification I/O is also best effort during session startup. */ }
+    }
   });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {

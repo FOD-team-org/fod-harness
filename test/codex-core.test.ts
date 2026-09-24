@@ -114,12 +114,18 @@ it('상태·task·spec·cwd 경계·심링크 탈출·resume last 검증', async
   await expect(launch(root)).rejects.toThrow('현재 상태에서는 codex task');
   await expect(readdir(join(root, '.pi/codex'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
-it('슬롯 점유 시 결과 파일·원장·state 변경 없이 owner 오류', async () => {
+it('슬롯 점유 시 결과 파일·원장 변경 없이 owner 오류와 슬롯 대기 상태만 기록', async () => {
   const { root } = await setup();
-  await acquireSlot('codex', { root, runId: 'occupied', pid: process.pid, startedAt: `spawn:${new Date().toISOString()}`, acquiredAt: new Date().toISOString() });
+  const owner = { root, runId: 'occupied', pid: process.pid, startedAt: `spawn:${new Date().toISOString()}`, acquiredAt: new Date().toISOString() };
+  await acquireSlot('codex', owner);
   const before = await readState(root), ledger = await readLedger(root);
-  await expect(launch(root)).rejects.toMatchObject({ message: 'codex 슬롯 사용 중', details: { owner: { runId: 'occupied' } } });
-  expect(await readState(root)).toEqual(before); expect(await readLedger(root)).toEqual(ledger);
+  await expect(launch(root)).rejects.toMatchObject({ message: 'codex 슬롯 사용 중', details: { owner, wait: 'slot' } });
+  const after = await readState(root);
+  expect(after).toEqual({ ...before, savedAt: expect.any(String), awaitingDelegation: false,
+    awaitingSlot: { kind: 'codex', owner, since: expect.any(String) } });
+  expect(Date.parse(after.awaitingSlot!.since)).toBeGreaterThanOrEqual(Date.parse(before.savedAt!));
+  expect(Date.parse(after.savedAt!)).toBeGreaterThanOrEqual(Date.parse(after.awaitingSlot!.since));
+  expect(await readLedger(root)).toEqual(ledger);
   await expect(readdir(join(root, '.pi/codex'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 it('--wait fake 완료: 원장·thread·슬롯·레지스트리·결과·인박스·CLI', async () => {

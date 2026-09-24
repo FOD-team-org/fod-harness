@@ -226,7 +226,7 @@ export async function transitionState(root: string, to: string, input: Transitio
         throw new Error('검증 증거가 없습니다: fodh verify run 이 통과해야 REVIEW 로 갈 수 있습니다(실패면 FIX)');
       }
       if (current.state === 'REVIEW' && (to === 'PROJECT_READY' || to === 'MERGE')
-        && !await hasReviewEvidence(root, current.reviewSince, to === 'MERGE' ? task!.id : undefined)) {
+        && !await hasReviewEvidence(root, current.reviewSince ?? current.enteredAt, to === 'MERGE' ? task!.id : undefined)) {
         throw new Error('교차검수 증거가 없습니다: fodh codex review --wait 결과가 필요합니다');
       }
       if (current.state === 'MERGE' && to === 'DOCS'

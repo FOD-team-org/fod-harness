@@ -79,6 +79,18 @@ it('N3 프로젝트 REVIEW→WAIT_JUDGMENT→REVIEW는 기존 reviewSince 증거
   expect((await readState(root)).resumeReviewSince).toBeUndefined();
 });
 
+it('L3 업그레이드 전 REVIEW는 enteredAt 이후 증거로 복귀하며 두 시각이 모두 없으면 거부한다', async () => {
+  const root = await project('REVIEW');
+  await updateState(root, { phase: 'project', reviewSince: undefined, enteredAt: '2026-09-24T00:00:01Z' });
+  await evidence(root, 'review', undefined, { startedAt: '2026-09-24T00:00:00Z' });
+  await expect(transitionState(root, 'PROJECT_READY')).rejects.toThrow('교차검수 증거');
+  await evidence(root, 'review', undefined, { startedAt: '2026-09-24T00:00:02Z' });
+  await updateState(root, { enteredAt: undefined });
+  await expect(transitionState(root, 'PROJECT_READY')).rejects.toThrow('교차검수 증거');
+  await updateState(root, { enteredAt: '2026-09-24T00:00:01Z' });
+  expect((await transitionState(root, 'PROJECT_READY')).state).toBe('PROJECT_READY');
+});
+
 it('N3 task paused→PICK→resume REVIEW는 시각을 보존하고 VERIFY 새 진입은 갱신한다', async () => {
   const root = await project('PICK'), task = await addTask(root, { title: '복귀', category: 'docs' });
   await updateState(root, { state: 'VERIFY', taskId: task.id, phase: 'task', doctor: { ok: true, checkedAt: new Date().toISOString() } });

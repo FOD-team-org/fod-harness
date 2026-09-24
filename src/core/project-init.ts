@@ -2,9 +2,13 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, harnessPath, readText, withFileLock } from './storage.ts';
 
-const harnessIgnores = ['.pi/harness.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
+const harnessIgnores = ['.pi/harness.lock', '.pi/*.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
   '.pi/codex/', '.pi/verify/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
 
+export class GitignoreNotRegularError extends Error {
+  readonly skipped = 'not-regular-file';
+  constructor() { super('.gitignore가 일반 파일이 아니어서 갱신을 건너뜁니다'); }
+}
 export async function ensureHarnessGitignore(root: string): Promise<void> {
   const git = await lstat(join(root, '.git')).catch(error => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -12,7 +16,13 @@ export async function ensureHarnessGitignore(root: string): Promise<void> {
   });
   if (!git) return;
   await withFileLock(harnessPath(root, 'harness-gitignore'), async () => {
-    const path = join(root, '.gitignore'), original = await readText(path);
+    const path = join(root, '.gitignore');
+    const entry = await lstat(path).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (entry && !entry.isFile()) throw new GitignoreNotRegularError();
+    const original = await readText(path);
     const lines = new Set(original.split(/\r?\n/u)), missing = harnessIgnores.filter(line => !lines.has(line));
     if (!missing.length) return;
     const newline = original.includes('\r\n') ? '\r\n' : '\n';

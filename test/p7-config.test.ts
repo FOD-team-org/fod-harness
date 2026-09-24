@@ -1,10 +1,11 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { project } from './p5-helpers.ts';
-import { loadConfig } from '../src/core/config.ts';
+import { loadConfig, setConfig } from '../src/core/config.ts';
+import * as storage from '../src/core/storage.ts';
 import { readLedger } from '../src/core/ledger.ts';
 import { notify } from '../src/core/notify.ts';
 
@@ -46,4 +47,41 @@ it('N6 키 집합 변경은 즉시 경고하고 미지 키가 없어지면 파�
   await write({}); await expect(readFile(warned)).rejects.toMatchObject({ code: 'ENOENT' });
   await write({ typo: true });
   expect((await readLedger(root)).filter(e => e.action === 'notify:config:unknown-key').map(e => e.status)).toEqual(['ok', 'ok', 'ok']);
+});
+
+it('L6 같은 프로세스의 같은 키 집합은 경고 파일을 다시 읽거나 잠그지 않는다', async () => {
+  const root = await project(), path = join(root, '.pi/harness.json'), warned = join(root, '.pi/harness-config-warned.json');
+  await writeFile(path, JSON.stringify({ notify: { channels: ['ledger'] }, typo: true }));
+  const reads = vi.spyOn(storage, 'readJson'), locks = vi.spyOn(storage, 'withFileLock');
+  await Promise.all([loadConfig(root), loadConfig(root)]);
+  expect(reads.mock.calls.filter(([file]) => file === warned)).toHaveLength(1);
+  reads.mockClear(); locks.mockClear();
+  await Promise.all([loadConfig(root), loadConfig(root)]);
+  expect(reads.mock.calls.filter(([file]) => file === warned)).toHaveLength(0);
+  expect(locks.mock.calls.filter(([file]) => file === warned)).toHaveLength(0);
+  expect((await readLedger(root)).filter(e => e.action === 'notify:config:unknown-key')).toHaveLength(1);
+});
+
+it.each(['validation', 'write'])('L6 setConfig %s 실패는 경고 파일·설정·경고 이력을 만들지 않는다', async failure => {
+  const root = await project(), path = join(root, '.pi/harness.json'), warned = join(root, '.pi/harness-config-warned.json');
+  const before = await readFile(path, 'utf8');
+  if (failure === 'validation') {
+    await expect(setConfig(root, 'brain', '{"model":"invalid","typo":true}')).rejects.toThrow('brain.model');
+  } else {
+    const original = storage.atomicWrite;
+    const write = vi.spyOn(storage, 'atomicWrite').mockImplementation(async (file, text) => {
+      if (file === path) throw new Error('fixture: save failed');
+      return original(file, text);
+    });
+    await expect(setConfig(root, 'pendingTypo', 'true')).rejects.toThrow('fixture: save failed');
+    write.mockRestore();
+  }
+  expect(await readFile(path, 'utf8')).toBe(before);
+  await expect(readFile(warned)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await readLedger(root)).filter(e => e.action === 'notify:config:unknown-key')).toHaveLength(0);
+  // A later successful save is warned only on a real load; dryRun must not poison the cache.
+  await setConfig(root, 'pendingTypo', 'true');
+  await expect(readFile(warned)).rejects.toMatchObject({ code: 'ENOENT' });
+  await loadConfig(root);
+  expect((await readLedger(root)).filter(e => e.action === 'notify:config:unknown-key')).toHaveLength(1);
 });
