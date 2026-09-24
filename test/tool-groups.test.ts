@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as identity from '../src/core/process-time.ts';
@@ -8,6 +8,7 @@ import * as runner from '../src/provider/runner.ts';
 import * as tree from '../src/core/proc-tree.ts';
 import { sampleToolGroups, verifiedToolGroups, reportToolResidual, type ToolGroup } from '../src/core/tool-groups.ts';
 import { reclaimCodexOwner } from '../src/core/codex-reclaim.ts';
+import { requestCancel, resultDir } from '../src/core/codex-record.ts';
 import { readLedger } from '../src/core/ledger.ts';
 const startedAt = '2026-09-24T00:00:00Z', roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -21,6 +22,25 @@ function psTable(table: { pid: number; pgid: number; startedAt?: string }[], liv
 async function context() {
   const root = await mkdtemp(join(tmpdir(), 'fodh-tools-')); roots.push(root); return { root, runId: 'tools' };
 }
+it.each(['reclaim', 'cleanup', 'watcher'] as const)('F23 %s는 회수 신호 전에 취소 출처·시각을 저장한다', async by => {
+  const ctx = await context();
+  psTable([{ pid: 100, pgid: 100, startedAt }], [100]);
+  const reap = vi.spyOn(tree, 'reclaimCodexTree').mockImplementation(async () => {
+    const marker = JSON.parse(await readFile(join(resultDir(ctx.root, ctx.runId), 'cancel.json'), 'utf8'));
+    expect(marker).toEqual({ by, at: expect.any(String) });
+    expect(Number.isFinite(Date.parse(marker.at))).toBe(true);
+    return true;
+  });
+  await reclaimCodexOwner({ pid: 100, pgid: 100, startedAt }, ctx, by === 'reclaim' ? {} : { by });
+  expect(reap).toHaveBeenCalledOnce();
+});
+it('F23 fallback 회수는 최초 cancel 출처·시각을 덮어쓰지 않는다', async () => {
+  const ctx = await context(), path = join(resultDir(ctx.root, ctx.runId), 'cancel.json');
+  await requestCancel(ctx.root, ctx.runId, 'cancel');
+  const first = await readFile(path, 'utf8');
+  await requestCancel(ctx.root, ctx.runId, 'reclaim');
+  expect(await readFile(path, 'utf8')).toBe(first);
+});
 it.each(['foreign', 'unverified', 'gone'] as const)('%s: 다른 신원의 도구 그룹을 건너뛰고 원장에 남긴다', async scenario => {
   const ctx = await context();
   psTable([{ pid: 300, pgid: 300, startedAt: '2000-01-01T00:00:00Z' },

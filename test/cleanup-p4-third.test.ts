@@ -33,7 +33,7 @@ it.each(['owned', 'dead', 'foreign', 'unknown', 'missing'] as const)('N1: verify
     expect(await cleanupReport(root)).toMatchObject({ remaining: 0, protected: [record] });
   } else {
     expect(report.processes?.protected).toEqual([]); expect(report.processes?.reclaimed).toEqual([{ pid: record.pid, kind: 'verify' }]);
-    expect(reap).toHaveBeenCalledWith(record, { root, runId: record.runId }); expect(await listProcs(root)).toEqual([]);
+    expect(reap).toHaveBeenCalledWith(record, { root, runId: record.runId }, { by: 'cleanup' }); expect(await listProcs(root)).toEqual([]);
   }
 });
 it('N1: 소유자가 죽고 자식 신원도 unknown이면 보호·신호 없이 unverified로 보존한다', async () => {

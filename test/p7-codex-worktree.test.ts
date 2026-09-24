@@ -1,3 +1,4 @@
+import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
 import { ChildProcess, spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -23,8 +24,8 @@ async function setup(git: 'file' | 'directory' | false) {
   vi.spyOn(processes, 'processStartedAt').mockResolvedValue('fixture-start');
   vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   vi.mocked(spawn).mockImplementation(() => {
-    const child = new ChildProcess(); Object.defineProperty(child, 'pid', { value: 99999991 });
-    queueMicrotask(() => child.emit('spawn')); return child;
+    const child = Object.assign(new ChildProcess(), { stdout: new PassThrough() }); Object.defineProperty(child, 'pid', { value: 99999991 });
+    queueMicrotask(() => { child.stdout!.emit('data', JSON.stringify({ pid: child.pid }) + '\n'); child.emit('close', 0); }); return child;
   });
   return { root, task, start: (cwd?: string) => startCodex(root, 'task', { taskId: task.id, spec: 'spec.md', cwd }) };
 }

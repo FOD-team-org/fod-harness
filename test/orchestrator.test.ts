@@ -433,16 +433,28 @@ it('P3 위임 대기 표지는 재개를 멈추고 recover/stalled도 재개하�
   expect((await readState(t.root)).awaitingDelegation).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
   await t.decide(['stalled', 'recover']); expect(t.sendMessage).not.toHaveBeenCalled();
 });
-it.each(['wrong', 'finished'])('P3 %s 위임 표지를 무시하고 marker skip 후 정상 재개', async scenario => {
-  const t = await setup(); await delegationFixture(t.root, 'delegated', scenario === 'finished');
-  await t.end('stop', `대기: 위임 ${scenario === 'wrong' ? 'different' : 'delegated'}\n상태: RESEARCH`);
-  expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).awaitingDelegation).toBe(false);
+it('F23 완료된 위임의 표지는 marker skip 후 정상 재개한다', async () => {
+  const t = await setup(); await delegationFixture(t.root, 'delegated', true);
+  await t.end('stop', '대기: 위임 delegated');
+  expect(t.sendMessage).toHaveBeenCalledOnce(); expect((await readState(t.root)).awaitingDelegation).toBe(false);
   expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'delegation:marker', status: 'skip' }));
 });
-it('P3 표지 누락 시 다음 프롬프트 안내는 run당 1회', async () => {
-  const t = await setup(); await delegationFixture(t.root); await t.end(); await t.end();
-  expect(t.sendMessage.mock.calls[0][0].content).toContain('[위임 진행 중 delegated');
-  expect(t.sendMessage.mock.calls[1][0].content).not.toContain('[위임 진행 중 delegated');
+it.each([null, 'different'])('F23 살아 있는 위임은 표지 %s에도 자동 재개하지 않는다', async marker => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', marker ? `대기: 위임 ${marker}` : '작업 시작');
+  expect(await readState(t.root)).toMatchObject({ awaitingDelegation: true, autoTurns: 0 });
+  expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'delegation:implied', evidence: { marker, runId: 'delegated' } }));
+  const done = await addInbox(t.root, { kind: 'codex-done', codexRunId: 'delegated', codexStatus: 'ok' });
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, [done]);
+  expect((await readState(t.root)).awaitingDelegation).toBe(false);
+  expect(t.sendMessage).toHaveBeenCalledOnce();
+});
+it('F23 위임이 없는 잘못된 표지는 skip 후 정상 재개한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'RESEARCH' });
+  await t.end('stop', '대기: 위임 nonexistent');
+  expect(t.sendMessage).toHaveBeenCalledOnce();
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'delegation:marker', status: 'skip' }));
 });
 it.each(['ok', 'fail', 'timeout', 'lost'])('P3 codex-done %s → 대기 해제·재개·실패 경고·인박스 전달 유지', async status => {
   const t = await setup(); await delegationFixture(t.root); await updateState(t.root, { awaitingDelegation: true, autoTurns: 3 });
@@ -479,10 +491,10 @@ it.each(['`대기: 위임 delegated`', '대기: 위임 <delegated>', '대기: �
   await t.end('stop', `본문\n${marker}\n\n상태: RESEARCH\n`);
   expect((await readState(t.root)).awaitingDelegation).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
 });
-it('P3 본문의 위임 표지는 무시하고 사용자 표지는 보존한다', async () => {
+it('F23 본문 표지가 인식되지 않아도 살아 있는 위임과 사용자 대기는 보존한다', async () => {
   const t = await setup(); await delegationFixture(t.root);
   await t.end('stop', '대기: 위임 delegated\n대기: 사용자\n본문1\n본문2\n상태: RESEARCH');
-  expect((await readState(t.root)).awaitingDelegation).not.toBe(true);
+  expect((await readState(t.root)).awaitingDelegation).toBe(true);
   expect((await readState(t.root)).awaitingUser).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
 });
 it('P3 사용자·위임 표지가 함께 있으면 두 대기를 기록한다', async () => {

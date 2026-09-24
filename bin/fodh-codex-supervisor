@@ -1,3 +1,13 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { supervise } from '../src/core/codex-supervisor.ts';
-await supervise(process.argv[2], process.argv[3]);
+if (process.argv[4] === '--launch') {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), process.argv[2], process.argv[3]], {
+    detached: true, stdio: ['ignore', 'ignore', 2], cwd: process.cwd(), env: process.env,
+  });
+  await new Promise((ok, fail) => { child.once('spawn', ok); child.once('error', fail); });
+  child.unref();
+  await new Promise((ok, fail) => process.stdout.write(JSON.stringify({ pid: child.pid }) + '\n', error => error ? fail(error) : ok()));
+  process.exit(0);
+} else await supervise(process.argv[2], process.argv[3]);

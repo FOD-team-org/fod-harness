@@ -47,7 +47,7 @@ export async function cleanupStaleProcess(root: string, record: ProcRecord): Pro
   const meta = record.kind === 'codex' ? await readMeta(root, record.runId) : undefined;
   if (meta?.toolGroups?.length) {
     const outcome = await reclaimCodexOwner({ ...record, childPid: meta.childPid, childStartedAt: meta.childStartedAt,
-      toolGroups: meta.toolGroups }, { root, runId: record.runId }, { staleToolsOnly: true });
+      toolGroups: meta.toolGroups }, { root, runId: record.runId }, { staleToolsOnly: true, by: 'cleanup' });
     if (outcome.owner !== 'gone' && outcome.owner !== 'foreign') return undefined;
     if (!outcome.reclaimed || outcome.skippedGroups.length) return 'residual';
   } else if (!await isStaleProcess(record)) return undefined;
@@ -69,7 +69,7 @@ async function processes(root: string, options: CleanupOptions) {
       if (stale) { result[stale].push(item); continue; }
       if (record.startedAt.startsWith('spawn:') || record.kind === 'verify' && await processIdentity(record.pid, record.startedAt) !== 'owned') { result.unverified.push(item); continue; }
       const meta = record.kind === 'codex' ? await readMeta(root, record.runId) : undefined;
-      const outcome = await reclaimCodexOwner({ ...record, childPid: meta?.childPid, childStartedAt: meta?.childStartedAt, toolGroups: meta?.toolGroups }, { root, runId: record.runId });
+      const outcome = await reclaimCodexOwner({ ...record, childPid: meta?.childPid, childStartedAt: meta?.childStartedAt, toolGroups: meta?.toolGroups }, { root, runId: record.runId }, { by: 'cleanup' });
       if (outcome.owner === 'foreign' || outcome.owner === 'gone') {
         if (!outcome.reclaimed || outcome.skippedGroups.length) result.residual.push(item);
         else { await retireStaleProcess(root, record); result.stale.push(item); }

@@ -225,6 +225,7 @@ it('죽은 감독 그룹 회수 실패는 첫 기록 후 10분 간격, 성공한
     expect((await readMeta(root, 'orphan'))?.status).toBe('running');
   }
   const failures = (await readLedger(root)).filter(item => item.action === 'codex:lost');
+  expect(reap).toHaveBeenCalledWith(expect.any(Object), { root, runId: 'orphan' }, { by: 'watcher' });
   expect(failures).toHaveLength(1); expect(failures[0]).toMatchObject({ status: 'fail', evidence: { reason: 'group-alive' } });
   expect((await readJson<any>(harnessPath(root, 'harness-watcher.json'), {})).watch).not.toHaveProperty('codexLostFailed');
   await tick(root, { now: now + 659999, isProcessAlive: () => false });

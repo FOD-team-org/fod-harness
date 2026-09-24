@@ -19,3 +19,5 @@
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 검수자 소스 수정·git·전체 테스트/빌드·비밀값·외부 발송 금지. --wait 무결과면 stderr runId 또는 `fodh codex status`로 `대기: 위임 <runId>` 후 종료하고 재호출하지 않는다.
+
+`--wait` 는 포그라운드로만 쓴다. Bash `run_in_background` 로 돌리지 않는다(턴 종료 시 프로세스 트리가 죽는다). 결과가 안 오면 `대기: 위임 <runId>` 로 턴을 끝낸다.

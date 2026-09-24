@@ -169,6 +169,17 @@ try {
       if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('config');
     } catch { deny('하네스 설정을 읽을 수 없습니다.'); }
   }
+  let judgmentFile = 'docs/판단대기.md';
+  try {
+    const configured = JSON.parse(readFileSync(resolve(root, '.pi/harness.json'), 'utf8')).judgment?.file;
+    if (typeof configured === 'string' && configured) judgmentFile = configured;
+  } catch { /* Uninitialized projects still protect the default path and journals. */ }
+  const judgmentPath = value => {
+    const path = normalizePath(resolve(cwd, value));
+    return samePath(path, resolve(root, judgmentFile))
+      || samePath(dirname(path), resolve(root, '.pi')) && /^harness-judgment.*\.json$/.test(basename(path));
+  };
+  const judgmentMessage = '판단대기 문서는 사용자만 고칩니다. 새 판단은 fodh judgment add 로 등록하라';
   const hooks = dirname(fileURLToPath(import.meta.url));
   const command = String(input.command ?? '');
   const extraProtected = ['.pi/interview-bank.md', '.pi/templates', ...(process.env.FODH_PROTECTED_EXTRA ?? '').split(':').filter(Boolean)].map(value => resolve(root, value));
@@ -183,6 +194,7 @@ try {
   if ((editing || bash) && secretPattern.test(text)) {
     deny('비밀값 패턴을 기록할 수 없습니다.');
   }
+  if (brain && editing && judgmentPath(input.file_path ?? input.notebook_path ?? '')) deny(judgmentMessage, 'boundary');
   if (editing && protectedPath(input.file_path ?? input.notebook_path ?? '')) {
     deny('가드 설정은 fodh로만 변경할 수 있습니다.');
   }
@@ -206,9 +218,13 @@ try {
     if (assignment || unset || clearedEnv || nestedEnv) deny('하네스 환경변수는 바꿀 수 없습니다.');
   }
   const commands = groups.filter(words => words.length).map(commandWords);
+  if (input.run_in_background === true && commands.some(words => basename(words[0] ?? '') === 'fodh' && words[1] === 'codex' && words.includes('--wait'))) {
+    deny('--wait 를 백그라운드로 돌리지 마라. 포그라운드로 실행하거나 --wait 없이 시작한 뒤 `대기: 위임 <runId>` 로 턴을 끝내라', 'boundary');
+  }
   for (const words of groups) {
     const args = commandWords(words), executable = basename(args[0] ?? '');
     const paths = writePaths(words);
+    if (brain && paths.some(judgmentPath)) deny(judgmentMessage, 'boundary');
     if (paths.some(protectedPath)) deny('가드 설정은 fodh로만 변경할 수 있습니다.');
     if (process.env.FODH_CODEX_CHILD === '1' && executable === 'fodh') deny('Codex 자식은 fodh를 실행할 수 없습니다.', 'boundary');
     if (brain) {

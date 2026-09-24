@@ -16,7 +16,7 @@ import { processStartedAt } from './process-time.ts';
 import { acquireSlot, updateSlot, releaseSlot, slotOwnerAlive, slotsStatus } from './slots.ts';
 import { childEnv, commandParts } from '../provider/runner.ts';
 import { redact } from '../provider/privacy.ts';
-import { resultDir, metaPath, readMeta, writeMeta, result, finishRun, type CodexKind, type CodexMeta } from './codex-record.ts';
+import { resultDir, metaPath, readMeta, writeMeta, result, finishRun, requestCancel, type CodexKind, type CodexMeta } from './codex-record.ts';
 export { result, readMeta, resultDir } from './codex-record.ts';
 export class CodexError extends Error {
   details: Record<string, unknown>;
@@ -105,13 +105,19 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
           ...(kind === 'task' && !worktree ? { fallback: 'root' } : {}) } });
       const log = await open(join(dir, 'supervisor.log'), 'a', 0o600);
       try {
-        const child = spawn(process.execPath, [join(pkg, 'bin/fodh-codex-supervisor'), root, runId], {
-          detached: true, stdio: ['ignore', 'ignore', log.fd], cwd: root,
+        const child = spawn(process.execPath, [join(pkg, 'bin/fodh-codex-supervisor'), root, runId, '--launch'], {
+          detached: true, stdio: ['ignore', 'pipe', log.fd], cwd: root,
           env: { ...childEnv(), FODH_PROJECT_ROOT: root, FODH_RUN_ID: runId },
         });
-        await new Promise<void>((ok, fail) => { child.once('spawn', ok); child.once('error', fail); });
-        pid = child.pid!; child.unref();
+        let output = '';
+        child.stdout!.setEncoding('utf8');
+        child.stdout!.on('data', chunk => { output = (output + chunk).slice(0, 4096); });
+        const code = await new Promise<number | null>((ok, fail) => { child.once('close', ok); child.once('error', fail); });
+        const launched = code === 0 ? JSON.parse(output.trim() || '{}') : {};
+        if (!Number.isSafeInteger(launched.pid) || launched.pid <= 1) throw new Error('감독 런처가 pid를 반환하지 않았습니다');
+        pid = launched.pid;
       } finally { await log.close(); }
+      if (!pid) throw new Error('감독 pid가 없습니다');
       const identity = await processStartedAt(pid) ?? `spawn:${new Date().toISOString()}`;
       await registerProc(root, { pid, pgid: pid, startedAt: identity, runId, kind: 'codex', taskId: task?.id, protectedUntil: new Date(Date.now() + 60000).toISOString(), cmd: `fodh-codex-supervisor ${runId}` });
       await updateSlot('codex', runId, { pid, startedAt: identity });
@@ -173,6 +179,7 @@ export async function cancel(root: string, runId: string) {
       return { runId, cancelled: true, meta: null };
     }
     if (!meta.finishedAt) {
+      await requestCancel(root, runId, 'cancel');
       const record = (await listProcs(root)).find(proc => proc.runId === runId && proc.kind === 'codex');
       const owner = record ?? (meta.pid ? { pid: meta.pid, pgid: meta.pid, startedAt: meta.processStartedAt } : undefined);
       if (owner && await codexOwnership(owner) === 'owned') {

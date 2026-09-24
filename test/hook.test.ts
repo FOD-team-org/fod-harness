@@ -399,3 +399,29 @@ it.each([
   for (const command of commands) expect(await invoke('Bash', { command: `git ${command}` }, 'MERGE', brain))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
 });
+
+it.each([true, false])('F23 --wait background=%s', async run_in_background => {
+  const result = await invoke('Bash', { command: 'fodh codex task T01 --spec docs/task.md --wait', run_in_background }, 'IMPLEMENT', brain);
+  expect(result.code).toBe(run_in_background ? 2 : 0);
+  if (run_in_background) expect(result.stderr).toContain('하네스 가드[경계]: --wait 를 백그라운드로 돌리지 마라');
+  expect((await invoke('Bash', { command: 'fodh codex task T01 --spec docs/task.md', run_in_background }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])('F24 두뇌 %s 판단 파일 쓰기만 거부', async tool => {
+  const input = (path: string) => tool === 'NotebookEdit' ? { notebook_path: path } : { file_path: path };
+  expect(await invoke(tool, input('docs/판단대기.md'), 'IMPLEMENT', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('판단대기 문서는 사용자만 고칩니다') });
+  expect((await invoke(tool, input('docs/작업일지/2026-09-24.md'), 'IMPLEMENT', brain)).code).toBe(0);
+  expect((await invoke(tool, input('docs/판단대기.md'), 'IMPLEMENT')).code).toBe(0);
+});
+it.each(['echo answer >> docs/판단대기.md', 'echo answer > docs/판단대기.md', 'tee docs/판단대기.md', "sed -i '' 's/a/b/' docs/판단대기.md", 'cp docs/source.md docs/판단대기.md', 'mv docs/source.md docs/판단대기.md'])('F24 Bash 판단 쓰기 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('판단대기 문서는 사용자만 고칩니다') });
+});
+it.each(['cat docs/판단대기.md', 'grep 답 docs/판단대기.md', 'fodh judgment add --title 질문', 'fodh judgment read', 'fodh judgment write-status 대기', 'fodh inbox ack item'])('F24 읽기·하네스 판단 등록 경로 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it('F24 설정 판단 경로·기본 fallback·판단 저널을 보호한다', async () => {
+  const configured: HookOptions = { ...brain, setup: root => writeFile(join(root, '.pi/harness.json'), JSON.stringify({ judgment: { file: 'docs/결정.md' } })) };
+  expect((await invoke('Edit', { file_path: 'docs/결정.md' }, 'IMPLEMENT', configured)).code).toBe(2);
+  expect((await invoke('Bash', { command: 'tee docs/결정.md' }, 'IMPLEMENT', configured)).code).toBe(2);
+  for (const path of ['docs/판단대기.md', '.pi/harness-judgment-apply.json']) expect(await invoke('Write', { file_path: path }, 'IDLE', { ...brain, stateFile: 'missing', configFile: 'missing' }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+});

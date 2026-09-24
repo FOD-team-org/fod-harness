@@ -130,3 +130,9 @@ it('F19 MERGE는 루트 병합·커밋 기록·검수 SHA 전이를 순서대로
   expect(text).toContain('review.commit 을 바꾸는 판단을 만들지 않는다');
   expect(text).toContain('--reclaim');
 });
+it.each(['IMPLEMENT', 'REVIEW', 'RESEARCH', 'FIX'])('F23 %s는 포그라운드 --wait와 위임 대기를 안내한다', async stage => {
+  const text = await readFile(`templates/prompts/${stage}.md`, 'utf8');
+  expect(text).toContain('`--wait` 는 포그라운드로만 쓴다');
+  expect(text).toContain('Bash `run_in_background` 로 돌리지 않는다');
+  expect(text).toContain('`대기: 위임 <runId>`');
+});

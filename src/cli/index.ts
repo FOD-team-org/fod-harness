@@ -160,7 +160,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (!values.task || !values.judgment) throw new Error('--task 및 --judgment가 필요합니다');
       result = await reclaimTask(root, values.task, values.judgment);
     } else if (group === 'cleanup' && action === 'report') { exact(0); result = await cleanupReport(root); }
-    else if (group === 'judgment' && action === 'apply') result = await applyJudgments(root, rest);
+    else if (group === 'judgment' && action === 'apply') { await assertNotBrain(root, '판단 적용'); result = await applyJudgments(root, rest); }
     else if (group === 'judgment' && action === 'read') { exact(0); result = await readJudgment(root, { answered: values.answered }); }
     else if (group === 'judgment' && action === 'add') {
       exact(0);
@@ -189,7 +189,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
         if (/^T\d+$/u.test(values.blocks!)) await setTask(root, values.blocks!, { status: `blocked(${added.item.id})`, judgment: added.item.id });
         result = added;
       }
-    } else if (group === 'judgment' && action === 'answer') { exact(2); result = await answerJudgment(root, rest[0], rest[1]); }
+    } else if (group === 'judgment' && action === 'answer') { exact(2); await assertNotBrain(root, '판단 답변'); result = await answerJudgment(root, rest[0], rest[1]); }
     else if (group === 'judgment' && action === 'write-status') { exact(1); result = await writeJudgmentStatus(root, rest[0]); }
     else if (group === 'inbox' && action === 'list') { exact(0); result = await listInbox(root); }
     else if (group === 'inbox' && action === 'ack') { if (!rest.length) throw new Error('확인할 인박스 ID가 필요합니다.'); result = await ackInbox(root, rest); }

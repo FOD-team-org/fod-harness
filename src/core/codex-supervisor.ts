@@ -1,3 +1,4 @@
+import { appendLedgerOnce } from './ledger.ts';
 import { processTree, processTreeSnapshot, reclaimCodexTree } from './proc-tree.ts';
 import { groupAlive } from '../provider/runner.ts';
 import { sampleToolGroups, verifiedToolGroups, type ToolGroup, type ReclaimContext } from './tool-groups.ts';
@@ -6,7 +7,7 @@ import { promisify } from 'node:util';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { harnessPath, withFileLock } from './storage.ts';
+import { harnessPath, withFileLock, readJson } from './storage.ts';
 import { readMeta, writeMeta, metaPath, resultDir, finishRun } from './codex-record.ts';
 import { updateSlot } from './slots.ts';
 import { processStartedAt } from './process-time.ts';
@@ -51,7 +52,17 @@ export async function supervise(root: string, runId: string): Promise<void> {
     stopping ??= status;
     if (child) ending ??= stopChildren(child, toolGroups, context).catch(error => { failure = (error as Error).message; });
   };
-  const onTerm = () => stop('cancelled');
+  let signalHandling = Promise.resolve(), ignoredSignal = false;
+  const onTerm = () => {
+    signalHandling = signalHandling.then(async () => {
+      if (await readJson(join(resultDir(root, runId), 'cancel.json'), undefined)) stop('cancelled');
+      else if (!ignoredSignal) {
+        ignoredSignal = true;
+        process.stderr.write('SIGTERM ignored: no cancel.json; use fodh codex cancel ' + runId + '\n');
+        await appendLedgerOnce(root, { runId, action: 'codex:signal', status: 'skip', evidence: { signal: 'SIGTERM', ignored: true } });
+      }
+    }).catch(() => undefined);
+  };
   process.on('SIGTERM', onTerm);
   try {
     const meta = await withFileLock(harnessPath(root, 'harness-delegation'), async () => {
@@ -78,6 +89,7 @@ export async function supervise(root: string, runId: string): Promise<void> {
       stdio: handles.map(handle => handle.fd), env: codexChildEnv(process.env, runId) });
     const closed = new Promise<number | null>((ok, fail) => { child!.once('error', fail); child!.once('exit', code => ok(code)); });
     void closed.catch(() => undefined); // The child may fail while its identity is being recorded.
+    if (stopping) stop(stopping);
     const childPid = child.pid;
     const childStartedAt = childPid ? await processStartedAt(childPid) : undefined;
     await withFileLock(metaPath(root, runId), async () => {
@@ -131,6 +143,7 @@ export async function supervise(root: string, runId: string): Promise<void> {
     if (timer) clearTimeout(timer);
     if (rssTimer) clearInterval(rssTimer);
     process.off('SIGTERM', onTerm);
+    await signalHandling;
     for (const handle of handles) await handle.close().catch(() => undefined);
   }
 }

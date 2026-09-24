@@ -192,14 +192,16 @@ export default function orchestrator(pi: ExtensionAPI): void {
       else await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
       return;
     }
-    if (marker) {
+    {
       const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {
         const state = await readState(ctx.cwd);
-        const meta = state.delegation?.runId === marker ? await readMeta(ctx.cwd, marker) : undefined;
+        const runId = state.delegation?.runId;
+        const meta = runId ? await readMeta(ctx.cwd, runId) : undefined;
         if (meta && !meta.finishedAt) {
+          if (marker !== runId) await appendLedger(ctx.cwd, { runId: runId!, action: 'delegation:implied', status: 'ok', evidence: { marker: marker ?? null, runId } });
           await updateState(ctx.cwd, { awaitingDelegation: true, ...(awaitingUser ? { awaitingUser: true } : {}), autoTurns: 0 }); return true;
         }
-        await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
+        if (marker) await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
         await updateState(ctx.cwd, { awaitingDelegation: false }); return false;
       });
       if (waiting) return;

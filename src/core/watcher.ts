@@ -332,7 +332,7 @@ async function recoverLostRuns(root: string, now: number, options: TickOptions) 
             childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups };
           const identity = owner ? await codexOwnership(owner, options.isProcessAlive) : 'gone';
           if (!['owned', 'unknown'].includes(identity)) {
-            const reclaimed = owner ? await reclaimCodexOwner(owner, { root, runId }).catch(() => ({ reclaimed: false, owner: identity, reason: undefined })) : { reclaimed: true, owner: 'gone', reason: undefined };
+            const reclaimed = owner ? await reclaimCodexOwner(owner, { root, runId }, { by: 'watcher' }).catch(() => ({ reclaimed: false, owner: identity, reason: undefined })) : { reclaimed: true, owner: 'gone', reason: undefined };
             if (!reclaimed.reclaimed) {
               await withFileLock(path, async () => {
                 const file = await readJson<WatcherFile>(path, {});

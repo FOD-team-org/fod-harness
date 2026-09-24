@@ -21,6 +21,13 @@ export function resultDir(root: string, runId: string): string {
   return harnessPath(root, join('codex', runId));
 }
 export const metaPath = (root: string, runId: string) => join(resultDir(root, runId), 'meta.json');
+export type CancelSource = 'cancel' | 'cleanup' | 'reclaim' | 'watcher';
+export async function requestCancel(root: string, runId: string, by: CancelSource): Promise<void> {
+  const path = join(resultDir(root, runId), 'cancel.json');
+  await withFileLock(path, async () => {
+    if (!await readJson(path, undefined)) await atomicWrite(path, JSON.stringify({ by, at: new Date().toISOString() }) + '\n');
+  });
+}
 export async function readMeta(root: string, runId: string): Promise<CodexMeta | undefined> {
   return readJson<CodexMeta | undefined>(metaPath(root, runId), undefined);
 }
