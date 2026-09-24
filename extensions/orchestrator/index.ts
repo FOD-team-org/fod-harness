@@ -185,8 +185,12 @@ export default function orchestrator(pi: ExtensionAPI): void {
     const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
       .find(Boolean)?.replace(/[`<>]/gu, '');
     const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
-    if (tail.some(line => line.replace(/[*`]/gu, '') === '대기: 슬롯 codex') && (await readState(ctx.cwd)).awaitingSlot) {
-      await updateState(ctx.cwd, { autoTurns: 0, ...(awaitingUser ? { awaitingUser: true } : {}) }); return;
+    const slotState = await readState(ctx.cwd);
+    if (slotState.awaitingSlot && !slotState.delegation
+      && (active.has(slotState.state) && slotState.state !== 'recovering' || slotState.state === 'paused(slot)')) {
+      if (slotState.state !== 'paused(slot)') await updateState(ctx.cwd, { state: 'paused(slot)', awaitingUser: false, autoTurns: 0 });
+      else await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+      return;
     }
     if (marker) {
       const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {

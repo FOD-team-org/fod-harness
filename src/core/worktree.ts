@@ -37,15 +37,26 @@ async function registeredBase(root: string, record: NonNullable<Awaited<ReturnTy
     item.taskId === record.taskId && item.path === record.path ? { ...item, base } : item) }));
   return base;
 }
+export async function rootHead(root: string): Promise<string | null> {
+  return await exists(resolve(root, '.git')) ? (await git(root, ['rev-parse', 'HEAD'])).trim() : null;
+}
 export async function validateTaskCommit(root: string, taskId: string, sha: string, kind: 'review' | 'merge', reviewCommit?: string) {
   const message = kind === 'review' ? '검수 대상 커밋이 없거나 미커밋 변경이 있습니다' : '병합 커밋이 없거나 검수 커밋을 포함하지 않습니다';
   if (!await exists(resolve(root, '.git'))) {
     if (sha !== 'none') throw new Error('비-git 프로젝트는 커밋 none만 허용합니다');
     return;
   }
-  const verify = (await readState(root)).verify;
-  if (kind === 'review' && verify?.taskId === taskId && verify.head && sha !== verify.head) {
-    throw new Error('검수 커밋이 검증 시점 HEAD 와 다릅니다');
+  const state = await readState(root), verify = state.verify;
+  if (kind === 'review') {
+    if (!verify?.ok || verify.taskId !== taskId || !verify.head
+      || !(Date.parse(verify.at) >= Date.parse(state.verifySince ?? verify.since ?? ''))) throw new Error('검증 증거가 없습니다');
+    if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error(message);
+    let commit: string, verified: string;
+    try {
+      commit = (await git(root, ['rev-parse', '--verify', `${sha}^{commit}`])).trim();
+      verified = (await git(root, ['rev-parse', '--verify', `${verify.head}^{commit}`])).trim();
+    } catch { throw new Error(message); }
+    if (commit !== verified) throw new Error('검수 커밋이 검증 시점 HEAD 와 다릅니다');
   }
   if (kind === 'merge') {
     const registered = (await readState(root)).worktrees?.find(item => item.taskId === taskId);
@@ -55,6 +66,7 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
       }
     } else await appendLedger(root, { runId: randomUUID(), taskId, action: 'merge-commit:base-branch-unknown', status: 'warn' });
   }
+  let dirtyHint = '';
   try {
     if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error();
     const cwd = kind === 'review' ? await taskWorktree(root, taskId, true) : root;
@@ -65,18 +77,23 @@ export async function validateTaskCommit(root: string, taskId: string, sha: stri
       const commit = (await git(cwd, ['rev-parse', `${sha}^{commit}`])).trim();
       const branch = (await git(cwd, ['symbolic-ref', '--short', 'HEAD'])).trim();
       const base = await registeredBase(root, record);
-      if (commit !== head || branch !== record.branch || Number((await git(cwd, ['rev-list', '--count', `${base}..HEAD`])).trim()) < 1
-        || (await git(cwd, ['status', '--porcelain'])).trim()) throw new Error();
+      if (commit !== head || branch !== record.branch || Number((await git(cwd, ['rev-list', '--count', `${base}..HEAD`])).trim()) < 1) throw new Error();
+      if ((await git(cwd, ['status', '--porcelain'])).trim()) {
+        if (verify?.dirtyAfter?.length) dirtyHint = `: ${redact(verify.dirtyAfter.join(', '))} — 검증 산출물이면 프로젝트 .gitignore 에 추가(위임)`;
+        throw new Error();
+      }
     } else {
       const review = reviewCommit ?? (await getTask(root, taskId)).review?.commit;
       if (!review || !/^[a-f0-9]{4,64}$/iu.test(review)) throw new Error();
+      if (state.mergeBase) await git(root, ['merge-base', '--is-ancestor', state.mergeBase, sha]);
+      else await appendLedger(root, { runId: randomUUID(), taskId, action: 'merge-commit:merge-base-unknown', status: 'warn' });
       await git(root, ['merge-base', '--is-ancestor', review, sha]);
       await git(root, ['merge-base', '--is-ancestor', sha, 'HEAD']);
       const commit = (await git(root, ['rev-parse', `${sha}^{commit}`])).trim();
       const reviewed = (await git(root, ['rev-parse', `${review}^{commit}`])).trim();
       if (commit === reviewed && (await git(root, ['rev-parse', 'HEAD'])).trim() !== commit) throw new Error();
     }
-  } catch { throw new Error(message); }
+  } catch { throw new Error(message + dirtyHint); }
 }
 export async function commitWorktree(root: string, taskId: string, message: string) {
   if (!message.trim()) throw new Error('커밋 메시지 -m이 필요합니다');

@@ -18,7 +18,8 @@ export interface HarnessState {
   worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
-  verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string; head?: string | null; clean?: boolean | null };
+  verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string; head?: string | null; clean?: boolean | null; since?: string; dirtyAfter?: string[] };
+  mergeBase?: string | null;
   verifySince?: string; resumeVerifySince?: string;
   enteredAt?: string; reviewSince?: string; resumeReviewSince?: string;
   autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
@@ -52,10 +53,10 @@ export async function updateState(
         next.resumeReviewSince = undefined;
       } else if (current.state === 'REVIEW') {
         // REVIEW's active clock is cleared on exit; suspension keeps a separate checkpoint.
-        next.resumeReviewSince = next.state === 'WAIT_JUDGMENT' || isPaused(next.state) || next.state === 'recovering'
+        next.resumeReviewSince = ['WAIT_JUDGMENT', 'RECLAIM'].includes(next.state) || isPaused(next.state) || next.state === 'recovering'
           ? current.reviewSince ?? current.enteredAt : undefined;
         next.reviewSince = undefined;
-      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'].includes(next.state) && !isPaused(next.state)) {
+      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'RECLAIM', 'recovering'].includes(next.state) && !isPaused(next.state)) {
         next.resumeReviewSince = undefined;
       }
     }
@@ -65,10 +66,10 @@ export async function updateState(
         next.resumeVerifySince = undefined;
         if (!changes.verifySince) next.verify = undefined;
       } else if (current.state === 'VERIFY') {
-        next.resumeVerifySince = next.state === 'WAIT_JUDGMENT' || isPaused(next.state) || next.state === 'recovering'
+        next.resumeVerifySince = ['WAIT_JUDGMENT', 'RECLAIM'].includes(next.state) || isPaused(next.state) || next.state === 'recovering'
           ? current.verifySince ?? current.enteredAt : undefined;
         next.verifySince = undefined;
-      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'].includes(next.state) && !isPaused(next.state)) {
+      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'RECLAIM', 'recovering'].includes(next.state) && !isPaused(next.state)) {
         next.resumeVerifySince = undefined;
       }
     }
@@ -78,6 +79,7 @@ export async function updateState(
       } else next.resumeState = current.resumeState ?? current.resumeTask?.resumeState;
       next.taskId = current.taskId;
     }
+    if (next.state === 'paused(slot)' && next.awaitingSlot) next.awaitingUser = false;
     if (changed && isPaused(next.state)) next.lastPaused = next.state.slice(7, -1);
     if (changed && next.state === 'recovering') next.recoveryAutoResumed = false;
     const committed = await withFileLock(path, async () => {
@@ -85,6 +87,8 @@ export async function updateState(
       await atomicWrite(path, `${JSON.stringify(next, null, 2)}\n`);
       if (changed) await appendLedger(root, { runId: typeof next.runId === 'string' ? next.runId : randomUUID(),
         action: `state:${current.state}→${next.state}`, status: 'ok', taskId: next.taskId, state: next.state });
+      if (changed && next.state === 'paused(slot)' && next.awaitingSlot) await appendLedger(root, {
+        runId: typeof next.runId === 'string' ? next.runId : randomUUID(), action: 'wait:override', status: 'ok', evidence: { reason: 'slot' } });
       return true;
     });
     if (!committed) continue;
@@ -238,9 +242,10 @@ export async function transitionState(root: string, to: string, input: Transitio
         && !await hasReviewEvidence(root, current.reviewSince ?? current.enteredAt, to === 'MERGE' ? task!.id : undefined)) {
         throw new Error('교차검수 증거가 없습니다: fodh codex review --wait 결과가 필요합니다');
       }
-      if (current.state === 'MERGE' && to === 'DOCS'
-        && (!options.commit || !task?.review?.commit || task.review.high !== 0 || task.review.commit !== options.commit)) {
-        throw new Error('현재 커밋과 일치하는 높음 0 검수 증거가 필요합니다');
+      if (current.state === 'MERGE' && to === 'DOCS') {
+        if (!options.commit) throw new Error(`--commit <검수 커밋 sha> 를 넘기세요(현재 review.commit = ${task?.review?.commit ?? '없음'})`);
+        if (options.commit !== task?.review?.commit) throw new Error('--commit 이 review.commit 과 다릅니다');
+        if (task.review.high !== 0) throw new Error('검수 결과(--review-high 0)가 없습니다');
       }
       if (to === 'FIX' && task && !resume && task.repair + 1 > 3) throw new TransitionError('repair 초과', 'reclaim');
       if (current.state === 'CLEANUP' && to === 'PICK') {
@@ -258,7 +263,9 @@ export async function transitionState(root: string, to: string, input: Transitio
       const returning = to === 'PICK' && (isPaused(current.state) || ['recovering', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(current.state));
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
-      return { awaitingSlot: to === 'paused(slot)' || to === 'WAIT_RESOURCE' || to === 'PICK' && current.lastPaused === 'slot'
+      const mergeBase = current.state === 'REVIEW' && to === 'MERGE'
+        ? await (await import('./worktree.ts')).rootHead(root) : current.mergeBase;
+      return { mergeBase, ...(to === 'FIX' && !resume ? { verify: undefined } : {}), awaitingSlot: to === 'paused(slot)' || to === 'WAIT_RESOURCE' || to === 'PICK' && current.lastPaused === 'slot'
           ? current.awaitingSlot : undefined, state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
         ...(to === 'VERIFY' && (resume || current.state === 'WAIT_JUDGMENT') ? { verifySince: current.resumeVerifySince } : {}),
         ...(to === 'REVIEW' && (resume || current.state === 'WAIT_JUDGMENT') ? { reviewSince: current.resumeReviewSince } : {}),
@@ -269,10 +276,11 @@ export async function transitionState(root: string, to: string, input: Transitio
         ...(current.state === 'CLEANUP' && to === 'PICK' ? { cleanupFailures: 0 } : {}),
         ...(['WAIT_RESOURCE', 'WAIT_RETRY'].includes(current.state) && to === 'PICK' ? { lastPaused: current.lastPaused === 'slot' ? 'slot' : undefined, retry: undefined } : {}),
         taskId: clearsTask || projectReview ? undefined : options.taskId ?? current.taskId,
-        ...(to === 'WAIT_JUDGMENT' ? { resumeState: judgmentResume(current), resumeTask: undefined } : {}),
+        ...(to === 'WAIT_JUDGMENT' ? { resumeState: judgmentResume(current), resumeTask: current.resumeTask } : {}),
         ...(current.state === 'WAIT_JUDGMENT' ? { resumeState: undefined, pickJudgment: undefined } : {}),
         ...(returning ? { resumeTask: current.resumeTask ?? { taskId: current.taskId, resumeState: current.resumeState }, resumeState: undefined } : {}),
-        ...(resume || clearsTask ? { resumeTask: undefined } : {}),
+        ...(to === 'RECLAIM' ? { resumeTask: { taskId: current.taskId, resumeState: taskStates.includes(current.state) ? current.state : current.resumeTask?.resumeState ?? current.resumeState } } : {}),
+        ...(resume || clearsTask && !(to === 'PICK' && ['RECLAIM', 'WAIT_JUDGMENT'].includes(current.state)) ? { resumeTask: undefined } : {}),
         ...(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'PROJECT_READY'].includes(to) || projectReview ? { phase: 'project' as const } : {}),
         ...(to === 'PLANNING' || to === 'SPEC' || resume && !!options.taskId ? { phase: 'task' as const } : {}),
       };
@@ -282,8 +290,9 @@ export async function transitionState(root: string, to: string, input: Transitio
       const status = ({ SPEC: 'doing', IMPLEMENT: 'doing', VERIFY: 'verify', REVIEW: 'review', FIX: 'fix',
         MERGE: 'merge', DOCS: 'merge', CLEANUP: 'merge' } as Record<string, string>)[to];
       await setTask(root, task.id, { status, ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
-        verify: { ok: false }, review: { high: undefined }, merge: { commit: undefined }, docs: { ok: false }, cleanup: { ok: false } } : {}) });
+        verify: { ok: false }, review: { commit: undefined, high: undefined }, merge: { commit: undefined }, docs: { ok: false }, cleanup: { ok: false } } : {}) });
     }
+    if (to === 'FIX' && task && !options.resume) await appendLedger(root, { runId: randomUUID(), taskId: task.id, action: 'review-commit:cleared', status: 'ok' });
     if (next.state === 'WAIT_JUDGMENT') {
       const { readJudgment } = await import('./judgment.ts');
       if (!next.pickJudgment && next.phase === 'project') {

@@ -136,7 +136,9 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
 | 작업일지 규약 이행 | 기존 `docs/작업일지.md`는 읽거나 변경·삭제하지 않고 날짜별 새 규약만 사용한다. `fodh claude-md generate` 또는 session_start의 옛 작업일지 문구 감지 시 관리 블록만 재생성하며 사용자 영역은 보존한다. |
-| task 검수 면제(L4) | REVIEW→MERGE는 해당 task의 `kind: task, status: ok` meta 존재만으로 검수를 면제하며 시간 경계가 없다. 사소한 `codex task` 한 번으로도 면제될 수 있다. Claude Agent 검수 경로에서는 하네스가 검수 증거를 만들 수 없기 때문이다. 후속 P8 후보는 `fodh review record`로 Claude Agent 검수도 증거화하는 것이며 현재 제공되는 명령은 아니다 |
+| task 검수 면제(L4) | REVIEW→MERGE는 해당 task의 `kind: task, status: ok` meta 존재만으로 검수를 면제하며 시간 경계가 없다. 사소한 `codex task` 한 번으로도 면제될 수 있다. 라이브 T02에서는 Codex 구현 meta로 면제되어 haiku 두뇌가 직접 쓴 검수도 통과했다. Claude Agent 검수 경로에서는 하네스가 검수 증거를 만들 수 없기 때문이다. 후속 P8 후보는 `fodh review record`(검수 문서 경로·대상 커밋·모델 증거)로 Claude Agent 검수도 증거화하는 것이며 현재 제공되는 명령은 아니다 |
+| 커밋 비밀값 검사(P5) | 1 MB 초과·바이너리 untracked 파일은 내용의 비밀값 검사 없이 커밋되며 이름만 원장에 남는다 |
+| 검증 산출물(P6) | 검증 뒤 새로 더러워진 경로는 result.json·state.verify.dirtyAfter에 남는다. 검수 커밋의 clean 검사에서 거부되면 검증 산출물인지 확인하고 프로젝트 .gitignore 추가를 위임한다 |
 | git 프로젝트 판정(L5) | F8은 프로젝트 루트의 `.git`만 확인한다. git 저장소의 하위 디렉터리를 프로젝트 루트로 쓰면 비-git으로 판정되어 루트 폴백이 적용된다 |
 | 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령과 `sh -c '…'`·셸로 넘기는 heredoc 본문 안의 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
 | 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다 |

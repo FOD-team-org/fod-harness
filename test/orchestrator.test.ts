@@ -249,14 +249,14 @@ it('M5 WAIT_RESOURCE 사용자 명령은 오래된 retry도 해제한다',async(
   await test.command('develop-start');expect((await readState(test.root)).state).toBe('SPEC');
   expect((await readState(test.root)).retry).toBeUndefined();expect((await readState(test.root)).lastPaused).toBeUndefined();
 });
-it('H2 정체 판단①→ready→PICK→SPEC 흐름',async()=>{
+it('F22 정체 판단①→doing→PICK→IMPLEMENT 복귀',async()=>{
   const test=await setup();const task=await addTask(test.root,{title:'정체',category:'docs'});
-  await updateState(test.root,{state:'IMPLEMENT',taskId:task.id});await setTask(test.root,task.id,{status:'doing'});
+  await updateState(test.root,{state:'IMPLEMENT',taskId:task.id,doctor:{ok:true,checkedAt:new Date().toISOString()}});await setTask(test.root,task.id,{status:'doing'});
   for(let i=0;i<4;i++)await test.end();const item=(await readJudgment(test.root)).items[0];
   expect((await getTask(test.root,task.id)).status).toBe(`blocked(${item.id})`);
   await answerJudgment(test.root,item.id,'1');await test.command('judged',item.id);
-  expect((await getTask(test.root,task.id)).status).toBe('ready');expect((await readState(test.root)).state).toBe('PICK');
-  await test.command('develop-start');expect((await readState(test.root)).state).toBe('SPEC');
+  expect((await getTask(test.root,task.id)).status).toBe('doing');expect((await readState(test.root)).state).toBe('PICK');
+  await test.command('develop-start');expect((await readState(test.root)).state).toBe('IMPLEMENT');
 });
 it.each(['WAIT_JUDGMENT','DONE_ALL'])('L10: %s 종료는 알리고 자동 턴을 만들지 않는다',async state=>{
   const test=await setup();await updateState(test.root,{state});await test.end();

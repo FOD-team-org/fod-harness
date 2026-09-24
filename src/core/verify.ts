@@ -17,6 +17,16 @@ import { parseGroupRssMB } from './codex-supervisor.ts';
 import { sampleMemory } from './memory.ts';
 import { appendLedger } from './ledger.ts';
 import { harnessPath, atomicWrite } from './storage.ts';
+async function dirtyPaths(cwd: string): Promise<string[]> {
+  const { stdout } = await promisify(execFile)('git', ['-C', cwd, 'status', '--porcelain', '-z', '--untracked-files=all'], { timeout: 10000 });
+  const entries = stdout.split('\0'), paths: string[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]; if (!entry) continue;
+    paths.push(entry.slice(3));
+    if (/[RC]/u.test(entry.slice(0, 2))) i++;
+  }
+  return paths;
+}
 async function gitSnapshot(cwd: string): Promise<{ head: string | null; clean: boolean | null }> {
   const git = async (...args: string[]) => (await promisify(execFile)('git', ['-C', cwd, ...args], { timeout: 10000 })).stdout.trim();
   let repository = false;
@@ -37,11 +47,14 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
   if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
   const snapshot = await gitSnapshot(cwd);
+  const beforePaths = new Set(snapshot.head ? await dirtyPaths(cwd) : []);
   async function finish<T extends { ok: boolean }>(report: T) {
+    const dirtyAfter = snapshot.head ? (await dirtyPaths(cwd)).filter(path => !beforePaths.has(path)) : [];
+    const evidence = { ...snapshot, since: state.verifySince, ...(dirtyAfter.length ? { dirtyAfter } : {}) };
     const finishedAt = new Date().toISOString();
-    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd, ...snapshot };
+    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd, ...evidence };
     await atomicWrite(harnessPath(root, `verify/${runId}/result.json`), `${JSON.stringify(result, null, 2)}\n`);
-    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd, ...snapshot } });
+    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd, ...evidence } });
     return result;
   }
   const commands = options.heavy ? config.verify.heavy : config.verify.commands;

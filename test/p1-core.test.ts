@@ -94,7 +94,7 @@ it.each([undefined,'wrong','sha1'])('MERGE→DOCS는 현재 커밋 증거 %s를 
   const root=await project(),t=await addTask(root,input); await setTask(root,t.id,{review:{commit:'sha1',high:0}});
   await updateState(root,{state:'MERGE',taskId:t.id});
   if(commit==='sha1') expect((await transitionState(root,'DOCS',{taskId:t.id,commit})).state).toBe('DOCS');
-  else await expect(transitionState(root,'DOCS',{taskId:t.id,commit})).rejects.toThrow('검수 증거');
+  else await expect(transitionState(root,'DOCS',{taskId:t.id,commit})).rejects.toThrow(commit ? '--commit 이 review.commit 과 다릅니다' : '--commit <검수 커밋 sha> 를 넘기세요');
 });
 it('프로젝트 REVIEW와 task REVIEW는 서로의 출구를 쓸 수 없다', async () => {
   const root=await project(),t=await addTask(root,input);
@@ -248,7 +248,8 @@ it('별도 Node fodh 프로세스에서 새 CLI 흐름을 실제 실행한다',a
   const reclaimed=await cli(['judgment','add','--title','위임 필요','--background','P3 이전','--options','대기|검토','--recommend','대기','--blocks',t.id,'--reclaim']);
   expect(reclaimed).toMatchObject({reclaimed:true,next:'PICK'});
   await cli(['judgment','answer',reclaimed.judgment,'1']);expect((await cli(['judgment','apply',reclaimed.judgment])).applied).toHaveLength(1);
-  expect((await cli(['backlog','get',t.id])).status).toBe('ready');
+  expect((await cli(['backlog','get',t.id])).status).toBe('doing');
+  expect(await cli(['pick'])).toMatchObject({outcome:'RESUME',next:'SPEC'});
 });
 it.each([['DOCS','CLEANUP'],['IMPLEMENT','RECLAIM']])('task 비필수 전이 %s→%s도 다른 task 주입을 거부한다',async(from,to)=>{
   const root=await project(),a=await addTask(root,input),b=await addTask(root,input);

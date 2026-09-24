@@ -56,6 +56,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     if (!ctxLike.isIdle()) return { skipped: 'busy' };
     let state = await readState(root);
     if (state.userAborted) return { skipped: 'user-aborted' };
+    if (state.awaitingUser && reason === 'slot-free' && state.lastPaused === 'slot') state = await updateState(root, { awaitingUser: false });
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
     if (state.awaitingSlot) {
       if (await slotOwnerAlive(state.awaitingSlot.owner)) return { skipped: 'slot' };

@@ -118,3 +118,15 @@ it('F16 위임 템플릿은 공식 슬롯 대기만 안내한다', async () => {
     expect(text).toContain('가짜 runId 금지');
   }
 });
+
+it('F19 MERGE는 루트 병합·커밋 기록·검수 SHA 전이를 순서대로 안내한다', async () => {
+  const text = await readFile('templates/prompts/MERGE.md', 'utf8');
+  const commands = ['fodh backlog get {{taskId}}', 'git merge --no-ff <task 브랜치>',
+    'fodh backlog set {{taskId}} --merge-commit $(git rev-parse HEAD)',
+    'fodh state transition DOCS --task {{taskId}} --commit <review.commit>'];
+  expect(commands.map(command => text.indexOf(command))).toEqual([...commands.map(command => text.indexOf(command))].sort((a, b) => a - b));
+  for (const command of commands) expect(text).toContain(command);
+  expect(text).toContain('프로젝트 루트(워크트리 아님)');
+  expect(text).toContain('review.commit 을 바꾸는 판단을 만들지 않는다');
+  expect(text).toContain('--reclaim');
+});

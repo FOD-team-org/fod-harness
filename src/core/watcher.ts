@@ -17,10 +17,10 @@ import { listProcs } from './procs.ts';
 import { activeStates, isPaused, readState, updateState } from './state.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
-import { slotOwnerIdentity } from './slots.ts';
+import { slotOwnerIdentity, slotsPath, type Slots } from './slots.ts';
 
 export interface WatchState {
-  slotCheck?: { since: string; at: string; ownerRunId?: string; unknownCount?: number; unknownNotified?: boolean };
+  slotCheck?: { since: string; at: string; ownerRunId?: string; ownerKey?: string; unknownCount?: number; unknownNotified?: boolean };
   memory?: MemoryWatch; memorySampleFailed?: boolean;
   lastTickAt?: string;
   judgment: { path?: string; observed: { hash: string | null; since: string }; lastEmitted?: string | null };
@@ -127,15 +127,33 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
       const waiting = state.awaitingSlot;
       const slotWait = (current: typeof state) => current.state === 'paused(slot)'
         || ['PICK', 'WAIT_RESOURCE'].includes(current.state) && current.lastPaused === 'slot';
-      if (waiting && !slotWait(state)) {
-        await updateState(root, current => !slotWait(current) && current.awaitingSlot?.since === waiting.since
+      if (waiting && !activeStates.has(state.state) && !slotWait(state)) {
+        await updateState(root, current => !activeStates.has(current.state) && !slotWait(current) && current.awaitingSlot?.since === waiting.since
           && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});
         delete watch.slotCheck;
-      } else if (waiting && (watch.slotCheck?.since !== waiting.since || watch.slotCheck.ownerRunId !== waiting.owner.runId
+      } else if (waiting && slotWait(state) && (watch.slotCheck?.since !== waiting.since || watch.slotCheck.ownerRunId !== waiting.owner.runId
         || now - Date.parse(watch.slotCheck.at) >= 60000)) {
-        const previous = watch.slotCheck?.since === waiting.since && watch.slotCheck.ownerRunId === waiting.owner.runId ? watch.slotCheck : undefined;
-        const identity = await slotOwnerIdentity(waiting.owner);
-        watch.slotCheck = { since: waiting.since, at, ownerRunId: waiting.owner.runId,
+        const slots = await readJson<Slots>(slotsPath(), { codex: null, heavy: null, claude: null });
+        let owner = waiting.owner, identity = 'gone';
+        for (const kind of ['heavy', 'codex'] as const) {
+          const held = slots[kind];
+          if (!held) continue;
+          owner = kind === 'heavy' ? { ...held, kind } : held;
+          const status = await slotOwnerIdentity({ ...held, kind });
+          if (['owned', 'unknown', 'orphan'].includes(status)) {
+            owner = kind === 'heavy' ? { ...held, kind } : held; identity = status; break;
+          }
+        }
+        const ownerKey = JSON.stringify(owner);
+        if (ownerKey !== JSON.stringify(waiting.owner)) {
+          await updateState(root, current => current.awaitingSlot?.since === waiting.since
+            && JSON.stringify(current.awaitingSlot.owner) === JSON.stringify(waiting.owner)
+            ? { awaitingSlot: { ...waiting, owner } } : {});
+          await appendLedger(root, { runId: owner.runId, action: 'slot:owner-changed', status: 'ok',
+            evidence: { previous: waiting.owner, owner } });
+        }
+        const previous = watch.slotCheck?.since === waiting.since && watch.slotCheck.ownerKey === ownerKey ? watch.slotCheck : undefined;
+        watch.slotCheck = { since: waiting.since, at, ownerRunId: owner.runId, ownerKey,
           unknownCount: identity === 'unknown' ? (previous?.unknownCount ?? 0) + 1 : 0,
           unknownNotified: previous?.unknownNotified };
         if (watch.slotCheck.unknownCount! >= 10 && !watch.slotCheck.unknownNotified) {
@@ -144,7 +162,7 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
           watch.slotCheck.unknownNotified = true;
         }
         if (!['owned', 'unknown', 'orphan'].includes(identity)) await emit({ kind: 'slot-free',
-          dedupeKey: `slot-free:${waiting.since}:${waiting.owner.runId}`, since: waiting.since, ownerRunId: waiting.owner.runId }, true);
+          dedupeKey: `slot-free:${waiting.since}:${owner.runId}`, since: waiting.since, ownerRunId: owner.runId }, true);
       } else if (!waiting) delete watch.slotCheck;
       const procs = await listProcs(root);
       const aliveByPid = new Map<number, boolean>();

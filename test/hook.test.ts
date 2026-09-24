@@ -379,3 +379,12 @@ it.each([
 it.each(['rm -rf .pi', 'rm -rf /tmp/example', 'find docs -delete', 'git clean -fdx'])('L11 미초기화에도 삭제 규칙 적용: %s', async command => {
   expect(await invoke('Bash', { command }, 'IDLE', { ...brain, stateFile: 'missing' })).toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
 });
+
+it.each(['branch -f main abc123', 'branch -D topic', 'checkout -B main abc123', 'update-ref refs/heads/main abc123',
+  'reset --soft HEAD~1', 'reset --hard HEAD~1', 'reset --mixed HEAD~1', 'reset HEAD~1', 'rebase topic',
+  'filter-branch --all', 'reflog expire --expire=now --all', '-C wt branch -f main abc123'])('P3 모든 상태에서 두뇌 git %s 보호', async command => {
+  for (const stage of ['IMPLEMENT', 'MERGE', 'IDLE']) {
+    expect(await invoke('Bash', { command: `git ${command}` }, stage, brain))
+      .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+  }
+});

@@ -3,7 +3,7 @@ import { cancel } from './codex.ts';
 import { getTask, setTask } from './backlog.ts';
 import { readJudgment } from './judgment.ts';
 import { listProcs, type ProcRecord } from './procs.ts';
-import { readState, transitionState, updateState, allowedTransition } from './state.ts';
+import { readState, transitionState, updateState, allowedTransition, taskStates } from './state.ts';
 import { harnessPath, withFileLock } from './storage.ts';
 
 export async function cleanupReport(root: string, resetFailures = true) {
@@ -21,13 +21,18 @@ export async function cleanupReport(root: string, resetFailures = true) {
 }
 export async function reclaimTask(root: string, taskId: string, judgmentId: string, options: { suspended?: boolean } = {}) {
   return withFileLock(harnessPath(root, 'harness-reclaim'), async () => {
-    await getTask(root, taskId);
+    const task = await getTask(root, taskId);
     const judgment = (await readJudgment(root)).items.find(item => item.id === judgmentId);
     if (!judgment || !judgment.blocks.split(/[,\s]+/u).includes(taskId)) throw new Error('task를 막는 열린 판단 번호가 필요합니다');
     const state = await readState(root);
     if (state.taskId !== taskId) throw new Error('현재 task만 회수할 수 있습니다');
     const retry = state.state === 'CLEANUP' && (state.pendingReclaim as { taskId?: string; judgmentId?: string } | undefined)?.taskId === taskId
       && (state.pendingReclaim as { judgmentId?: string }).judgmentId === judgmentId;
+    const resumeState = taskStates.includes(state.state) ? state.state : state.resumeTask?.resumeState ?? state.resumeState;
+    if (!retry && ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status) && resumeState) {
+      await setTask(root, taskId, { resume: { status: task.status, state: resumeState, at: new Date().toISOString() } });
+      await updateState(root, { resumeTask: { taskId, resumeState } });
+    }
     if (retry) await updateState(root, { state: 'RECLAIM' });
     if (state.state !== 'RECLAIM' && !retry) {
       if (options.suspended && !allowedTransition(state.state, 'RECLAIM')) await updateState(root, { state: 'RECLAIM' });

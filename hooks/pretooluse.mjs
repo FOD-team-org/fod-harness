@@ -217,8 +217,13 @@ try {
       const patch = patchTarget(words, cwd);
       if (patch && !inWorktree(patch)) deny('패치 적용은 워크트리에서만 허용합니다.', 'boundary');
       if (action === 'worktree' && args.some(w => ['add', 'remove', 'prune'].includes(w))) deny('git worktree 직접 실행 대신 fodh worktree를 사용하세요.', 'boundary');
-      if (action === 'branch' && args.includes('-D') || action === 'reset' && args.includes('--hard')
-        || action === 'push' && args.some(w => w.startsWith('--force') || w === '-f')) deny('두뇌의 파괴적 git 변경은 금지합니다. 사용자 터미널에서 처리하세요.', 'boundary');
+      const gitArgs = action ? args.slice(args.indexOf(action) + 1) : [];
+      if (action === 'branch' && gitArgs.some(w => /^-[^-]*[fD]/.test(w) || w === '--force')
+        || action === 'checkout' && gitArgs.some(w => w === '-B' || w.startsWith('-B') && w.length > 2)
+        || ['update-ref', 'rebase', 'filter-branch'].includes(action)
+        || action === 'reset' && gitArgs.length > 0
+        || action === 'reflog' && gitArgs.includes('expire')) deny('두뇌의 git 이력·참조 재작성은 금지합니다. 사용자 터미널에서 처리하세요.', 'guard');
+      if (action === 'push' && args.some(w => w.startsWith('--force') || w === '-f')) deny('두뇌의 파괴적 git 변경은 금지합니다. 사용자 터미널에서 처리하세요.', 'boundary');
       if (executable === 'rm' && args.some(w => /^-[^-]*[rfR]/.test(w) || ['--recursive', '--force'].includes(w))) {
         for (const value of paths) {
           const path = normalizePath(resolve(cwd, value));

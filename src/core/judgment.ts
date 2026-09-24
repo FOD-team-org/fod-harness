@@ -89,27 +89,20 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
   if (negative.test(answer)) {
     return { kind: 'ambiguous', applicable: false, reason: '부정 또는 유보가 포함되어 있습니다' };
   }
-  // 번호 사이 공백·접속사 유무와 관계없이 복수 선택은 재질문한다.
-  // 단, "2, 단 1회만" 같은 조건의 수량은 선택 번호로 세지 않는다.
-  const references = [...answer.matchAll(/\d+|[①-⑳]/gu)].filter(match => {
-    if (circled.includes(match[0])) return true;
-    const suffix = answer.slice(match.index! + match[0].length);
-    return !/^\s*(?:회|분|초|시간|일|월|년|개|명|%)(?=$|\s|[,.;]|만|까지|이내|후|내|동안|마다)/u.test(suffix);
-  });
-  if (references.length > 1) return { kind: 'ambiguous', applicable: false, reason: '선택 번호가 여러 개입니다' };
-  if (/모두|제외|전부/u.test(answer) && references.length === 0
+  const circles = [...answer.matchAll(/[①-⑩]/gu)];
+  const leading = answer.match(/^(10|[1-9])(?=$|[\s\p{P}])/u);
+  if (circles.length > 1 || (!circles.length && /^(?:10|[1-9])(?=$|[\s\p{P}])(?:\s*(?:[,/]|또는|혹은|및|와|과|하고)\s*|\s+)(?:10|[1-9])(?=$|[\s\p{P}])/u.test(answer))) {
+    return { kind: 'ambiguous', applicable: false, reason: '선택 번호가 여러 개입니다' };
+  }
+  if (/모두|제외|전부/u.test(answer) && !circles.length && !leading
     && /선택|항목|옵션|둘|다|모두|전부/u.test(answer)) {
     return { kind: 'ambiguous', applicable: false, reason: '다중 선택 문맥입니다' };
   }
-  const normalized = [...answer].map(value => circled.includes(value) ? String(circled.indexOf(value) + 1) : value).join('');
-  if (/^\d+\s*(?:[,/]|또는|혹은|및|와|과|하고|\s)\s*\d+(?:\D|$)/u.test(normalized)) {
-    return { kind: 'ambiguous', applicable: false, reason: '선택 번호가 여러 개입니다' };
-  }
-  const match = normalized.match(/^(\d+)(?=$|[\s,.，:.)]|번)(?:번)?[.)]?\s*(.*)$/u);
-  if (match) {
-    const selection = Number(match[1]);
-    if (selection < 1 || selection > options.length) return { kind: 'ambiguous', applicable: false, reason: '선택지 범위를 벗어났습니다' };
-    const condition = match[2]!.replace(/^[,，:]\s*/u, '').trim();
+  if (circles.length || leading) {
+    const selection = circles.length ? circled.indexOf(circles[0][0]) + 1 : Number(leading![1]);
+    if (selection > options.length) return { kind: 'ambiguous', applicable: false, reason: '선택지 범위를 벗어났습니다' };
+    const condition = (circles.length ? answer.replace(circles[0][0], '') : answer.slice(leading![0].length))
+      .replace(/^[\s,，:.)]+/u, '').trim();
     const interpretation = options[selection - 1]!;
     return condition
       ? { kind: 'conditional', applicable: true, selection, condition, interpretation: `${interpretation}; 조건: ${condition}` }
@@ -357,7 +350,10 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
         relevant = true;
         const other = document.items.find(item => !item.followup && !entry.releases.includes(item.id)
           && item.blocks.split(/[,\s]+/u).includes(task.id));
-        const status = entry.hold ? task.status : other ? `blocked(${other.id})` : 'ready';
+        const status = entry.hold ? task.status : other ? `blocked(${other.id})` : task.resume?.status ?? 'ready';
+        if (!entry.hold && !other && task.resume) await updateState(root, {
+          resumeTask: { taskId: task.id, resumeState: task.resume.state },
+        });
         await setTask(root, task.id, { status, judgment: entry.hold ? task.judgment : other?.id ?? '',
           notes: [task.notes, `${entry.id}: ${entry.interpretation}`].filter(Boolean).join('\n') });
       }

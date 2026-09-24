@@ -6,25 +6,35 @@ import { project, cli } from './p5-helpers.ts';
 import { addTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState } from '../src/core/state.ts';
 import { commitWorktree, validateTaskCommit } from '../src/core/worktree.ts';
+import { runVerify } from '../src/core/verify.ts';
+import { setConfig } from '../src/core/config.ts';
 import { readLedger } from '../src/core/ledger.ts';
 
+async function verify(root: string) {
+  await setConfig(root, 'verify.commands', JSON.stringify([`${process.execPath} -e "process.exit(0)"`]));
+  expect((await runVerify(root)).ok).toBe(true);
+}
 async function implement(root: string, path: string, taskId: string) {
   await writeFile(join(path, 'code.txt'), 'implemented\n');
   const result = await commitWorktree(root, taskId, 'implementation');
   if (!('commit' in result)) throw new Error('commit missing');
+  await verify(root);
   return result.commit;
 }
 it('H1 실제 git: base·없는 SHA·dirty·과거 SHA 거부, 새 HEAD만 검수 허용', { timeout: 60_000 }, async () => {
   const { root, path, task, base, worktree } = await gitProject();
   expect((await readState(root)).worktrees?.[0]).toMatchObject({ base, branch: worktree.branch });
-  for (const sha of [base, 'deadbeef']) await expect(validateTaskCommit(root, task.id, sha, 'review')).rejects.toThrow('검수 대상');
-  const commit = await implement(root, path, task.id);
+  await verify(root);
   await expect(validateTaskCommit(root, task.id, base, 'review')).rejects.toThrow('검수 대상');
+  await expect(validateTaskCommit(root, task.id, 'deadbeef', 'review')).rejects.toThrow();
+  const commit = await implement(root, path, task.id);
+  await expect(validateTaskCommit(root, task.id, base, 'review')).rejects.toThrow('검증 시점 HEAD');
   await writeFile(join(path, 'dirty.txt'), 'dirty');
   expect((await cli(root, ['backlog', 'set', task.id, '--review-commit', commit])).code).toBe(1);
   await git(path, 'add', '.'); await git(path, 'commit', '-m', 'followup');
   const head = await git(path, 'rev-parse', 'HEAD');
-  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('검수 대상');
+  await verify(root);
+  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('검증 시점 HEAD');
   expect((await cli(root, ['backlog', 'set', task.id, '--review-commit', head])).code).toBe(0);
 });
 it.each(['merge', 'ff'])('H1 실제 %s 병합 전 review 자체는 거부하고 병합 뒤 루트 HEAD만 인정한다', { timeout: 60_000 }, async mode => {
@@ -129,4 +139,56 @@ it('S1 detached 루트의 create는 거부하고 기존 baseBranch 누락은 경
   await updateState(root, state => ({ worktrees: state.worktrees?.map(item => ({ ...item, baseBranch: undefined })) }));
   await validateTaskCommit(root, task.id, review, 'merge', review);
   expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'merge-commit:base-branch-unknown', taskId: task.id }));
+});
+
+it('P3 MERGE 진입 루트 HEAD를 보존하고 base 브랜치 강제 이동을 거부한다', { timeout: 60_000 }, async () => {
+  const { transitionState } = await import('../src/core/state.ts');
+  const { atomicWrite } = await import('../src/core/storage.ts');
+  const { metaPath } = await import('../src/core/codex-record.ts');
+  const { root, path, task } = await gitProject();
+  const review = await implement(root, path, task.id);
+  await setTask(root, task.id, { review: { commit: review, high: 0 } });
+  await writeFile(join(root, 'root.txt'), 'root advancement');
+  await git(root, 'add', '.'); await git(root, 'commit', '-m', 'root advancement');
+  const beforeMerge = await git(root, 'rev-parse', 'HEAD');
+  await updateState(root, { doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  await transitionState(root, 'REVIEW', task.id);
+  await atomicWrite(metaPath(root, 'evidence'), JSON.stringify({ kind: 'task', taskId: task.id, status: 'ok' }));
+  await transitionState(root, 'MERGE', task.id);
+  expect((await readState(root)).mergeBase).toBe(beforeMerge);
+  await git(root, 'checkout', '--detach');
+  await git(root, 'branch', '-f', 'main', review);
+  await git(root, 'checkout', 'main');
+  await expect(validateTaskCommit(root, task.id, review, 'merge')).rejects.toThrow('병합 커밋');
+  await git(root, 'checkout', '--detach'); await git(root, 'branch', '-f', 'main', beforeMerge); await git(root, 'checkout', 'main');
+  await git(root, 'merge', '--no-ff', review, '-m', 'proper merge');
+  await writeFile(join(root, 'uncommitted-harness.txt'), 'root need not be clean');
+  await validateTaskCommit(root, task.id, await git(root, 'rev-parse', 'HEAD'), 'merge');
+});
+it('P4 검증 증거 필수·다른 task/과거 증거 거부·짧은 SHA 허용', { timeout: 60_000 }, async () => {
+  const { root, path, task } = await gitProject();
+  await writeFile(join(path, 'code.txt'), 'implementation');
+  const commit = await commitWorktree(root, task.id, 'implementation');
+  if (!('commit' in commit)) throw new Error('commit missing');
+  await expect(validateTaskCommit(root, task.id, commit.commit, 'review')).rejects.toThrow('검증 증거가 없습니다');
+  await verify(root);
+  const proof = (await readState(root)).verify!;
+  for (const patch of [{ taskId: 'T99' }, { at: '2000-01-01T00:00:00Z' }, { ok: false }]) {
+    await updateState(root, { verify: { ...proof, ...patch } });
+    await expect(validateTaskCommit(root, task.id, commit.commit, 'review')).rejects.toThrow('검증 증거가 없습니다');
+  }
+  await updateState(root, { verify: proof });
+  expect((await cli(root, ['backlog', 'set', task.id, '--review-commit', commit.commit.slice(0, 7)])).code).toBe(0);
+});
+it('P6 검증이 만든 dirty 경로는 결과·상태·검수 거부 진단에 남는다', { timeout: 60_000 }, async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { root, path, task } = await gitProject();
+  const commit = await implement(root, path, task.id);
+  await setConfig(root, 'verify.commands', JSON.stringify([`${process.execPath} -e "require('node:fs').writeFileSync('verify-output.txt','generated')"`]));
+  const report = await runVerify(root);
+  expect(report).toMatchObject({ ok: true, dirtyAfter: ['verify-output.txt'] });
+  expect((await readState(root)).verify?.dirtyAfter).toEqual(['verify-output.txt']);
+  if (!('runId' in report)) throw new Error('result missing');
+  expect(JSON.parse(await readFile(join(root, '.pi/verify', report.runId, 'result.json'), 'utf8')).dirtyAfter).toEqual(['verify-output.txt']);
+  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('verify-output.txt — 검증 산출물이면 프로젝트 .gitignore 에 추가(위임)');
 });

@@ -32,7 +32,11 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
     return { outcome: 'RESUME', next: current.resumeState, reason: '슬롯 대기로 중단된 프로젝트 단계로 복귀' };
   }
   const pending = backlog.filter(task => task.status !== 'done');
-  const resumable = pending.find(task => task.id === current.taskId && inProgress(task));
+  const activeTask = pending.find(task => task.id === state.taskId && (task.status === 'ready' || inProgress(task)));
+  if (activeTask && taskStates.includes(state.state)) {
+    return { outcome: 'RESUME', task: activeTask, next: state.state, reason: '현재 task 단계를 유지' };
+  }
+  const resumable = pending.find(task => task.id === current.taskId && (task.status === 'ready' || inProgress(task)));
   if (resumable && taskStates.includes(current.resumeState ?? '')) {
     return { outcome: 'RESUME', task: resumable, next: current.resumeState, reason: '중단된 현재 task의 원래 단계로 복귀' };
   }
@@ -74,10 +78,15 @@ export async function runPick(root: string, resources: PickResources = { slots: 
     if (state.state === 'WAIT_RETRY' && (!state.retry?.nextAt || Date.parse(state.retry.nextAt) <= now)) {
       state = await transitionState(root, 'PICK', { now });
     }
-    if (!['PICK', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(state.state)) {
+    if (!['PICK', 'WAIT_RETRY', 'WAIT_RESOURCE', ...taskStates].includes(state.state)) {
       throw new Error('PICK 상태에서만 작업을 선택할 수 있습니다');
     }
     const decision = decidePick(await listBacklog(root), state, { ...resources, now });
+    if (decision.outcome !== 'WAIT_RESOURCE') await updateState(root, { lastPaused: undefined });
+    if (taskStates.includes(state.state)) {
+      if (decision.outcome === 'RESUME') return decision;
+      throw new Error('현재 task를 먼저 완료하거나 회수해야 합니다');
+    }
     if (state.state === 'WAIT_RESOURCE' && decision.outcome === 'WAIT_RESOURCE') return decision;
     if (state.state === 'WAIT_RETRY' && decision.outcome === 'WAIT_RETRY') return decision;
     if (state.state !== 'PICK') state = await transitionState(root, 'PICK', { now });

@@ -5,6 +5,7 @@ import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './st
 
 export interface Task {
   id: string; title: string; category: string; depends: string[]; status: string; repair: number;
+  resume?: { status: string; state: string; at: string };
   delegate?: 'codex' | 'claude'; codexThread?: string;
   judgment: string; worktree: string; notes: string;
   verify?: { ok?: boolean; runId?: string; at?: string }; review?: { commit?: string; high?: number }; merge?: { commit?: string };

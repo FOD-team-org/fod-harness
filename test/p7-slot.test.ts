@@ -2,7 +2,7 @@ import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { project } from './p5-helpers.ts';
+import { project as baseProject } from './p5-helpers.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState, transitionState } from '../src/core/state.ts';
 import { tick, pendingDecisions } from '../src/core/watcher.ts';
@@ -15,27 +15,34 @@ import { autoResume } from '../extensions/orchestrator/resume.ts';
 
 const waiting = { kind: 'codex' as const, since: '2026-09-24T00:00:00Z',
   owner: { root: '/fixture/other', runId: 'busy', pid: 99999999, startedAt: 'fixture', acquiredAt: 'fixture' } };
+async function project(stage = 'INTERVIEW') {
+  const root = await baseProject(stage);
+  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
+  await mkdir(join(root, 'slots'));
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: waiting.owner, heavy: null }));
+  return root;
+}
 it.each([false, true])('F16 턴 종료 슬롯 대기: 활성 위임=%s', async delegated => {
   const root = await project('IMPLEMENT');
-  await updateState(root, { taskId: 'T01', awaitingSlot: waiting,
+  await updateState(root, { taskId: 'T01', awaitingSlot: waiting, awaitingUser: true,
     ...(delegated ? { delegation: { runId: 'real', kind: 'task', taskId: 'T01', startedAt: 'now' } } : {}) });
   await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
   vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
     const sid = options.args![options.args!.indexOf('--session-id') + 1];
     await options.onEvent?.({ type: 'system', subtype: 'init', session_id: sid, apiKeySource: 'none', permissionMode: 'bypassPermissions', model: 'haiku' });
-    await options.onEvent?.({ type: 'result', is_error: false, result: '대기: 슬롯 codex' });
+    await options.onEvent?.({ type: 'result', is_error: false, result: '대기: 사용자' });
     return { code: 0, cleaned: true, stderr: '' };
   });
   expect((await runTurn('fixture', { root, model: 'haiku', env: { HOME: root } })).reason).toBe('stop');
   expect(await readState(root)).toMatchObject({ state: delegated ? 'IMPLEMENT' : 'paused(slot)', taskId: 'T01',
-    ...(!delegated ? { resumeState: 'IMPLEMENT', lastPaused: 'slot' } : {}) });
+    ...(!delegated ? { resumeState: 'IMPLEMENT', lastPaused: 'slot', awaitingUser: false } : {}) });
 });
 it.each(['IMPLEMENT', 'REVIEW', 'FIX', 'RESEARCH', 'PROJECT_REVIEW'])('F16 %s 60초 감시→인박스→자동 PICK→RESUME', async stage => {
   const root = await project('PICK'), projectPhase = stage === 'RESEARCH' || stage === 'PROJECT_REVIEW';
   const original = stage === 'PROJECT_REVIEW' ? 'REVIEW' : stage;
   const task = projectPhase ? undefined : await addTask(root, { title: '대기', category: 'docs' });
   if (task) await setTask(root, task.id, { status: stage === 'FIX' ? 'fix' : stage === 'REVIEW' ? 'review' : 'doing' });
-  await updateState(root, { state: original, taskId: task?.id, phase: projectPhase ? 'project' : 'task', awaitingSlot: waiting,
+  await updateState(root, { state: original, taskId: task?.id, phase: projectPhase ? 'project' : 'task', awaitingSlot: waiting, awaitingUser: true,
     doctor: { ok: true, checkedAt: new Date().toISOString() } });
   const reviewSince = (await readState(root)).reviewSince;
   await updateState(root, { state: 'paused(slot)' });
@@ -64,7 +71,8 @@ it('F16 paused(slot) 복귀·낡은 인박스 무시·대기 표지와 자동 �
   const pi = { registerCommand: vi.fn(), on: (name: string, fn: any) => handlers.set(name, fn), sendMessage } as unknown as ExtensionAPI;
   orchestrator(pi);
   const ctx = { cwd: root, hasUI: true, isIdle: () => true, ui: { notify: vi.fn() } };
-  await handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '대기: 슬롯 codex\n상태: RESEARCH' }] }] }, ctx);
+  await handlers.get('agent_end')!({ messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: '대기: 사용자\n상태: RESEARCH' }] }] }, ctx);
+  expect(await readState(root)).toMatchObject({ state: 'paused(slot)', awaitingUser: false });
   expect((await readState(root)).autoTurns).toBe(0); expect(sendMessage).not.toHaveBeenCalled();
   vi.spyOn(slots, 'slotOwnerAlive').mockResolvedValue(true);
   expect(await autoResume(pi, root, { ...ctx, notify: vi.fn() }, 'stalled')).toEqual({ skipped: 'slot' });
@@ -144,4 +152,68 @@ it('S2 paused(slot)→PICK→WAIT_RESOURCE 표지 유지 후 소유자 사망→
   expect((await readState(root)).awaitingSlot).toBeUndefined();
   expect((await runPick(root)).outcome).toBe('RESUME');
   expect((await readState(root)).state).toBe('RESEARCH');
+});
+
+it('F17 현재 슬롯 파일의 빈 상태·소유자 교체·사망 및 P1 활성 표지 보존', async () => {
+  const root = await project('IMPLEMENT');
+  await updateState(root, { awaitingSlot: waiting });
+  const identity = vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('owned');
+  await tick(root);
+  expect((await readState(root)).awaitingSlot).toEqual(waiting);
+  await updateState(root, { state: 'paused(slot)' });
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: null }));
+  const now = Date.now();
+  expect((await tick(root, { now })).emitted.map(e => e.kind)).toContain('slot-free');
+  expect(identity).not.toHaveBeenCalled();
+  const owner = { ...waiting.owner, runId: 'replacement', pid: 99999998 };
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: owner, heavy: null }));
+  expect((await tick(root, { now: now + 60000 })).emitted).toEqual([]);
+  expect((await readState(root)).awaitingSlot?.owner).toEqual(owner);
+  const { readLedger } = await import('../src/core/ledger.ts');
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'slot:owner-changed' }));
+  identity.mockResolvedValue('gone');
+  expect((await tick(root, { now: now + 120000 })).emitted.map(e => e.kind)).toContain('slot-free');
+});
+it('F17 stale heavy가 있어도 살아 있는 codex를 기다린다', async () => {
+  const root = await project('IMPLEMENT');
+  await updateState(root, { state: 'paused(slot)', awaitingSlot: waiting });
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: waiting.owner, heavy: { ...waiting.owner, runId: 'heavy' } }));
+  vi.spyOn(slots, 'slotOwnerIdentity').mockImplementation(async owner => owner.runId === 'heavy' ? 'gone' : 'owned');
+  expect((await tick(root)).emitted).toEqual([]);
+});
+it('F18 legacy awaitingUser도 slot-free 자동 재개에서는 무시한다', async () => {
+  const root = await project('PICK');
+  await updateState(root, { awaitingUser: true, lastPaused: 'slot', phase: 'project', resumeTask: { resumeState: 'RESEARCH' } });
+  expect(await autoResume({ sendMessage: vi.fn() } as unknown as ExtensionAPI, root,
+    { cwd: root, hasUI: true, isIdle: () => true, notify: vi.fn() }, 'slot-free')).toEqual({ resumed: true });
+  expect((await runPick(root)).outcome).toBe('RESUME');
+});
+it('F17/F18 살아 있는 이전 소유자·빈 파일→slot-free→자동 RESUME', async () => {
+  const root = await project('RESEARCH');
+  await updateState(root, { phase: 'project', awaitingSlot: waiting, awaitingUser: true });
+  await updateState(root, { state: 'paused(slot)' });
+  vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('owned');
+  vi.spyOn(slots, 'slotOwnerAlive').mockResolvedValue(true);
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: null }));
+  const records = (await tick(root)).emitted, sendMessage = vi.fn();
+  await decideInbox({ sendMessage } as unknown as ExtensionAPI,
+    { cwd: root, hasUI: true, isIdle: () => true, ui: { notify: vi.fn() } } as never, root, records);
+  expect(sendMessage).toHaveBeenCalledOnce();
+  expect((await runPick(root)).outcome).toBe('RESUME');
+  expect(await readState(root)).toMatchObject({ state: 'RESEARCH', awaitingUser: false });
+  const { readLedger } = await import('../src/core/ledger.ts');
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'wait:override', evidence: { reason: 'slot' } }));
+});
+it('F17 unknown 누적은 현재 파일 소유자가 바뀌면 처음부터 센다', async () => {
+  const root = await project('IMPLEMENT');
+  await updateState(root, { state: 'paused(slot)', awaitingSlot: waiting });
+  vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('unknown');
+  const now = Date.now();
+  for (let i = 0; i < 9; i++) await tick(root, { now: now + i * 60000 });
+  await writeFile(slots.slotsPath(), JSON.stringify({ codex: { ...waiting.owner, runId: 'new-unknown' }, heavy: null }));
+  await tick(root, { now: now + 9 * 60000 });
+  const { readJson, harnessPath } = await import('../src/core/storage.ts');
+  expect(await readJson(harnessPath(root, 'harness-watcher.json'), {})).toMatchObject({ watch: { slotCheck: { ownerRunId: 'new-unknown', unknownCount: 1 } } });
+  const { readLedger } = await import('../src/core/ledger.ts');
+  expect((await readLedger(root)).filter(e => e.action === 'notify:slot:unknown-owner')).toHaveLength(0);
 });
