@@ -6,6 +6,7 @@
 3. 반환 runId 전체로 `대기: 위임 <runId>`를 마지막 비어 있지 않은 3줄 안에 쓰고 턴을 끝낸다.
 4. 재개 후 `fodh codex result <runId>`를 확인한다.
 5. `fodh docs scaffold research-r --topic <주제>`에 근거·출처·미확인을 기록하고 검수한다.
+`codex 슬롯 사용 중` 오류면 다른 방법을 찾지 말고 `대기: 슬롯 codex`로 턴을 끝낸다(가짜 runId 금지).
 ## 산출물
 {{docsRoot}}/조사/ 질문과 결과. read-only 위임이므로 보고서 저장은 두뇌가 한다.
 ## 끝내는 조건

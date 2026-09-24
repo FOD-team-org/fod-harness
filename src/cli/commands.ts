@@ -10,6 +10,7 @@ export const commandTable: { group: string; action?: string }[] = [
   { group: 'codex', action: 'cancel' },
   { group: 'slots', action: 'status' },
   { group: 'worktree', action: 'create' },
+  { group: 'worktree', action: 'commit' },
   { group: 'worktree', action: 'remove' },
   { group: 'worktree', action: 'list' },
   { group: 'config', action: 'get' },

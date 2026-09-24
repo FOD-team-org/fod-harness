@@ -5,6 +5,7 @@
 3. scaffold 결과의 `path`를 `--spec`에 쓴다. Codex면 `fodh codex task --task {{taskId}} --spec <scaffold 결과의 path> --resume last`로 위임한다. codexThread가 없으면 --resume 없이 시작한다.
 4. Claude면 설정의 Claude Agent로 등록 워크트리 안에서 수정 위임한다.
 5. 실제 runId 전체로 `대기: 위임 <runId>`를 마지막 비어 있지 않은 3줄 안에 쓰고 재개 후 `fodh codex result <runId>`로 확인한다.
+`codex 슬롯 사용 중` 오류면 다른 방법을 찾지 말고 `대기: 슬롯 codex`로 턴을 끝낸다(가짜 runId 금지).
 ## 산출물
 실제 수정과 관련 검증 결과.
 ## 끝내는 조건

@@ -2,9 +2,9 @@ import { expect, it, vi } from 'vitest';
 import { ChildProcess, spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { project } from './p5-helpers.ts';
+import { project, cli } from './p5-helpers.ts';
 import { addTask, setTask } from '../src/core/backlog.ts';
-import { updateState } from '../src/core/state.ts';
+import { updateState, readState } from '../src/core/state.ts';
 import { startCodex } from '../src/core/codex.ts';
 import { readLedger } from '../src/core/ledger.ts';
 import * as slots from '../src/core/slots.ts';
@@ -62,4 +62,19 @@ it('F8 비-git 프로젝트는 기존 루트 폴백과 증거를 유지한다', 
   const { root, start } = await setup(false);
   expect(await start()).toMatchObject({ cwd: root, worktree: null, kind: 'task' });
   expect((await readLedger(root)).find(e => e.action === 'codex:task' && e.status === 'pre')?.evidence).toMatchObject({ fallback: 'root' });
+});
+
+it('F16 슬롯 거부는 owner·wait를 기록하고 다음 획득 성공 때 해제한다', async () => {
+  const { root, task, start } = await setup(false);
+  const owner = { root: '/fixture/other', runId: 'busy', pid: 99999999, startedAt: 'fixture', acquiredAt: 'fixture' };
+  await updateState(root, { delegation: { kind: 'task', runId: 'stale', taskId: task.id, startedAt: 'old' }, awaitingDelegation: true });
+  vi.mocked(slots.acquireSlot).mockResolvedValueOnce({ acquired: false, owner });
+  expect(await cli(root, ['codex', 'task', '--spec', 'spec.md', '--task', task.id])).toMatchObject({ code: 1,
+    value: { error: 'codex 슬롯 사용 중', wait: 'slot', owner } });
+  expect((await readState(root)).delegation).toBeUndefined();
+  expect((await readState(root)).awaitingDelegation).toBe(false);
+  expect(await readState(root)).toMatchObject({ awaitingSlot: { kind: 'codex', owner, since: expect.any(String) } });
+  expect(spawn).not.toHaveBeenCalled();
+  await start();
+  expect((await readState(root)).awaitingSlot).toBeUndefined();
 });

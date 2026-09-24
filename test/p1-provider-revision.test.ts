@@ -107,7 +107,7 @@ it('M8·M4: 훅 회수 연속 실패는 CLEANUP_FAILED 다음 paused(cleanup)·�
   await registerProc(root, record); vi.mocked(groupAlive).mockReturnValue(true);
   vi.mocked(processStartedAt).mockResolvedValue(record.startedAt);
   const runCleanup = vi.spyOn(cleanup, 'runCleanup').mockResolvedValue({
-    runId: 'cleanup-failure', ok: false, dryRun: false, scope: 'processes', errors: [],
+    runId: 'cleanup-failure', startedAt: new Date().toISOString(), ok: false, dryRun: false, scope: 'processes', errors: [],
     processes: { ok: false, classified: [], reclaimed: [], protected: [], unverified: [], residual: [record], stale: [], planned: [] },
   });
   emulate(deniedEvents); await runTurn('진행', options(root));

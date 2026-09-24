@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { atomicWrite, harnessPath, readText, withFileLock } from './storage.ts';
 
 const harnessIgnores = ['.pi/harness.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
-  '.pi/codex/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
+  '.pi/codex/', '.pi/verify/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
 
 export async function ensureHarnessGitignore(root: string): Promise<void> {
   const git = await lstat(join(root, '.git')).catch(error => {

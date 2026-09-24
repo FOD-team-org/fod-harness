@@ -89,9 +89,14 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
     const prompt = await buildHeader(meta, cfg.maxChildAgents, spec);
     const acquired = await acquireSlot('codex', { root, runId, taskId: task?.id, pid: process.pid,
       startedAt: await processStartedAt(process.pid) ?? `spawn:${startedAt}`, acquiredAt: startedAt });
-    if (!acquired.acquired) throw new CodexError('codex 슬롯 사용 중', { owner: acquired.owner });
+    if (!acquired.acquired) {
+      await updateState(root, { awaitingSlot: { kind: 'codex', owner: acquired.owner, since: startedAt },
+        delegation: undefined, awaitingDelegation: false });
+      throw new CodexError('codex 슬롯 사용 중', { owner: acquired.owner, wait: 'slot' });
+    }
     let pid: number | undefined;
     try {
+      await updateState(root, { awaitingSlot: undefined });
       await atomicWrite(join(dir, 'prompt.md'), prompt);
       for (const name of ['events.jsonl', 'stderr.txt']) await atomicWrite(join(dir, name), '');
       await writeMeta(root, meta);

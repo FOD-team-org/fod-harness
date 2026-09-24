@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, realpath } from 'node:fs/promises';
+import { access, realpath, readFile, lstat, readlink } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getTask, setTask } from './backlog.ts';
@@ -19,6 +19,60 @@ async function exists(path: string): Promise<boolean> { try { await access(path)
 async function canonical(path: string): Promise<string> {
   try { return await realpath(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return resolve(await canonical(dirname(path)), basename(path)); }
+}
+async function taskWorktree(root: string, taskId: string, required = false): Promise<string> {
+  const task = await getTask(root, taskId), state = await readState(root);
+  const registered = state.worktrees?.find(item => item.taskId === taskId);
+  if (!task.worktree && !registered && !required) return realpath(root);
+  if (!task.worktree || !registered) throw new Error('등록된 task 워크트리가 필요합니다');
+  const path = await realpath(resolve(root, registered.path));
+  if (path !== await realpath(resolve(root, task.worktree)) || inside(await realpath(root), path)) throw new Error('등록된 task 워크트리가 필요합니다');
+  return path;
+}
+export async function validateTaskCommit(root: string, taskId: string, sha: string, kind: 'review' | 'merge', reviewCommit?: string) {
+  const message = kind === 'review' ? '검수 대상 커밋이 없거나 미커밋 변경이 있습니다' : '병합 커밋이 없거나 검수 커밋을 포함하지 않습니다';
+  if (!await exists(resolve(root, '.git'))) {
+    if (sha !== 'none') throw new Error('비-git 프로젝트는 커밋 none만 허용합니다');
+    return;
+  }
+  try {
+    if (!/^[a-f0-9]{4,64}$/iu.test(sha)) throw new Error();
+    const cwd = kind === 'review' ? await taskWorktree(root, taskId) : root;
+    await git(cwd, ['cat-file', '-e', `${sha}^{commit}`]);
+    if (kind === 'review') {
+      if ((await git(cwd, ['status', '--porcelain'])).trim()) throw new Error();
+    } else {
+      const review = reviewCommit ?? (await getTask(root, taskId)).review?.commit;
+      if (!review || !/^[a-f0-9]{4,64}$/iu.test(review)) throw new Error();
+      await git(root, ['merge-base', '--is-ancestor', review, sha]);
+    }
+  } catch { throw new Error(message); }
+}
+export async function commitWorktree(root: string, taskId: string, message: string) {
+  if (!message.trim()) throw new Error('커밋 메시지 -m이 필요합니다');
+  return withFileLock(harnessPath(root, 'harness-worktree'), async () => {
+    const path = await taskWorktree(root, taskId, true), runId = randomUUID();
+    await appendLedger(root, { runId, taskId, action: 'worktree:commit', status: 'pre', evidence: { path } });
+    const check = (text: string) => { if (redact(text) !== text) throw new Error('비밀값 패턴이 있어 커밋을 거부합니다'); };
+    try {
+      // Inspect tracked and untracked changes before staging, then recheck the exact staged diff.
+      check(await git(path, ['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--']));
+      const untracked = await git(path, ['ls-files', '--others', '--exclude-standard', '-z']);
+      for (const file of untracked.split('\0').filter(Boolean)) {
+        const target = resolve(path, file);
+        check((await lstat(target)).isSymbolicLink() ? await readlink(target) : await readFile(target, 'utf8'));
+      }
+      await git(path, ['add', '-A']);
+      check(await git(path, ['diff', '--cached', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--']));
+      await git(path, ['commit', '-m', message]);
+      const commit = (await git(path, ['rev-parse', 'HEAD'])).trim();
+      await appendLedger(root, { runId, taskId, action: 'worktree:commit', status: 'ok', evidence: { path, commit } });
+      return { taskId, commit, worktree: path };
+    } catch (error) {
+      await appendLedger(root, { runId, taskId, action: 'worktree:commit', status: 'fail', evidence: { error: redact((error as Error).message) } });
+      throw error;
+    }
+  });
 }
 export async function createWorktree(root: string, taskId: string, base = 'HEAD') {
   if (!/^T\d+$/u.test(taskId)) throw new Error('task ID가 올바르지 않습니다');

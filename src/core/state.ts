@@ -2,20 +2,24 @@ import { runCleanup } from './cleanup.ts';
 import { notify } from './notify.ts';
 import { redact } from '../provider/privacy.ts';
 import { randomUUID } from 'node:crypto';
-import { access } from 'node:fs/promises';
+import { access, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
-import { getTask, setTask, listBacklog, missingDoD, BacklogError, type Task } from './backlog.ts';
+import { getTask, setTask, listBacklog, backlogInSync, missingDoD, BacklogError, type Task } from './backlog.ts';
 import { appendLedger } from './ledger.ts';
 import { loadConfig } from './config.ts';
+import { todayKst } from './template-values.ts';
 import { hasReviewEvidence } from './codex-record.ts';
 
 export interface HarnessState {
+  awaitingSlot?: { kind: 'codex'; owner: import('./slots.ts').SlotOwner; since: string };
   delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string };
   awaitingDelegation?: boolean; delegationReminder?: string;
   worktrees?: { taskId: string; path: string; branch: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
+  verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean };
+  verifySince?: string; resumeVerifySince?: string;
   enteredAt?: string; reviewSince?: string; resumeReviewSince?: string;
   autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
   retry?: { count: number; nextAt?: string }; [key: string]: unknown;
@@ -25,7 +29,7 @@ export const activeStates = new Set(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH
 export const taskStates = ['SPEC', 'IMPLEMENT', 'VERIFY', 'REVIEW', 'FIX', 'MERGE', 'DOCS', 'CLEANUP'];
 export const userOnlyTransitions = new Set(['PROJECT_READY→PLANNING', 'DONE_ALL→PLANNING', 'DONE_ALL→IDLE']);
 const projectStates = ['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'];
-export const isPaused = (state: string) => /^paused\((billing|quota|error|memory|budget|cleanup)\)$/u.test(state);
+export const isPaused = (state: string) => /^paused\((billing|quota|error|memory|budget|cleanup|slot)\)$/u.test(state);
 export async function readState(root: string): Promise<HarnessState> {
   return readJson(harnessPath(root, 'harness-state.json'), { state: 'IDLE', autoTurns: 0 });
 }
@@ -53,6 +57,19 @@ export async function updateState(
         next.reviewSince = undefined;
       } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'].includes(next.state) && !isPaused(next.state)) {
         next.resumeReviewSince = undefined;
+      }
+    }
+    if (changed || next.taskId !== current.taskId) {
+      if (next.state === 'VERIFY') {
+        next.verifySince = changes.verifySince ?? next.savedAt;
+        next.resumeVerifySince = undefined;
+        if (!changes.verifySince) next.verify = undefined;
+      } else if (current.state === 'VERIFY') {
+        next.resumeVerifySince = next.state === 'WAIT_JUDGMENT' || isPaused(next.state) || next.state === 'recovering'
+          ? current.verifySince ?? current.enteredAt : undefined;
+        next.verifySince = undefined;
+      } else if (!['PICK', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'].includes(next.state) && !isPaused(next.state)) {
+        next.resumeVerifySince = undefined;
       }
     }
     if (changed && (isPaused(next.state) || next.state === 'recovering')) {
@@ -141,8 +158,10 @@ export async function transitionState(root: string, to: string, input: Transitio
   if (!states.has(to) && !isPaused(to)) throw new TransitionError(transitionMessage((await readState(root)).state, '지원하지 않는 상태입니다'));
   return withFileLock(harnessPath(root, 'harness-transition'), async () => {
     let task: Task | undefined;
+    let verified: HarnessState['verify'];
+    let documented = false;
     const next = await updateState(root, async current => {
-      const resume = options.resume && current.state === 'PICK' && taskStates.includes(to)
+      const resume = options.resume && current.state === 'PICK' && (taskStates.includes(to) || !current.taskId && current.phase === 'project' && to === 'RESEARCH')
         && current.resumeTask?.taskId === options.taskId && current.resumeTask?.resumeState === to;
       if (options.resume && !resume || !resume && !allowedTransition(current.state, to, options.system)) throw new TransitionError(transitionMessage(current.state, '허용되지 않는 전이'));
       if (current.state === 'INTERVIEW' && to === 'RESEARCH' && (await loadConfig(root)).interview.enforce) {
@@ -162,9 +181,21 @@ export async function transitionState(root: string, to: string, input: Transitio
       }
       if (current.state === 'WAIT_RETRY' && to === 'PICK' && current.retry?.nextAt
         && Date.parse(current.retry.nextAt) > (options.now ?? Date.now())) throw new Error('백오프 시간이 아직 지나지 않았습니다');
+      // Check before getTask can import Markdown edits; task identity errors keep their existing priority.
+      if (current.state === 'DOCS' && to === 'CLEANUP'
+        && !(options.taskId && current.taskId && current.taskId !== options.taskId)) {
+        const dir = join(root, 'docs/작업일지');
+        const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+        const logs = await Promise.all(entries.filter(entry => entry.isFile()
+          && new RegExp(`^${todayKst()}(?:[._-]|$)`, 'u').test(entry.name))
+          .map(entry => readFile(join(dir, entry.name), 'utf8').catch(() => '')));
+        if (!current.taskId || !logs.some(text => text.includes(current.taskId!)) || !await backlogInSync(root)) {
+          throw new Error('작업일지·백로그 갱신이 없습니다');
+        }
+      }
       if (options.taskId) await getTask(root, options.taskId);
       if (options.taskId && current.taskId && current.taskId !== options.taskId && current.state !== 'PICK') throw new Error('진행 중 task를 바꿀 수 없습니다');
-      const projectReview = to === 'REVIEW' && (current.state === 'ARCH'
+      const projectReview = to === 'REVIEW' && (resume && !current.taskId && current.phase === 'project' || current.state === 'ARCH'
         || current.state === 'WAIT_JUDGMENT' && current.resumeState === 'REVIEW' && (current.phase === 'project' || !current.taskId));
       if (current.state === 'REVIEW' && !isPaused(to)) {
         const project = current.phase === 'project' || !current.taskId;
@@ -189,6 +220,11 @@ export async function transitionState(root: string, to: string, input: Transitio
       if (['IMPLEMENT', 'MERGE'].includes(to) && !doctorFresh(current, (await loadConfig(root)).brain.doctorTtlHours)) {
         throw new Error('doctor 검증이 없거나 오래되었습니다. Pi 세션을 재시작하거나 fodh doctor 를 실행하세요.');
       }
+      if (current.state === 'VERIFY' && to === 'REVIEW'
+        && (!current.verify || current.verify.taskId !== options.taskId || current.verify.ok !== true
+          || !(Date.parse(current.verify.at) >= Date.parse(current.verifySince ?? '')))) {
+        throw new Error('검증 증거가 없습니다: fodh verify run 이 통과해야 REVIEW 로 갈 수 있습니다(실패면 FIX)');
+      }
       if (current.state === 'REVIEW' && (to === 'PROJECT_READY' || to === 'MERGE')
         && !await hasReviewEvidence(root, current.reviewSince, to === 'MERGE' ? task!.id : undefined)) {
         throw new Error('교차검수 증거가 없습니다: fodh codex review --wait 결과가 필요합니다');
@@ -203,10 +239,13 @@ export async function transitionState(root: string, to: string, input: Transitio
         const completed = current.taskId ? await getTask(root, current.taskId) : undefined;
         if (!completed || completed.status !== 'done') throw new BacklogError('task 미완료', completed ? missingDoD(completed) : ['taskId']);
       }
+      if (current.state === 'VERIFY' && to === 'REVIEW') verified = current.verify;
+      documented = current.state === 'DOCS' && to === 'CLEANUP';
       const returning = to === 'PICK' && (isPaused(current.state) || ['recovering', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(current.state));
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
       return { state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
+        ...(to === 'VERIFY' && (resume || current.state === 'WAIT_JUDGMENT') ? { verifySince: current.resumeVerifySince } : {}),
         ...(to === 'REVIEW' && (resume || current.state === 'WAIT_JUDGMENT') ? { reviewSince: current.resumeReviewSince } : {}),
         ...(current.state !== to && (['PROJECT_READY', 'DONE_ALL', 'CLEANUP_FAILED'].includes(current.state) || current.state.startsWith('WAIT_'))
           ? { awaitingUser: false } : {}),
@@ -220,14 +259,14 @@ export async function transitionState(root: string, to: string, input: Transitio
         ...(returning ? { resumeTask: current.resumeTask ?? { taskId: current.taskId, resumeState: current.resumeState }, resumeState: undefined } : {}),
         ...(resume || clearsTask ? { resumeTask: undefined } : {}),
         ...(['INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'PROJECT_READY'].includes(to) || projectReview ? { phase: 'project' as const } : {}),
-        ...(to === 'PLANNING' || to === 'SPEC' || resume ? { phase: 'task' as const } : {}),
+        ...(to === 'PLANNING' || to === 'SPEC' || resume && !!options.taskId ? { phase: 'task' as const } : {}),
       };
     });
     // L7: 상태 저장이 성공한 다음에만 repair와 백로그 단계를 반영한다.
     if (task) {
       const status = ({ SPEC: 'doing', IMPLEMENT: 'doing', VERIFY: 'verify', REVIEW: 'review', FIX: 'fix',
         MERGE: 'merge', DOCS: 'merge', CLEANUP: 'merge' } as Record<string, string>)[to];
-      await setTask(root, task.id, { status, ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
+      await setTask(root, task.id, { status, ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
         verify: { ok: false }, review: { high: undefined }, merge: { commit: undefined }, docs: { ok: false }, cleanup: { ok: false } } : {}) });
     }
     if (next.state === 'WAIT_JUDGMENT') {

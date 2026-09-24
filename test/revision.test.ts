@@ -1,3 +1,5 @@
+import { atomicWrite } from '../src/core/storage.ts';
+import { metaPath } from '../src/core/codex-record.ts';
 import { addTask } from '../src/core/backlog.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, rm, readdir } from 'node:fs/promises';
@@ -49,6 +51,9 @@ it('잠금 중 IMPLEMENT/MERGE는 저장된 doctor만 확인하고 doctor CLI는
     for (const target of ['IMPLEMENT', 'MERGE']) {
       for (const hours of [0, 13]) {
         await state.updateState(root, { state: target === 'IMPLEMENT' ? 'SPEC' : 'REVIEW', taskId: task.id, phase: 'task', doctor: { ok: true, checkedAt: new Date(Date.now() - hours * 3600000).toISOString() } });
+        if (target === 'MERGE') await atomicWrite(metaPath(root, 'doctor-review'), JSON.stringify({
+          kind: 'review', status: 'ok', taskId: task.id, startedAt: new Date().toISOString(),
+        }));
         const start = Date.now(), result = await cli(root, ['state', 'transition', target, '--task', task.id]);
         expect(Date.now() - start).toBeLessThan(1000);
         expect(result.code).toBe(hours ? 1 : 0);

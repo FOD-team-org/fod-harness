@@ -156,6 +156,9 @@ export default function orchestrator(pi: ExtensionAPI): void {
     const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
       .find(Boolean)?.replace(/[`<>]/gu, '');
     const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
+    if (tail.some(line => line.replace(/[*`]/gu, '') === '대기: 슬롯 codex') && (await readState(ctx.cwd)).awaitingSlot) {
+      await updateState(ctx.cwd, { autoTurns: 0, ...(awaitingUser ? { awaitingUser: true } : {}) }); return;
+    }
     if (marker) {
       const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {
         const state = await readState(ctx.cwd);
@@ -267,6 +270,16 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         if (wasActive) await transitionState(root, 'paused(memory)', { system: true });
         await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}. 해제: fodh memory reset(스왑이 실제로 줄지 않으면 다시 걸린다)` }, context);
         handled = true;
+      } else if (kind === 'slot-free') {
+        const state = await readState(root);
+        const waiting = state.awaitingSlot;
+        const matching = waiting && batch.some(record => record.since === waiting.since && record.ownerRunId === waiting.owner.runId);
+        if (matching && (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot')) {
+          await updateState(root, { awaitingSlot: undefined, lastPaused: undefined, autoTurns: 0 });
+          await transitionState(root, 'PICK');
+          resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+        }
+        handled = true; resolve = true;
       } else if (kind === 'memory-recovered') {
         const state = await readState(root);
         const recover = state.state === 'paused(memory)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'memory';

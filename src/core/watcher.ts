@@ -16,7 +16,10 @@ import { listProcs } from './procs.ts';
 import { activeStates, isPaused, readState } from './state.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
+import { slotOwnerAlive } from './slots.ts';
+
 export interface WatchState {
+  slotCheck?: { since: string; at: string };
   memory?: MemoryWatch; memorySampleFailed?: boolean;
   lastTickAt?: string;
   judgment: { path?: string; observed: { hash: string | null; since: string }; lastEmitted?: string | null };
@@ -120,6 +123,13 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
     }
     if (!options.judgmentOnly) {
       const state = await readState(root);
+      const waiting = state.awaitingSlot;
+      if (waiting && (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot')
+        && (watch.slotCheck?.since !== waiting.since || now - Date.parse(watch.slotCheck.at) >= 60000)) {
+        watch.slotCheck = { since: waiting.since, at };
+        if (!await slotOwnerAlive(waiting.owner)) await emit({ kind: 'slot-free',
+          dedupeKey: `slot-free:${waiting.since}:${waiting.owner.runId}`, since: waiting.since, ownerRunId: waiting.owner.runId }, true);
+      }
       const procs = await listProcs(root);
       const aliveByPid = new Map<number, boolean>();
       for (const proc of procs) aliveByPid.set(proc.pid, await (options.isProcessAlive ?? isProcessAlive)(proc.pid));
@@ -212,7 +222,7 @@ export async function detectRecovery(root: string, sessionStartedAt: string): Pr
   });
 }
 
-const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover', 'codex-done', 'memory-pressure', 'memory-critical', 'memory-recovered']);
+const watcherKinds = new Set(['judgment-changed', 'stalled', 'child-timeout', 'child-gone', 'recover', 'codex-done', 'memory-pressure', 'memory-critical', 'memory-recovered', 'slot-free']);
 export async function pendingDecisions(root: string): Promise<InboxRecord[]> {
   const file = await readJson<WatcherFile>(harnessPath(root, 'harness-watcher.json'), {});
   const decided = new Set(file.watch?.decided ?? []);

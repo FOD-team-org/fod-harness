@@ -5,7 +5,7 @@ import { lstat, realpath, readdir, rm } from 'node:fs/promises';
 import { resolve, join, isAbsolute, relative, sep } from 'node:path';
 import { loadConfig } from './config.ts';
 import { readState } from './state.ts';
-import { listBacklog } from './backlog.ts';
+import { listBacklog, setTask } from './backlog.ts';
 import { listProcs, removeProc, type ProcRecord } from './procs.ts';
 import { readMeta, finishRun } from './codex-record.ts';
 import { reclaimCodexOwner } from './codex-reclaim.ts';
@@ -181,7 +181,8 @@ export async function runCleanup(root: string, options: CleanupOptions) {
   if (!['processes', 'storage', 'worktrees', 'all'].includes(options.scope)) throw new Error('정리 scope가 올바르지 않습니다');
   root = await realpath(root);
   return withFileLock(harnessPath(root, 'harness-cleanup'), async () => {
-    const runId = randomUUID(), report: { runId: string; ok: boolean; dryRun: boolean; scope: CleanupScope; errors: { scope: string; error: string }[]; processes?: Awaited<ReturnType<typeof processes>>; storage?: Awaited<ReturnType<typeof storage>>; worktrees?: Awaited<ReturnType<typeof worktrees>> } = { runId, ok: true, dryRun: !!options.dryRun, scope: options.scope, errors: [] };
+    const startedAt = new Date().toISOString();
+    const runId = randomUUID(), report: { runId: string; taskId?: string; startedAt: string; finishedAt?: string; ok: boolean; dryRun: boolean; scope: CleanupScope; errors: { scope: string; error: string }[]; processes?: Awaited<ReturnType<typeof processes>>; storage?: Awaited<ReturnType<typeof storage>>; worktrees?: Awaited<ReturnType<typeof worktrees>> } = { runId, taskId: options.taskId, startedAt, ok: true, dryRun: !!options.dryRun, scope: options.scope, errors: [] };
     for (const scope of ['processes', 'storage', 'worktrees'] as const) {
       if (options.scope !== 'all' && options.scope !== scope) continue;
       await appendLedger(root, { runId, taskId: options.taskId, action: `cleanup:${scope}`, status: 'pre' });
@@ -195,7 +196,13 @@ export async function runCleanup(root: string, options: CleanupOptions) {
         await appendLedger(root, { runId, taskId: options.taskId, action: `cleanup:${scope}`, status: 'fail', evidence });
       }
     }
+    report.finishedAt = new Date().toISOString();
     await atomicWrite(harnessPath(root, 'cleanup-last.json'), JSON.stringify(report, null, 2) + '\n');
+    const state = await readState(root);
+    if (report.ok && !report.dryRun && report.taskId && state.state === 'CLEANUP' && state.taskId === report.taskId
+      && Date.parse(report.startedAt) >= Date.parse(state.enteredAt ?? '')) {
+      await setTask(root, report.taskId, { cleanup: { ok: true } });
+    }
     return report;
   }, { waitMs: 120000 });
 }

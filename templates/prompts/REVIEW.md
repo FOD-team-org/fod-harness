@@ -6,6 +6,7 @@
 4. codex 산출물(delegate 없으면 codex)은 설정의 Claude Agent로 읽기 전용 검수한다.
 5. claude 산출물 또는 프로젝트 문서는 `fodh codex review --spec <검수 요청 파일> --wait`로 읽기 전용 위임한다. task면 --task와 등록 워크트리 --cwd를 명시한다.
 6. codex review 결과의 lastMessage를 {{docsRoot}}/검수/…-검수.md(scaffold 결과 path)에 저장한다.
+`codex 슬롯 사용 중` 오류면 다른 방법을 찾지 말고 `대기: 슬롯 codex`로 턴을 끝낸다(가짜 runId 금지).
 ## 산출물
 {{docsRoot}}/검수/: 대상 SHA·모델·effort·서브에이전트 모델·심각도·파일:줄·재현·수정안·APPROVE 또는 REQUEST_CHANGES.
 ## 끝내는 조건

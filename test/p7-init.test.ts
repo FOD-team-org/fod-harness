@@ -6,7 +6,7 @@ import { project } from './p5-helpers.ts';
 import orchestrator, { initialize } from '../extensions/orchestrator/index.ts';
 
 const required = ['.pi/harness.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
-  '.pi/codex/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
+  '.pi/codex/', '.pi/verify/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
 it.each(['file', 'directory'] as const)('F11 git %s initialize는 기존 gitignore를 보존하고 누락 줄만 한 번 추가한다', async git => {
   const root = await project('IDLE');
   if (git === 'file') await writeFile(join(root, '.git'), 'gitdir: unused-fixture');

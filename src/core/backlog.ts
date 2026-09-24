@@ -7,7 +7,7 @@ export interface Task {
   id: string; title: string; category: string; depends: string[]; status: string; repair: number;
   delegate?: 'codex' | 'claude'; codexThread?: string;
   judgment: string; worktree: string; notes: string;
-  verify?: { ok?: boolean }; review?: { commit?: string; high?: number }; merge?: { commit?: string };
+  verify?: { ok?: boolean; runId?: string; at?: string }; review?: { commit?: string; high?: number }; merge?: { commit?: string };
   docs?: { ok?: boolean }; cleanup?: { ok?: boolean }; spec?: { rev?: number };
 }
 interface BacklogStore { tasks: Task[]; usedIds: string[]; hash: string; pending?: { before: string; text: string } }
@@ -191,6 +191,15 @@ export async function readBacklog(root: string): Promise<BacklogRead> {
 }
 export async function listBacklog(root: string): Promise<Task[]> {
   return (await readBacklog(root)).tasks;
+}
+// Check without load(): reading the backlog normally imports Markdown edits into JSON.
+export async function backlogInSync(root: string): Promise<boolean> {
+  return withFileLock(harnessPath(root, 'harness-backlog.json'), async () => {
+    const text = await markdown(root);
+    const store = await readJson<BacklogStore>(harnessPath(root, 'harness-backlog.json'), { tasks: [], usedIds: [], hash: '' });
+    return text !== undefined && !store.pending && store.hash === digest(text)
+      && renderBacklog(text, store.tasks) === text;
+  });
 }
 export async function syncBacklog(root: string): Promise<BacklogRead> {
   return withFileLock(harnessPath(root, 'harness-backlog.json'), async () => {

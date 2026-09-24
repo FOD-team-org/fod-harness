@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { access } from 'node:fs/promises';
 import { loadConfig } from '../core/config.ts';
 import { notify } from '../core/notify.ts';
-import { readState, updateState } from '../core/state.ts';
+import { readState, updateState, activeStates } from '../core/state.ts';
 import { acquireLock } from '../core/lock.ts';
 import { appendLedger, unknownEntries } from '../core/ledger.ts';
 import { listInbox, deliverInbox } from '../core/inbox.ts';
@@ -296,6 +296,10 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       if (!initialized || !result || outcome.code !== 0 || result.is_error) {
         await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });
         return { reason: 'error', classification: 'processError', runId };
+      }
+      const current = await readState(root);
+      if (current.awaitingSlot && !current.delegation && activeStates.has(current.state) && current.state !== 'recovering') {
+        await patchState({ state: 'paused(slot)' });
       }
       return { reason: 'stop', ...lastCallUsage(result), runId };
     }

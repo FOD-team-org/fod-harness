@@ -1,3 +1,5 @@
+import { todayKst } from '../src/core/template-values.ts';
+import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
@@ -60,14 +62,20 @@ it('H2: 고아 여러 개를 각각 차단하고 ready를 선택하며 재개와
 it('M2: 각 task 전이는 백로그 상태도 기록하고 M3는 완료 전 PICK을 막는다', async () => {
   const { root, task } = await setup();
   for (const [to, status] of [['VERIFY', 'verify'], ['REVIEW', 'review'], ['FIX', 'fix'], ['VERIFY', 'verify'], ['REVIEW', 'review'], ['MERGE', 'merge'], ['DOCS', 'merge'], ['CLEANUP', 'merge']]) {
+    if (to === 'REVIEW') await updateState(root, { verify: {
+      runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false,
+    } });
+    if (to === 'CLEANUP') await storage.atomicWrite(join(root, `docs/작업일지/${todayKst()}.md`), task.id);
     if (to === 'MERGE') await storage.atomicWrite(storage.harnessPath(root, 'codex/review-fixture/meta.json'),
       JSON.stringify({ kind: 'review', status: 'ok', taskId: task.id, startedAt: (await readState(root)).reviewSince }));
     if (to === 'DOCS') await setTask(root, task.id, { review: { commit: 'sha', high: 0 } });
     await transitionState(root, to, { taskId: task.id, commit: 'sha' });
     expect((await getTask(root, task.id)).status).toBe(status);
   }
-  expect(await cli(root, 'state', 'transition', 'PICK')).toMatchObject({ code: 1, value: { error: 'task 미완료', missing: expect.arrayContaining(['verify.ok', 'merge.commit', 'docs.ok', 'cleanup.ok']) } });
-  await setTask(root, task.id, { verify: { ok: true }, merge: { commit: 'merged' }, docs: { ok: true }, cleanup: { ok: true } });
+  expect(await cli(root, 'state', 'transition', 'PICK')).toMatchObject({ code: 1, value: { error: 'task 미완료', missing: ['merge.commit', 'cleanup.ok'] } });
+  expect((await getTask(root, task.id)).verify?.ok).toBe(true);
+  expect((await getTask(root, task.id)).docs?.ok).toBe(true);
+  await setTask(root, task.id, { merge: { commit: 'merged' }, cleanup: { ok: true } });
   expect((await cli(root, 'backlog', 'set', task.id, '--status', 'done')).code).toBe(0);
   await transitionState(root, 'PICK'); expect((await readState(root)).taskId).toBeUndefined();
 });

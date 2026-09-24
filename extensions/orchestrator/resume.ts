@@ -56,6 +56,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     let state = await readState(root);
     if (state.userAborted) return { skipped: 'user-aborted' };
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
+    if (state.awaitingSlot) return { skipped: 'slot' };
     if (state.awaitingDelegation) return { skipped: 'delegation' };
     if (!active.has(state.state)) {
       if (state.state.startsWith('WAIT_') || state.state.startsWith('paused(') || state.state === 'DONE_ALL' || state.state === 'CLEANUP_FAILED') await notify(root, { key: `state:${state.state}`, title: '하네스 상태', body: `하네스 상태: ${state.state}`, level: state.state.startsWith('paused(') ? 'warning' : 'info' }, ctxLike);

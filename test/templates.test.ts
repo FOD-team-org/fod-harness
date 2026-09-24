@@ -96,3 +96,23 @@ it('N4 processes 재실패는 자동 판단에 맡기고 사용자 대기한다'
   expect(retryFailure).toContain('(paused(cleanup)); 자동 판단에 맡기고 `대기: 사용자`');
   expect(retryFailure).not.toMatch(/원인 판단 등록|fodh judgment add/);
 });
+
+it('F12/F15 자기 보고 플래그 대신 하네스 증거를 안내한다', async () => {
+  for (const state of ['VERIFY', 'DOCS', 'CLEANUP']) {
+    const text = await readFile(`templates/prompts/${state}.md`, 'utf8');
+    expect(text).not.toMatch(/--(?:verify|docs|cleanup)-ok/u);
+    expect(text).toContain('하네스');
+  }
+  const verify = await readFile('templates/prompts/VERIFY.md', 'utf8');
+  expect(verify).toContain('두뇌가 면제하지 않는다');
+  expect(verify.indexOf('fodh worktree commit')).toBeLessThan(verify.indexOf('fodh state transition REVIEW'));
+});
+
+it('F16 위임 템플릿은 공식 슬롯 대기만 안내한다', async () => {
+  for (const state of ['IMPLEMENT', 'REVIEW', 'RESEARCH', 'FIX']) {
+    const text = await readFile(`templates/prompts/${state}.md`, 'utf8');
+    expect(text).toContain('codex 슬롯 사용 중');
+    expect(text).toContain('대기: 슬롯 codex');
+    expect(text).toContain('가짜 runId 금지');
+  }
+});

@@ -12,7 +12,7 @@ import { resetMemory } from '../core/memory.ts';
 import { memoryStatus } from '../core/watcher.ts';
 import { resolveCliRoot } from './root.ts';
 import { startCodex, status as codexStatus, result as codexResult, cancel as cancelCodex, CodexError } from '../core/codex.ts';
-import { createWorktree, removeWorktree, listWorktrees } from '../core/worktree.ts';
+import { createWorktree, removeWorktree, listWorktrees, commitWorktree, validateTaskCommit } from '../core/worktree.ts';
 import { slotsStatus } from '../core/slots.ts';
 import { getConfig, setConfig, loadConfig } from '../core/config.ts';
 import { addTask, getTask, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
@@ -38,12 +38,12 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
-      base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
+      message: { type: 'string', short: 'm' }, base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
       unknown: { type: 'boolean' }, json: { type: 'boolean' }, system: { type: 'boolean' }, reclaim: { type: 'boolean' },
       commit: { type: 'string' }, status: { type: 'string' }, depends: { type: 'string' }, category: { type: 'string' },
       judgment: { type: 'string' }, worktree: { type: 'string' },
-      'review-commit': { type: 'string' }, 'review-high': { type: 'string' }, 'verify-ok': { type: 'boolean' },
-      'merge-commit': { type: 'string' }, 'docs-ok': { type: 'boolean' }, 'cleanup-ok': { type: 'boolean' },
+      'review-commit': { type: 'string' }, 'review-high': { type: 'string' },
+      'merge-commit': { type: 'string' },
       'spec-rev': { type: 'string' }, 'requires-approval': { type: 'boolean' }, evidence: { type: 'string' },
       task: { type: 'string' }, answered: { type: 'boolean' }, title: { type: 'string' }, background: { type: 'string' },
       options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
@@ -89,6 +89,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'codex' && action === 'cancel') { exact(1); result = await cancelCodex(root, rest[0]); }
     else if (group === 'slots' && action === 'status') { exact(0); result = await slotsStatus(); }
     else if (group === 'worktree' && action === 'create') { exact(1); result = await createWorktree(root, rest[0], values.base); }
+    else if (group === 'worktree' && action === 'commit') { exact(1); result = await commitWorktree(root, rest[0], values.message ?? ''); }
     else if (group === 'worktree' && action === 'remove') { exact(1); result = await removeWorktree(root, rest[0], values.force); }
     else if (group === 'worktree' && action === 'list') { exact(0); result = await listWorktrees(root); }
     else if (group === 'doctor'  && !action) result = await doctor(root);
@@ -145,17 +146,13 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       }
       if (values.depends !== undefined) patch.depends = values.depends.split(',').map(value => value.trim()).filter(Boolean);
 
+      if (values['review-commit'] !== undefined) await validateTaskCommit(root, rest[0], values['review-commit'], 'review');
+      if (values['merge-commit'] !== undefined) await validateTaskCommit(root, rest[0], values['merge-commit'], 'merge', values['review-commit']);
       if (values['review-commit'] !== undefined || values['review-high'] !== undefined) patch.review = {
         ...(values['review-commit'] !== undefined ? { commit: values['review-commit'] } : {}),
         ...(values['review-high'] !== undefined ? { high: integer(values['review-high'], 'review.high') } : {}),
       };
-      if (values['verify-ok']) patch.verify = { ok: true };
       if (values['merge-commit'] !== undefined) patch.merge = { commit: values['merge-commit'] };
-      if (values['docs-ok']) patch.docs = { ok: true };
-      if (values['cleanup-ok']) {
-        if (!(await cleanupReport(root)).ok) throw new Error('프로세스 레지스트리 잔존이 있습니다');
-        patch.cleanup = { ok: true };
-      }
       if (values['spec-rev'] !== undefined) patch.spec = { rev: integer(values['spec-rev'], 'spec.rev') };
       result = await setTask(root, rest[0], patch);
     } else if (group === 'pick' && !action) result = await runPick(root);

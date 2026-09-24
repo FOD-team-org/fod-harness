@@ -131,7 +131,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 
 PROJECT_READY→PLANNING, DONE_ALL→PLANNING·IDLE 및 CLI `state transition --system`은 사용자 전용이며 `assertNotBrain`의 환경변수·잠금 소유자 자손 체인 검사로 두뇌를 거부한다. 오케스트레이터·워처·프로바이더의 내부 전이는 그대로다. 코어 전이가 PROJECT_READY·DONE_ALL·WAIT_*·CLEANUP_FAILED를 떠나면 `awaitingUser`를 해제한다.
 
-git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.worktrees` 등록이 모두 필요하고 `--cwd`도 그 워크트리 안이어야 한다. 비-git 프로젝트만 루트 폴백을 허용한다. 프로젝트 초기화와 첫 세션은 git 프로젝트의 `.gitignore`에 `.pi/harness.lock`, `.pi/harness-*.json`, `.pi/harness-*.jsonl`, `.pi/scratch/`, `.pi/codex/`, `.pi/cleanup-last.json`, `.pi/harness-config-warned.json` 중 빠진 줄을 추가하며 기존 내용은 보존한다.
+git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.worktrees` 등록이 모두 필요하고 `--cwd`도 그 워크트리 안이어야 한다. 비-git 프로젝트만 루트 폴백을 허용한다. 프로젝트 초기화와 첫 세션은 git 프로젝트의 `.gitignore`에 `.pi/harness.lock`, `.pi/harness-*.json`, `.pi/harness-*.jsonl`, `.pi/scratch/`, `.pi/codex/`, `.pi/verify/`, `.pi/cleanup-last.json`, `.pi/harness-config-warned.json` 중 빠진 줄을 추가하며 기존 내용은 보존한다.
 
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
@@ -144,3 +144,19 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다 |
 | 부모 프로세스 확인 | 살아 있는 Pi 잠금 중 ps 조회가 막히면 사용자 CLI의 설정 변경·memory reset도 거부될 수 있다. 이중 fork로 부모 체인에서 벗어난 자식은 이 판정만으로 막지 못한다. 실제 부모 체인 실기는 별도 확인이 필요하다 |
 | Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다 |
+
+
+### task 완료 증거 흐름
+
+| 전이·명령 | 하네스가 확인·기록하는 증거 |
+|---|---|
+| VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
+| DOCS → CLEANUP | `docs/작업일지/`의 오늘(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
+| `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 실제 정리 성공 보고서. task.cleanup.ok 자동 기록(dry-run 제외) |
+| CLEANUP → PICK | `backlog set T --status done`의 DoD 충족 및 현재 task 완료 |
+
+`--verify-ok`, `--docs-ok`, `--cleanup-ok` 자기 보고 옵션은 지원하지 않는다. 실패한 검사는 두뇌가 면제할 수 없으며 `fodh judgment add`로 사용자 판단을 받는다.
+
+검수 커밋은 task의 등록 워크트리(없으면 루트)에 실제로 존재하고 미커밋 변경이 없어야 한다. 병합 커밋은 루트에 존재하며 검수 커밋을 조상으로 포함해야 한다. 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 워크트리에서 변경·새 파일과 staged diff의 비밀 패턴을 검사하고 add·commit 및 원장 기록을 수행한다.
+
+Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 소유자의 생존을 확인한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.
