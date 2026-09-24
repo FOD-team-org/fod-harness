@@ -8,7 +8,7 @@ import { loadConfig } from './config.ts';
 
 export interface HarnessState {
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
-  resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; cleanupFailures?: number;
+  resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
   enteredAt?: string; autoTurns?: number; phase?: 'project' | 'task'; lastPaused?: string;
   retry?: { count: number; nextAt?: string }; [key: string]: unknown;
 }

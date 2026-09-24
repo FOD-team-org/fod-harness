@@ -7,13 +7,13 @@ import { readState, updateState, transitionState, activeStates as active, doctor
 import { listBacklog } from '../../src/core/backlog.ts';
 import { runPick } from '../../src/core/pick.ts';
 import { cleanupReport } from '../../src/core/reclaim.ts';
-import { applyJudgments, readJudgment } from '../../src/core/judgment.ts';
-import { listInbox, type InboxRecord } from '../../src/core/inbox.ts';
+import { applyJudgments, readJudgment, JudgmentConflict } from '../../src/core/judgment.ts';
+import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, withFileLock } from '../../src/core/storage.ts';
 
 import { autoResume, resumeContext, send } from './resume.ts';
-import { watcherStatus } from '../../src/core/watcher.ts';
+import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
 export { instruction } from './resume.ts';
 
 const templates = fileURLToPath(new URL('../../templates/', import.meta.url));
@@ -35,7 +35,7 @@ async function initialize(root: string): Promise<void> {
 
 export default function orchestrator(pi: ExtensionAPI): void {
   pi.on('input', async (event, ctx) => {
-    if (event.source !== 'extension') await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+    if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
     return { action: 'continue' };
   });
   pi.registerCommand('project-start', {
@@ -44,7 +44,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       if ((await readState(ctx.cwd)).state !== 'IDLE') throw new Error('project-start는 IDLE에서만 시작할 수 있습니다');
       await initialize(ctx.cwd);
       const state = await transitionState(ctx.cwd, 'INTERVIEW');
-      await updateState(ctx.cwd, { awaitingUser: false, ...(args.trim() ? { projectName: args.trim() } : {}) });
+      await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, ...(args.trim() ? { projectName: args.trim() } : {}) });
       await send(pi, ctx.cwd, state);
     },
   });
@@ -60,7 +60,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const missingBacklog = !await exists(join(ctx.cwd, 'docs/backlog.md'));
       const tasks = await listBacklog(ctx.cwd);
       if (missingBacklog) await initialize(ctx.cwd);
-      await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+      await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
       if (!tasks.length && state.state === 'PLANNING') {
         ctx.ui.notify('백로그가 비어 있습니다. PLANNING 을 계속합니다', 'info'); return;
       }
@@ -89,12 +89,13 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const ids = args.trim() ? args.trim().split(/\s+/u) : undefined;
       if (ids?.some(id => !/^A\d+(?:-\d+)?$/u.test(id))) throw new Error('판단 번호가 올바르지 않습니다');
+      await updateState(ctx.cwd, { userAborted: false });
       const before = await readState(ctx.cwd);
       const result = await applyJudgments(ctx.cwd, ids);
       ctx.ui.notify(JSON.stringify(result), 'info');
       const state = await readState(ctx.cwd);
       if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
-        await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+        await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
         await send(pi, ctx.cwd, state, state.state);
       }
     },
@@ -104,9 +105,10 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => { ctx.ui.notify(JSON.stringify(await cleanupReport(ctx.cwd)), 'info'); },
   });
   pi.on('agent_end', async (event, ctx) => {
-    if (ctx.hasUI === false) return;
     const last = [...event.messages].reverse().find(message => message.role === 'assistant');
-    if (last?.role === 'assistant' && ['error', 'aborted'].includes(last.stopReason)) return;
+    if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
+    if (ctx.hasUI === false) return;
+    if (last?.role === 'assistant' && last.stopReason === 'error') return;
     if (last?.role === 'assistant' && last.content?.some(block => block.type === 'text' && /^대기: 사용자[ \t]*$/mu.test(block.text))) {
       await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
     }
@@ -115,47 +117,100 @@ export default function orchestrator(pi: ExtensionAPI): void {
   });
 }
 
-export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root: string, records: InboxRecord[]): Promise<void> {
-  const context = resumeContext(ctx);
-  // One decision per kind per batch; all facts remain in the durable inbox.
+interface DecisionOptions { retry?: () => Promise<void>; now?: () => number }
+const decisionTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; at: number }>();
+export function clearDecisionTimers(root: string): void {
+  const pending = decisionTimers.get(root);
+  if (pending) clearTimeout(pending.timer);
+  decisionTimers.delete(root);
+}
+function deferDecision(root: string, delay: number, retry: () => Promise<void>): boolean {
+  const at = Date.now() + delay;
+  const current = decisionTimers.get(root);
+  if (current && Math.abs(current.at - at) < 1000) return false;
+  clearDecisionTimers(root);
+  const timer = setTimeout(() => {
+    decisionTimers.delete(root);
+    void retry().catch(async () => {
+      try { await appendLedger(root, { runId: 'free-text-retry', action: 'watcher:tick', status: 'fail',
+        evidence: { message: '자유 서술 재결정 실패' } }); } catch { /* storage unavailable */ }
+    });
+  }, Math.max(1, delay));
+  timer.unref(); decisionTimers.set(root, { timer, at }); return true;
+}
+export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root: string, records: InboxRecord[], options: DecisionOptions = {}): Promise<{ deferred: string[] }> {
+  const context = resumeContext(ctx), deferred: string[] = [];
   for (const kind of new Set(records.map(record => record.kind))) {
     const batch = records.filter(record => record.kind === kind);
-    let applied: string[] = [], resumed = false, handled = false;
-    if (kind === 'judgment-changed') {
-      const answered = await readJudgment(root, { answered: true });
-      // Nonempty but ambiguous answers also use /judged's re-question path.
-      if (answered.items.length) {
-        const result = await applyJudgments(root);
-        applied = result.applied.map(item => item.id);
-        const reasked = result.unapplied.length ? (await readJudgment(root)).items
-          .filter(item => item.reaskOf && answered.items.some(answer => answer.id === item.reaskOf))
-          .map(item => ({ id: item.id, reaskOf: item.reaskOf })) : [];
-        context.notify(JSON.stringify({ ...result, reasked }), 'info');
-        if (applied.length && active.has((await readState(root)).state)) {
-          await updateState(root, { awaitingUser: false, autoTurns: 0 });
-          resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+    let applied: string[] = [], resumed = false, handled = false, resolve = false;
+    try {
+      if (kind === 'judgment-changed') {
+        const answered = (await readJudgment(root, { answered: true })).items.filter(item => !item.followup);
+        const config = await loadConfig(root);
+        const stableFor = await judgmentStableFor(root, options.now?.());
+        const waiting = answered.filter(item => item.classification?.applicable && item.classification.kind === 'freeform'
+          && !/(?:^|[\s,.:;])(승인(?:합니다|해요|해|함)?|진행(?:합니다|해요|해)?)(?=$|[\s,.:;])/u.test(item.answer)
+          && stableFor < config.watch.freeTextStableSeconds);
+        const ready = answered.filter(item => !waiting.includes(item));
+        if (ready.length) {
+          const result = await applyJudgments(root, ready.map(item => item.id), Object.fromEntries(ready.map(item => [item.id, item.raw])));
+          applied = result.applied.map(item => item.id);
+          const reasked = result.unapplied.length ? (await readJudgment(root)).items
+            .filter(item => item.reaskOf && ready.some(answer => answer.id === item.reaskOf))
+            .map(item => ({ id: item.id, reaskOf: item.reaskOf })) : [];
+          context.notify(JSON.stringify({ ...result, reasked }), 'info');
+          if (applied.length && active.has((await readState(root)).state)) {
+            await updateState(root, { awaitingUser: false, autoTurns: 0 });
+            resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+          }
+          handled = applied.length > 0 || reasked.length > 0;
         }
-        handled = applied.length > 0 || result.unapplied.length > 0;
+        if (waiting.length) {
+          deferred.push(...batch.map(record => record.id));
+          const seconds = Math.ceil(config.watch.freeTextStableSeconds - stableFor);
+          const retry = options.retry ?? (async () => {
+            await tick(root, { judgmentOnly: true });
+            await decideInbox(pi, ctx, root, batch, options);
+          });
+          if (deferDecision(root, seconds * 1000, retry)) context.notify(`자유 서술 답 ${seconds}초 뒤 적용 예정`, 'info');
+        } else {
+          clearDecisionTimers(root); resolve = true;
+          if (!applied.length && !handled) context.notify('판단대기 변경 감지 — 적용할 답 없음', 'info');
+        }
+      } else if (kind === 'stalled') {
+        const state = await readState(root);
+        if (state.state === 'recovering' || state.userAborted) {
+          context.notify(`사용자 중단 상태: ${state.state} — 사용자 입력 또는 명령으로 이어갑니다`, 'info');
+          resolve = true;
+        } else {
+          const result = await autoResume(pi, root, context, kind);
+          resumed = result.resumed === true; handled = resumed || result.stopped === true;
+          resolve = !resumed;
+          if (result.skipped) context.notify(`두뇌 정체 감지 — 자동 재개 건너뜀: ${result.skipped}`, 'warning');
+        }
+      } else if (kind === 'child-timeout' || kind === 'child-gone') {
+        context.notify(`자식 프로세스 ${kind === 'child-timeout' ? '시간 초과' : '종료'} 감지: ${batch.map(record => record.pid).join(', ')} — 다음 턴에 전달`, 'warning');
+        handled = true;
+      } else if (kind === 'recover') {
+        const state = await readState(root);
+        if (state.state !== 'recovering' && !state.userAborted && active.has(state.state) && state.awaitingUser !== true
+          && doctorFresh(state, (await loadConfig(root)).brain.doctorTtlHours)) {
+          resumed = (await autoResume(pi, root, context, kind)).resumed === true; handled = resumed;
+        } else {
+          context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — /develop-start 또는 /judged 로 이어갑니다`, 'info');
+        }
+        resolve = true;
       }
-      if (!applied.length) context.notify('판단대기 변경 감지 — 적용할 답 없음(다음 턴에 전달)', 'info');
-    } else if (kind === 'stalled') {
-      const result = await autoResume(pi, root, context, kind);
-      resumed = result.resumed === true; handled = resumed || result.stopped === true;
-      if (result.skipped) context.notify(`두뇌 정체 감지 — 자동 재개 건너뜀: ${result.skipped}`, 'warning');
-    } else if (kind === 'child-timeout' || kind === 'child-gone') {
-      context.notify(`자식 프로세스 ${kind === 'child-timeout' ? '시간 초과' : '종료'} 감지: ${batch.map(record => record.pid).join(', ')} — 다음 턴에 전달`, 'warning');
-      handled = true;
-    } else if (kind === 'recover') {
-      const state = await readState(root);
-      if (state.state !== 'recovering' && active.has(state.state) && state.awaitingUser !== true
-        && doctorFresh(state, (await loadConfig(root)).brain.doctorTtlHours)) {
-        resumed = (await autoResume(pi, root, context, kind)).resumed === true;
-        handled = resumed;
-      } else {
-        context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — /develop-start 또는 /judged 로 이어갑니다`, 'info');
-      }
+    } catch (error) {
+      if (kind !== 'judgment-changed' || !(error instanceof JudgmentConflict)) throw error;
+      deferred.push(...batch.map(record => record.id));
+      continue; // Normal editor contention: retry next tick without a failure or warning.
     }
-    await appendLedger(root, { runId: batch[0]!.id, action: `watcher:decide:${kind}`, status: handled ? 'ok' : 'skip',
+    if (!handled && batch.some(record => deferred.includes(record.id))) {
+      await logDeferredDecision(root, batch, applied, resumed);
+    } else await appendLedger(root, { runId: batch[0]!.id, action: `watcher:decide:${kind}`, status: handled ? 'ok' : 'skip',
       evidence: { ids: batch.map(record => record.id), applied, resumed } });
+    if (resolve) await resolveInbox(root, batch.map(record => record.id), 'orchestrator', `watcher:decide:${kind}`);
   }
+  return { deferred };
 }

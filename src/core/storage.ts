@@ -15,11 +15,12 @@ export async function readJson<T>(path: string, fallback: T): Promise<T> {
   return text ? JSON.parse(text) as T : fallback;
 }
 
-export async function atomicWrite(path: string, text: string): Promise<void> {
+export async function atomicWrite(path: string, text: string, beforeRename?: () => Promise<void>): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, text, { flag: 'wx', mode: 0o600 });
+    await beforeRename?.();
     await rename(temporary, path);
   } finally { await unlink(temporary).catch(() => undefined); }
 }

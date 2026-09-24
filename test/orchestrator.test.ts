@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import orchestrator, { instruction, decideInbox } from '../extensions/orchestrator/index.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
@@ -14,7 +15,7 @@ import { setConfig } from '../src/core/config.ts';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
-  const root = await mkdtemp('/private/tmp/fodh-orchestrator-'); roots.push(root);
+  const root = await mkdtemp(join(tmpdir(), 'fodh-orchestrator-')); roots.push(root);
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
   const sendMessage = vi.fn();
@@ -170,6 +171,7 @@ it('기본 3회 자동 턴 정체는 판단 생성 후 WAIT_JUDGMENT로 중단�
 });
 it('겹친 agent_end 이벤트는 자동 턴을 중복 예약하지 않는다', async () => {
   const test = await setup(); await updateState(test.root, { state: 'INTERVIEW' });
+  test.sendMessage.mockImplementation(() => { test.ctx.isIdle.mockReturnValue(false); });
   await Promise.all([test.end(), test.end(), test.end()]);
   expect(test.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(test.root)).autoTurns).toBe(1);
 });
@@ -317,7 +319,7 @@ it('P2: 활동 상태에서 문서로 답하면 대기를 풀고 autoTurns를 �
 it('P2: 답 없는 변경은 알림만, 인박스와 상태를 유지한다', async () => {
   const t = await setup(); await updateState(t.root, { state: 'INTERVIEW', awaitingUser: true });
   await t.decide(['judgment-changed']);
-  expect(t.ctx.ui.notify).toHaveBeenCalledWith('판단대기 변경 감지 — 적용할 답 없음(다음 턴에 전달)', 'info');
+  expect(t.ctx.ui.notify).toHaveBeenCalledWith('판단대기 변경 감지 — 적용할 답 없음', 'info');
   expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).awaitingUser).toBe(true);
   expect((await readLedger(t.root)).at(-1)).toMatchObject({ status: 'skip', evidence: { applied: [], resumed: false } });
 });
@@ -367,10 +369,17 @@ it('P2: /status는 아직 tick하지 않은 워처도 안정된 요약 필드를
   expect(JSON.parse(t.ctx.ui.notify.mock.calls[0][0]).watcher).toEqual({ lastTickAt: null,
     judgment: { observedHash: null, stableFor: 0, expectedHash: null }, childTimeouts: 0 });
 });
-it('P2: agent_end와 stalled 동시 요청은 공용 재개 잠금으로 한 턴만 예약', async () => {
+it('M1/L8: 서로 다른 resume 모듈에서도 전송 직전 idle 확인으로 1회·autoTurns +1', async () => {
   const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
-  await Promise.all([t.end(), t.decide(['stalled'])]);
+  const first = await import('../extensions/orchestrator/resume.ts');
+  vi.resetModules(); const second = await import('../extensions/orchestrator/resume.ts');
+  expect(first.autoResume).not.toBe(second.autoResume);
+  t.sendMessage.mockImplementation(() => { t.ctx.isIdle.mockReturnValue(false); });
+  const pi = { sendMessage: t.sendMessage } as unknown as ExtensionAPI;
+  const ctx = { cwd: t.root, hasUI: true, isIdle: t.ctx.isIdle, notify: t.ctx.ui.notify };
+  const results = await Promise.all([first.autoResume(pi, t.root, ctx, 'agent_end'), second.autoResume(pi, t.root, ctx, 'stalled')]);
   expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).autoTurns).toBe(1);
+  expect(results).toContainEqual({ resumed: true }); expect(results).toContainEqual({ skipped: 'busy' });
 });
 it('P2: 같은 종류의 여러 인박스는 묶어서 한 번 재개하고 모든 ID를 원장에 남긴다', async () => {
   const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' }); await t.decide(['stalled', 'stalled']);

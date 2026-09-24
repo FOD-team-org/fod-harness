@@ -22,7 +22,7 @@ export interface AnswerClassification {
 }
 
 const circled = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
-const initial = '# 판단대기\n\n## 지금 상태\n\n대기 중\n\n## 열린 판단\n\n## 결정 완료\n\n| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |\n|---|---|---|---|---|---|\n';
+const initial = '# 판단대기\n\n편집기는 외부 변경 자동 새로고침을 켜 둘 것.\n\n## 지금 상태\n\n대기 중\n\n## 열린 판단\n\n## 결정 완료\n\n| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |\n|---|---|---|---|---|---|\n';
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 const field = (text: string, key: string): string => text.match(new RegExp(`^- ${key}:[ \\t]*(.*)$`, 'mu'))?.[1]?.trim() ?? '';
 
@@ -139,32 +139,66 @@ async function reconcileEdits(root: string, path: string, text: string): Promise
   }
   return text;
 }
+async function rememberQuestions(root: string, items: JudgmentItem[]): Promise<void> {
+  const path = harnessPath(root, 'harness-watcher.json');
+  await withFileLock(path, async () => {
+    const watcher = await readJson<{
+      judgment?: { questions?: Record<string, { hash: string; rev: number }>; [key: string]: unknown };
+      [key: string]: unknown;
+    }>(path, {});
+    const questions = watcher.judgment?.questions ?? {};
+    const missing = items.filter(item => !Object.hasOwn(questions, item.id));
+    if (!missing.length) return;
+    for (const item of missing) questions[item.id] = { hash: questionHash(item), rev: item.rev };
+    watcher.judgment = { ...watcher.judgment, questions };
+    await atomicWrite(path, JSON.stringify(watcher, null, 2) + '\n');
+  });
+}
 export async function readJudgment(root: string, options: { answered?: boolean } = {}): Promise<JudgmentDocument & {
   expectedHash: string;
 }> {
   const config = await loadConfig(root);
   const path = await location(root);
-  return withFileLock(path, async () => {
-    const original = await readText(path, initial);
-    const text = await reconcileEdits(root, path, original);
-    const expectedHash = await save(root, path, text);
+  return retryJudgment(() => withFileLock(path, async () => {
+    const original = await readText(path);
+    const text = await reconcileEdits(root, path, original || initial);
+    const expectedHash = text === original ? hash(text) : await save(root, path, text, original);
     const document = parseJudgment(text);
+    if (text === original) await rememberQuestions(root, document.items);
     return { ...document, items: document.items.filter(item => !options.answered || item.answer.trim()).map(item => ({
       ...item, ...(options.answered ? { classification: classifyAnswer(item.answer, item.options, item.rev, item.answerRev, approvalRequired(item, config.requiresApproval)) } : {}),
     })), expectedHash };
-  });
+  }));
 }
 
-async function save(root: string, path: string, text: string): Promise<string> {
+export class JudgmentConflict extends Error {
+  constructor() { super('판단 내용이 변경되었습니다. 다시 읽어 주세요'); this.name = 'JudgmentConflict'; }
+}
+async function retryJudgment<T>(action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  catch (error) { if (!(error instanceof JudgmentConflict)) throw error; return action(); }
+}
+async function save(root: string, path: string, text: string, original: string): Promise<string> {
   const expectedHash = hash(text);
   const watcherPath = harnessPath(root, 'harness-watcher.json');
-  // 기대 해시를 먼저 영속화해 문서 rename 직후의 워처 이벤트도 억제한다.
   await withFileLock(watcherPath, async () => {
-    const watcher = await readJson<Record<string, unknown>>(watcherPath, {});
-    await atomicWrite(watcherPath, JSON.stringify({ ...watcher, judgment: { path, expectedHash, questions: Object.fromEntries(
-      parseJudgment(text).items.map(item => [item.id, { hash: questionHash(item), rev: item.rev }]),
-    ), savedAt: new Date().toISOString() } }, null, 2) + '\n');
-    await atomicWrite(path, text);
+    const watcher = await readJson<{
+      judgment?: { expectedHash?: string; externalPending?: { hash: string; at: string } };
+      watch?: { judgment?: { lastEmitted?: string; observed?: { hash: string; since: string } } };
+    }>(watcherPath, {});
+    const previous = watcher.judgment;
+    const observed = watcher.watch?.judgment?.observed;
+    const originalHash = hash(original);
+    const externalPending = previous?.externalPending ?? (original && originalHash !== previous?.expectedHash
+      && originalHash !== watcher.watch?.judgment?.lastEmitted
+      ? { hash: originalHash, at: observed?.hash === originalHash ? observed.since : new Date().toISOString() } : undefined);
+    // The watcher lock excludes tick until both document and metadata are committed.
+    await atomicWrite(path, text, async () => {
+      if (hash(await readText(path)) !== originalHash) throw new JudgmentConflict();
+    });
+    await atomicWrite(watcherPath, JSON.stringify({ ...watcher, judgment: { path, expectedHash, externalPending,
+      questions: Object.fromEntries(parseJudgment(text).items.map(item => [item.id, { hash: questionHash(item), rev: item.rev }])),
+      savedAt: new Date().toISOString() } }, null, 2) + '\n');
   });
   return expectedHash;
 }
@@ -178,12 +212,13 @@ function requireItem(text: string, id: string): JudgmentItem {
 
 export async function addJudgment(root: string, input: JudgmentInput): Promise<{ item: JudgmentItem; expectedHash: string }> {
   const path = await location(root);
-  return withFileLock(path, async () => {
-    let text = await reconcileEdits(root, path, await readText(path, initial));
+  return retryJudgment(() => withFileLock(path, async () => {
+    const original = await readText(path);
+    let text = await reconcileEdits(root, path, original || initial);
     const document = parseJudgment(text);
     const dedupeKey = input.dedupeKey ? hash(input.dedupeKey) : undefined;
     const found = dedupeKey && document.items.find(item => item.dedupeKey === dedupeKey);
-    if (found) return { item: found, expectedHash: await save(root, path, text) };
+    if (found) return { item: found, expectedHash: await save(root, path, text, original) };
     if (!input.title.trim()) throw new Error('판단 제목이 필요합니다');
     const numbers = [...text.matchAll(/\bA(\d+)(?:-\d+)?\b/gu)].map(match => Number(match[1]));
     const id = `A${Math.max(0, ...numbers) + 1}`;
@@ -205,37 +240,39 @@ export async function addJudgment(root: string, input: JudgmentInput): Promise<{
     const nextHeading = text.slice(afterOpen).search(/^## /mu);
     const at = nextHeading < 0 ? text.length : afterOpen + nextHeading;
     text = text.slice(0, at).trimEnd() + '\n\n' + section + text.slice(at);
-    const expectedHash = await save(root, path, text);
+    const expectedHash = await save(root, path, text, original);
     return { item: requireItem(text, id), expectedHash };
-  });
+  }));
 }
 
 export async function answerJudgment(root: string, id: string, answer: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
   if (/[\r\n]/u.test(answer)) throw new Error('답은 한 줄로 입력해야 합니다');
   const path = await location(root);
-  return withFileLock(path, async () => {
-    let text = await reconcileEdits(root, path, await readText(path, initial));
+  return retryJudgment(() => withFileLock(path, async () => {
+    const original = await readText(path);
+    let text = await reconcileEdits(root, path, original || initial);
     const item = requireItem(text, id);
     let replacement = item.raw.replace(/^- 답:[^\r\n]*$/mu, () => `- 답: ${answer}`);
     replacement = replacement.replace(/^- 답 기준 rev:[^\r\n]*\n?/mu, '');
     replacement = replacement.trimEnd() + `\n- 답 기준 rev: ${item.rev}\n\n`;
     text = text.slice(0, item.start) + replacement + text.slice(item.end);
-    return { item: requireItem(text, id), expectedHash: await save(root, path, text) };
-  });
+    return { item: requireItem(text, id), expectedHash: await save(root, path, text, original) };
+  }));
 }
 
 export async function writeJudgmentStatus(root: string, status: string): Promise<{ expectedHash: string }> {
   const path = await location(root);
-  return withFileLock(path, async () => {
-    let text = await reconcileEdits(root, path, await readText(path, initial));
+  return retryJudgment(() => withFileLock(path, async () => {
+    const original = await readText(path);
+    let text = await reconcileEdits(root, path, original || initial);
     if (!/^## 지금 상태\s*$/mu.test(text)) text = `## 지금 상태\n\n${text}`;
     const heading = /^## 지금 상태[^\r\n]*\r?\n/mu.exec(text)!;
     const start = heading.index + heading[0].length;
     const boundary = text.slice(start).search(/^## /mu);
     const end = boundary < 0 ? text.length : start + boundary;
     text = text.slice(0, start) + `\n${oneLine(status)}\n\n` + text.slice(end);
-    return { expectedHash: await save(root, path, text) };
-  });
+    return { expectedHash: await save(root, path, text, original) };
+  }));
 }
 
 const tableValue = (value: string): string => value.replace(/\|/gu, '\\|').replace(/\r?\n/gu, '<br>');
@@ -245,9 +282,10 @@ export async function completeJudgment(
 ): Promise<{ expectedHash: string; completed: CompletedJudgment }> {
   const path = await location(root);
   return withFileLock(path, async () => {
-    let text = await reconcileEdits(root, path, await readText(path, initial));
+    const original = await readText(path);
+    let text = await reconcileEdits(root, path, original || initial);
     const item = requireItem(text, id);
-    if (input.expectedRaw !== undefined && input.expectedRaw !== item.raw) throw new Error('판단 내용이 변경되었습니다. 다시 읽어 주세요');
+    if (input.expectedRaw !== undefined && input.expectedRaw !== item.raw) throw new JudgmentConflict();
     const classification = classifyAnswer(
       item.answer, item.options, item.rev, input.answerRev ?? item.answerRev ?? item.rev, input.requiresApproval ?? approvalRequired(item),
     );
@@ -270,7 +308,7 @@ export async function completeJudgment(
       member.id, String(member.rev), member.id === id ? item.answer : `모호: ${member.answer} → ${id}: ${item.answer}`,
       input.interpretation, input.commit, completed.date,
     ].map(tableValue).join(' | ')} |\n`;
-    return { expectedHash: await save(root, path, text), completed };
+    return { expectedHash: await save(root, path, text, original), completed };
   });
 }
 
@@ -290,21 +328,23 @@ function relatedChain(items: JudgmentItem[], last: JudgmentItem): JudgmentItem[]
 }
 interface ApplyEntry { id: string; interpretation: string }
 interface ApplyJournal { id: string; rev: number; answer: string; interpretation: string; releases: string[]; hold?: boolean; resolution?: string; relevant?: boolean }
-async function markFollowup(root: string, original: JudgmentItem, followup: string): Promise<void> {
+async function markFollowup(root: string, item: JudgmentItem, followup: string): Promise<void> {
   const path = await location(root);
   await withFileLock(path, async () => {
-    const text = await reconcileEdits(root, path, await readText(path, initial));
-    const current = requireItem(text, original.id);
-    if (current.raw !== original.raw) throw new Error('판단 내용이 변경되었습니다. 다시 읽어 주세요');
+    const original = await readText(path);
+    const text = await reconcileEdits(root, path, original || initial);
+    const current = requireItem(text, item.id);
+    if (current.raw !== item.raw) throw new JudgmentConflict();
     const raw = current.raw.trimEnd() + `\n- 후속 질문: ${followup}\n\n`;
-    await save(root, path, text.slice(0, current.start) + raw + text.slice(current.end));
+    await save(root, path, text.slice(0, current.start) + raw + text.slice(current.end), original);
   });
 }
-export async function applyJudgments(root: string, ids?: string[]): Promise<{
+export async function applyJudgments(root: string, ids?: string[], expectedAnswers?: Record<string, string>): Promise<{
   applied: ApplyEntry[]; unapplied: { id: string; reason: string }[];
 }> {
-  return withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
-    const applied: ApplyEntry[] = [], unapplied: { id: string; reason: string }[] = [];
+  const applied: ApplyEntry[] = [];
+  return retryJudgment(() => withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    const unapplied: { id: string; reason: string }[] = [];
     const journalPath = harnessPath(root, 'harness-judgment-apply.json');
     let journal = await readJson<ApplyJournal[]>(journalPath, []);
     const persist = () => atomicWrite(journalPath, JSON.stringify(journal, null, 2) + '\n');
@@ -353,6 +393,8 @@ export async function applyJudgments(root: string, ids?: string[]): Promise<{
       }
     }
     for (const item of document.items.filter(item => !ids?.length || ids.includes(item.id))) {
+      // Automatic application must not accept a new answer typed after its stability check.
+      if (expectedAnswers && expectedAnswers[item.id] !== item.raw) throw new JudgmentConflict();
       if (item.followup) { unapplied.push({ id: item.id, reason: `후속 질문 ${item.followup}의 답을 기다립니다` }); continue; }
       const requiresApproval = approvalRequired(item, config.requiresApproval);
       const classification = classifyAnswer(item.answer, item.options, item.rev, item.answerRev, requiresApproval);
@@ -389,5 +431,5 @@ export async function applyJudgments(root: string, ids?: string[]): Promise<{
     }
     const remaining = new Set((await readJudgment(root)).items.map(item => item.id));
     return { applied, unapplied: unapplied.filter(item => remaining.has(item.id) || !document.items.some(open => open.id === item.id)) };
-  });
+  }));
 }

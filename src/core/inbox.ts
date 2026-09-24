@@ -57,3 +57,12 @@ export async function deliverInbox(root: string, ids: string[], runId: string): 
 export async function ackInbox(root: string, ids: string[], runId?: string): Promise<InboxRecord[]> {
   return change(root, ids, 'applied', runId);
 }
+
+export async function resolveInbox(root: string, ids: string[], by: 'orchestrator', note?: string): Promise<InboxRecord[]> {
+  const records = await mutate(root, records => {
+    if (ids.some(id => !records.some(record => record.id === id))) throw new Error('인박스 항목을 찾을 수 없습니다');
+    return records.map(record => ids.includes(record.id)
+      ? { ...record, status: 'applied', resolvedBy: by, ...(note ? { resolutionNote: note } : {}) } : record);
+  });
+  return records.filter(record => ids.includes(record.id));
+}

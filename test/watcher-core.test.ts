@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tick, detectRecovery, watcherStatus } from '../src/core/watcher.ts';
 import { addInboxOnce, ackInbox, deliverInbox, listInbox } from '../src/core/inbox.ts';
@@ -14,7 +15,7 @@ const now = Date.parse('2026-09-24T00:00:00Z');
 const iso = (value: number) => new Date(value).toISOString();
 afterEach(async () => { vi.restoreAllMocks(); process.exitCode = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
-  const root = await mkdtemp('/private/tmp/fodh-watcher-'); roots.push(root);
+  const root = await mkdtemp(join(tmpdir(), 'fodh-watcher-')); roots.push(root);
   const { item } = await addJudgment(root, { title: '방식', background: '', options: ['진행', '보류'], recommend: '', blocks: '' });
   const path = join(root, 'docs/판단대기.md');
   const text = await readFile(path, 'utf8');
@@ -65,14 +66,14 @@ it('설정 경로를 매 tick 재해석하고 시계·해시를 주입한다', a
   await tick(t.root, { now: () => now, hash: () => 'test-hash' });
   expect((await tick(t.root, { now: () => now + 10000, hash: () => 'test-hash' })).emitted[0]).toMatchObject({ path, hashAfter: 'test-hash' });
 });
-it.each([...activeStates])('%s 활동 상태는 heartbeat 최댓값 이후 한계 초과에서만 감지한다', async state => {
+it.each([...activeStates].filter(state => state !== 'recovering'))('%s 활동 상태는 heartbeat 최댓값 이후 한계 초과에서만 감지한다', async state => {
   const t = await setup();
   await atomicWrite(harnessPath(t.root, 'harness-state.json'), JSON.stringify({ state, runId: 'r1',
     enteredAt: iso(now - 1200000), lastEventAt: iso(now - 900000), savedAt: iso(now - 600000) }));
   expect((await tick(t.root, { now })).emitted).toEqual([]);
   expect((await tick(t.root, { now: now + 1 })).emitted[0]).toMatchObject({ kind: 'stalled', state, runId: 'r1' });
 });
-it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'paused(error)'])('%s 정지 상태는 stalled 미발행', async state => {
+it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL', 'WAIT_JUDGMENT', 'WAIT_RETRY', 'WAIT_RESOURCE', 'paused(error)', 'recovering'])('%s 정지 상태는 stalled 미발행', async state => {
   const t = await setup(); await atomicWrite(harnessPath(t.root, 'harness-state.json'), JSON.stringify({ state, savedAt: iso(now - 3600000) }));
   expect((await tick(t.root, { now })).emitted).toEqual([]);
 });
@@ -137,7 +138,7 @@ it.each([
   await expect(loadConfig('/unused', { watch: { [key]: value } })).rejects.toThrow(`watch.${key}는 ${expected}여야 합니다`);
 });
 it('watch 기본값과 CLI tick/status/config get 출력', async () => {
-  const t = await setup(); const defaults = { stallMinutes: 10, childTimeoutMinutes: 30, pollSeconds: 5, stableSeconds: 10, tickSeconds: 30 };
+  const t = await setup(); const defaults = { stallMinutes: 10, childTimeoutMinutes: 30, pollSeconds: 5, stableSeconds: 10, freeTextStableSeconds: 60, tickSeconds: 30 };
   expect(await getConfig(t.root, 'watch')).toEqual(defaults);
   const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
   await main(['config', 'get', 'watch'], t.root); expect(JSON.parse(String(output.mock.calls.at(-1)![0]))).toEqual(defaults);

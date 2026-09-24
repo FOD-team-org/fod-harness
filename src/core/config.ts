@@ -12,7 +12,7 @@ export interface HarnessConfig {
       brainModel: string; brainEffort: string; workerModel: string; workerEffort: string; maxChildAgents: number;
     };
   };
-  watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; tickSeconds: number };
+  watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
   judgment: { file: string };
   requiresApproval: string[];
 }
@@ -41,6 +41,7 @@ export async function loadConfig(root: string, candidate?: unknown): Promise<Har
     stallMinutes: positive(defaultValue(watch.stallMinutes, 10), 'watch.stallMinutes', true),
     childTimeoutMinutes: positive(defaultValue(watch.childTimeoutMinutes, 30), 'watch.childTimeoutMinutes', true),
     pollSeconds: positive(defaultValue(watch.pollSeconds, 5), 'watch.pollSeconds'),
+    freeTextStableSeconds: positive(defaultValue(watch.freeTextStableSeconds, 60), 'watch.freeTextStableSeconds'),
     stableSeconds: positive(defaultValue(watch.stableSeconds, 10), 'watch.stableSeconds'),
     tickSeconds: positive(defaultValue(watch.tickSeconds, 30), 'watch.tickSeconds'),
   };

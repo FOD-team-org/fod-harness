@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-age
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { harnessPath, withFileLock } from '../../src/core/storage.ts';
 import { getConfig, loadConfig } from '../../src/core/config.ts';
 import { activeStates as active, readState, updateState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
 
@@ -32,13 +33,13 @@ export function resumeContext(ctx: ExtensionContext): ResumeContext {
     notify: (message, type) => ctx.ui?.notify?.(message, type) };
 }
 export interface ResumeResult { resumed?: boolean; skipped?: string; stopped?: boolean }
-const resuming = new Set<string>();
 export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: ResumeContext, reason: string): Promise<ResumeResult> {
   if (ctxLike.hasUI === false) return { skipped: 'print' };
-  if (ctxLike.isIdle() === false || resuming.has(root)) return { skipped: 'busy' };
-  resuming.add(root);
-  try {
+  if (ctxLike.isIdle() === false) return { skipped: 'busy' };
+  return withFileLock(harnessPath(root, 'harness-resume'), async () => {
+    if (!ctxLike.isIdle()) return { skipped: 'busy' };
     let state = await readState(root);
+    if (state.userAborted) return { skipped: 'user-aborted' };
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
     if (!active.has(state.state)) {
       if (['WAIT_JUDGMENT', 'DONE_ALL', 'paused(cleanup)'].includes(state.state)) ctxLike.notify(`하네스 상태: ${state.state}`, 'info');
@@ -53,6 +54,12 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       ctxLike.notify('진행 정체를 판단대기에 등록했습니다.', 'warning');
       return { stopped: true };
     }
+    let content: string;
+    try { content = await instruction(root, state); }
+    catch {
+      try { ctxLike.notify('자동 재개 전송에 실패했습니다. 다음 사용자 입력에서 다시 진행합니다.', 'warning'); } catch { /* disposed UI */ }
+      return { skipped: 'send-failed' };
+    }
     let beforeSend: Partial<HarnessState> = {};
     state = await updateState(root, current => {
       beforeSend = { autoTurns: current.autoTurns,
@@ -60,9 +67,14 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       return { autoTurns: Number(current.autoTurns ?? 0) + 1,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
     });
-    await new Promise(resolve => setTimeout(resolve, 0));
     try {
-      await send(pi, root, state, state.state, true);
+      // No await between the final idle check and Pi's synchronous streaming transition.
+      if (!ctxLike.isIdle()) {
+        await updateState(root, beforeSend);
+        return { skipped: 'busy' };
+      }
+      pi.sendMessage({ customType: 'harness-orchestrator', content, display: true,
+        details: { state: state.state, taskId: state.taskId } }, { triggerTurn: true, deliverAs: 'followUp' });
       return { resumed: true };
     } catch {
       await updateState(root, beforeSend);
@@ -70,5 +82,5 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       catch { /* 세션 폐기 뒤에는 warning 알림도 사용할 수 없다. */ }
       return { skipped: 'send-failed' };
     }
-  } finally { resuming.delete(root); }
+  });
 }
