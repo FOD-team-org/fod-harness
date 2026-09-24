@@ -43,3 +43,11 @@ it('R5 CLI·코어 거부 문구는 설정 판단 경로를 안내한다', async
   await expect(applyJudgments(root)).rejects.toThrow('notes/사용자결정.md');
   expect(await cli(root, ['judgment', 'apply'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('notes/사용자결정.md') } });
 });
+
+it('N4 state await-user는 두뇌 거부·사용자 허용', async () => {
+  const root = await project('IMPLEMENT');
+  vi.stubEnv('FODH_BRAIN', '1');
+  expect(await cli(root, ['state', 'await-user'])).toMatchObject({ code: 1, value: { error: expect.stringContaining('사용자 대기 표시') } });
+  vi.stubEnv('FODH_BRAIN', '');
+  expect(await cli(root, ['state', 'await-user'])).toMatchObject({ code: 0, value: { awaitingUser: true } });
+});

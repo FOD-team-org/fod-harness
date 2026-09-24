@@ -42,12 +42,17 @@ export async function doctor(root: string, options: {
     const checkedAt = new Date().toISOString();
     await updateState(root, { doctor: { ok: true, checkedAt } });
     const skills = result.init?.skills ?? [], memory_paths = result.init?.memory_paths ?? [];
+    const pluginsLeaked = config.brain.allowPlugins ? [] : [...new Set([
+      ...(result.init?.plugins ?? []).filter(source => source !== 'builtin'),
+      ...[...(result.init?.agents ?? []), ...(result.init?.commands ?? []), ...skills].filter(name => name.startsWith('codex:')),
+    ])];
+    if (pluginsLeaked.length) await notify(root, { key: 'doctor:plugins', level: 'warning', title: '전역 플러그인 로드 확인', body: `발견 항목: ${pluginsLeaked.join(', ')}` });
     const skillsMissing = config.skills.install.filter(name => !skills.includes(name));
     const markers = [...responseText.matchAll(/문서 확인 (FODH-DOC-[a-f0-9]{8})\b/gu)].map(match => match[1]);
     const claudeMdLoaded = markers.length > 0;
     const claudeMdStale = markers.some(marker => marker !== claudeMdMarker);
     if (skillsMissing.length || !claudeMdLoaded || claudeMdStale) await notify(root, { key: 'doctor:skills-memory', level: 'warning', title: '하네스 문서 로드 확인', body: `누락 스킬: ${skillsMissing.join(', ') || '없음'}, CLAUDE.md 로드: ${claudeMdLoaded}${claudeMdStale ? ', 낡음(재생성 필요)' : ''}` });
-    return { ok: true, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
+    return { ok: true, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, pluginsLeaked, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
   } catch (error) {
     await updateState(root, { doctor: { ok: false, checkedAt: new Date().toISOString() } });
     await notify(root, { key: 'doctor:fail', level: 'error', title: 'doctor 실패', body: 'doctor 검증에 실패했습니다. 오류를 확인하세요' });

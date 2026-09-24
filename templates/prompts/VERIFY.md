@@ -15,4 +15,4 @@
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 실패한 검사를 범위 밖으로 제외하려면 `fodh judgment add --title "<검증 판단>" --background "<설정 또는 실패 증거>" --options "설정·범위 결정|보류" --recommend "<추천>" --blocks {{taskId}}`로 사용자 판단을 받는다(두뇌가 면제하지 않는다). 미실행 검사를 통과로 쓰지 않는다. 전체 스위트는 예외 없이 heavy 경로.
-`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add`
+`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add … --blocks {{taskId}} --reclaim`

@@ -102,7 +102,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'watch' && action === 'tick') { exact(0); result = await tick(root); }
     else if (group === 'watch' && action === 'status') { exact(0); result = await watcherStatus(root); }
     else if (group === 'state' && action === 'get') { exact(0); result = await readState(root); }
-    else if (group === 'state' && action === 'await-user') { exact(0); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
+    else if (group === 'state' && action === 'await-user') { exact(0); await assertNotBrain(root, '사용자 대기 표시'); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
       exact(1);
       const from = (await readState(root)).state, transition = `${from}→${rest[0]}`;

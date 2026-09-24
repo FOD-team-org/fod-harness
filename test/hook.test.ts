@@ -7,6 +7,7 @@ const roots: string[] = [];
 interface HookOptions {
   env?: NodeJS.ProcessEnv;
   projectEnv?: 'FODH_PROJECT_ROOT' | 'CLAUDE_PROJECT_DIR';
+  cwdRelative?: string;
   approval?: string[];
   setup?: (root: string) => Promise<void>;
   worktrees?: boolean; stateFile?: 'missing' | 'invalid'; configFile?: 'invalid' | 'missing';
@@ -25,14 +26,15 @@ async function invoke(tool_name: string, tool_input: unknown, state = 'IMPLEMENT
     await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ requiresApproval: options.approval }));
   }
   await options.setup?.(root);
-  const cwd = options.projectEnv ? join(root, 'worktree') : root;
-  if (options.projectEnv) await mkdir(cwd);
+  const cwd = options.cwdRelative ? join(root, options.cwdRelative) : options.projectEnv ? join(root, 'worktree') : root;
+  if (options.projectEnv || options.cwdRelative) await mkdir(cwd, { recursive: true });
   const env = { ...process.env };
   delete env.FODH_PROJECT_ROOT;
   delete env.CLAUDE_PROJECT_DIR;
   delete env.FODH_TEST_MARKERS;
   delete env.FODH_BRAIN; delete env.FODH_DOCS_ROOT; delete env.FODH_CODEX_CHILD;
   if (options.projectEnv) env[options.projectEnv] = root;
+  if (options.cwdRelative) env.FODH_PROJECT_ROOT = root;
   Object.assign(env, options.env);
   const input = JSON.parse(JSON.stringify(tool_input)
     .replaceAll('@root@', root).replaceAll('@pkg@', resolve('.')));
@@ -429,7 +431,7 @@ it('F24 설정 판단 경로·기본 fallback·판단 저널을 보호한다', a
 it.each([
   'cp /tmp/판단대기.md docs/', 'mv /tmp/판단대기.md docs', 'rsync -a /tmp/stage/ docs/',
   'tar -xf archive.tar -C docs', 'ln docs/판단대기.md docs/alias.md',
-  'ln /tmp/file docs/판단대기.md', 'cp -r /tmp/stage/. docs',
+  'ln /tmp/file docs/판단대기.md', 'cp -r @root@/docs/stage/. docs',
   `python3 -c "open('docs/판단대기.md','a').write('1')"`,
   `node -e "require('fs').appendFileSync('docs/판단대기.md','1')"`,
   `perl -pi -e 's/x/y/' docs/판단대기.md`, `ruby -i -e 'puts 1' docs/판단대기.md`,
@@ -437,7 +439,8 @@ it.each([
   `bash -c 'cp /tmp/판단대기.md docs/'`, `sh -c 'tee docs/판단대기.md'`,
   `zsh -lc 'tar -xf archive.tar -C docs'`,
 ])('R1 판단 파일 쓰기 우회 거부: %s', async command => {
-  expect(await invoke('Bash', { command }, 'IMPLEMENT', brain))
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { ...brain,
+    setup: root => mkdir(join(root, 'docs/stage'), { recursive: true }).then(() => {}) }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('판단대기 문서는 사용자만') });
 });
 it.each(['cat docs/판단대기.md', 'grep 답 docs/판단대기.md', `bash -c 'cat docs/판단대기.md'`,
@@ -459,7 +462,7 @@ it.each(['cp README.md docs/', 'mv docs/x docs/', 'rsync README.md docs/', 'tar 
 it.each(['nohup cp docs/판단대기.md docs/', 'timeout -k 5 10 cp /tmp/판단대기.md docs/',
   'nice -n 10 sh -c "cp /tmp/판단대기.md docs/"', 'time -o docs/timing cp /tmp/판단대기.md docs/',
   'xargs -n 1 cp /tmp/판단대기.md docs/', 'stdbuf -o L cp /tmp/판단대기.md docs/',
-  'env LANG=C cp /tmp/판단대기.md docs/', 'cp -t docs /tmp/판단대기.md', 'mv --target-directory=docs /tmp/판단대기.md', 'cp -r /tmp/files docs/', 'rsync -a /tmp/files docs/',
+  'env LANG=C cp /tmp/판단대기.md docs/', 'cp -t docs /tmp/판단대기.md', 'mv --target-directory=docs /tmp/판단대기.md', 'cp -r /tmp/files/ docs/', 'rsync -a /tmp/files/ docs/',
   'tar -xf archive.tar -C docs', 'unzip archive.zip -d docs', 'tar -xf archive.tar 판단대기.md', 'unzip archive.zip 판단대기.md'])('S5 래퍼·재귀·추출 판단 쓰기 차단: %s', async command => {
   const result = await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } });
   expect(result.code).toBe(2); expect(result.stderr).toContain('판단');
@@ -486,4 +489,42 @@ it.each(['mcp__codex__task', 'mcp__plugin_codex__rescue', 'Agent', 'Task'])('F27
 });
 it.each([['Bash', { command: 'fodh codex task --spec docs/spec.md' }], ['Agent', { subagent_type: 'general-purpose' }]] as const)('F27 정식 위임 %s 허용', async (name, input) => {
   expect((await invoke(name, input, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});
+
+it.each(['exec codex exec hi', 'builtin command codex exec hi', 'eval "codex exec hi"',
+  'bunx codex', 'bunx @openai/codex@latest', 'pnpm dlx @openai/codex', 'yarn dlx @openai/codex@latest', 'npx --yes @openai/codex',
+  'script -q /dev/null codex exec hi', 'script -a /dev/null codex exec hi', 'script -q -e -F -k -t /dev/null codex exec hi',
+  'caffeinate -i codex exec hi', 'caffeinate -t 10 -w 12 codex exec hi', 'arch -arm64 codex exec hi', 'arch -x86_64 claude -p hi',
+  'node ~/.claude/plugins/cache/*/codex/*/scripts/codex-comp*.mjs task',
+  'find ~/.claude/plugins/cache -name "codex-comp*.mjs" -exec node {} task \\;',
+  'find . -execdir codex exec hi \\;', 'find . -ok cswap switch \\;'])('N1 위임 래퍼·패키지·glob·find 차단: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('위임은 fodh codex task / Claude Agent 로만 한다') });
+});
+it.each(['exec fodh codex task --spec docs/spec.md', 'npx vitest run', 'bunx vitest run', 'pnpm dlx vitest run',
+  'yarn dlx vitest run', 'eval "fodh codex task --spec docs/spec.md"'])('N1 정상 명령 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});
+it.each([{ skill: 'codex:rescue' }, { name: 'codex:rescue' }])('N1 Codex Skill 별칭 거부 %#', async input => {
+  expect(await invoke('Skill', input, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('위임은 fodh codex task / Claude Agent 로만 한다') });
+});
+it('N1 하네스 Skill 허용', async () => {
+  expect((await invoke('Skill', { skill: 'fodh-workflow' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});
+it.each(['cp -a README.md docs/', 'rsync -av README.md docs/', 'cp --recursive README.md docs/'])('N5 단일 파일 재귀 옵션 오탐 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => writeFile(join(root, 'README.md'), 'fixture') })).code).toBe(0);
+});
+it.each(['cp --recursive @root@/docs/x docs/', 'rsync --archive @root@/docs/x docs/', 'rsync -a @root@/docs/x/ docs/',
+  'cp -R @root@/docs/x docs/', 'tar xf a.tar -C docs', 'bsdtar xvf a.tar --directory docs', 'gtar xzf a.tar -Cdocs'])('N5 디렉터리 재귀·tar 묶음 추출 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => mkdir(join(root, 'docs/x'), { recursive: true }).then(() => {}) }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('판단') });
+});
+it.each(['tar xf a.tar -C .pi', 'bsdtar -xf a.tar --directory .pi/scratch', 'gtar xzf a.tar -C.pi', 'unzip a.zip -d .pi/scratch'])('N5 .pi 목적지 추출 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('.pi 아래에는 아카이브를 풀 수 없습니다') });
+});
+it.each(['tar xf a.tar', 'bsdtar -xf a.tar', 'unzip a.zip'])('N5 .pi cwd 추출 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, cwdRelative: '.pi/scratch' }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('.pi 아래에는 아카이브를 풀 수 없습니다') });
 });

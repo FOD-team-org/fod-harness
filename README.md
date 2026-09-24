@@ -21,7 +21,7 @@ Pi가 잠금을 보유한 동안 `fodh doctor`는 즉시 오류를 반환합니�
 
 ## 모델 배치와 교체
 
-기본 두뇌는 Claude Code **fable**(`claude-fable-5-1`)입니다. `brain.allowPlugins=false`(기본값)이면 `--strict-mcp-config`와 빈 `--mcp-config`로 MCP 설정 상속을 제한합니다. true이면 이 옵션을 생략합니다. 플러그인 전체 비활성 옵션은 확인되지 않았으며, Codex 플러그인 도구·companion 직접 실행은 훅에서도 차단합니다.
+기본 두뇌는 Claude Code **fable**(`claude-fable-5-1`)입니다. `brain.allowPlugins=false`(기본값)이면 `--setting-sources project,local`로 사용자 전역 설정(플러그인·enabledPlugins 포함)을 제외하고 `--strict-mcp-config` + 빈 `--mcp-config`로 MCP를 제한한다. 하네스 스킬·훅은 프로젝트 `.claude/settings.json`과 `--settings`로 들어온다. 사용자 전역 스킬(`~/.claude/skills`)도 함께 제외된다. true이면 위 세 옵션을 생략하며 위임 훅은 유지된다. doctor는 비builtin plugin source 또는 codex: 접두 agent·command·skill이 남으면 `pluginsLeaked`와 경고를 반환한다.
 프로바이더 모델 목록은 `fable`, `opus`, `sonnet`, `haiku` 순서이며 doctor는 항상 `haiku`를 사용합니다.
 
 두뇌 모델은 다음 세 가지 방법으로 바꿀 수 있습니다.
@@ -116,7 +116,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 | 4. 쓰기 경계 | 두뇌는 docs.root·.pi(보호 파일 제외)·CLAUDE.md·AGENTS.md·README.md와 등록 워크트리만 쓰기 허용. Write/Edit 루트 밖은 .pi/scratch 안내. .claude/skills는 fodh skills install 전용. Bash는 루트 안 소스 쓰기를 검사하며 디바이스·외부 리다이렉트·인터프리터 실행 인자는 제외. heredoc 본문은 명령으로 해석하지 않음. git apply/patch 실제 적용은 대상 워크트리에서만 허용 |
 | 5. 상태·직접 실행 | commit의 기존 문서 상태 예외 유지, push/merge는 MERGE·DOCS만. 직접 codex 금지. 두뇌의 claude/cswap 직접 실행·codex-companion 인자·openai-codex 플러그인 경로·mcp__*codex* 도구·codex:* Agent/Task도 거부하며 위임은 fodh codex task 또는 Claude Agent로만 허용. 두뇌의 git worktree add/remove/prune는 fodh worktree 안내, branch -D/reset --hard/force push는 승인 설정과 무관하게 거부 |
 | 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
-| 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 -r/-R/-a일 때 거부. tar/unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
+| 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 디렉터리일 때만 해당한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
 
 `fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
 
@@ -141,10 +141,10 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 커밋 비밀값 검사(P5) | 1 MB 초과·바이너리 untracked 파일은 내용의 비밀값 검사 없이 커밋되며 이름만 원장에 남는다 |
 | 검증 산출물(P6) | 검증 뒤 새로 더러워진 경로는 result.json·state.verify.dirtyAfter에 남는다. 검수 커밋의 clean 검사에서 거부되면 검증 산출물인지 확인하고 프로젝트 .gitignore 추가를 위임한다 |
 | git 프로젝트 판정(L5) | F8은 프로젝트 루트의 `.git`만 확인한다. git 저장소의 하위 디렉터리를 프로젝트 루트로 쓰면 비-git으로 판정되어 루트 폴백이 적용된다 |
-| 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령, heredoc으로 셸에 넘긴 문자열·스크립트 파일 실행의 내부 명령은 규칙 검사에서 빠진다. `sh -c` 문자열은 재파싱한다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
+| 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령, heredoc으로 셸에 넘긴 문자열·스크립트 파일 실행의 내부 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). `sh -c`·eval 문자열은 재파싱한다. 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
 | 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다 |
-| MCP 도구 쓰기 | 기본 MCP 제한 옵션과 Codex MCP 도구 차단이 있지만 그 외 MCP 고유 입력 형식은 경로 가드와 감사의 일반 Write/Bash 판정 밖이다. brain.allowPlugins=true도 위임 훅을 해제하지 않는다 |
-| 판단 답 보류 | mtime을 사용하지 않는다. 사용자가 두뇌 턴 중 쓴 답도 held가 되므로 /judged <번호>로 확인한다. 턴 종료 후 분리된 자식이 늦게 쓴 답은 종료 스냅숏 비교로 잡지 못한다 |
+| MCP 도구 쓰기 | 기본 MCP 제한 옵션과 Codex MCP 도구 차단이 있지만 그 외 MCP 고유 입력 형식은 경로 가드와 감사의 일반 Write/Bash 판정 밖이다. brain.allowPlugins=true도 위임 훅을 해제하지 않는다. 변수 경유(`P=codex; $P …`)·`$(which codex)`·python subprocess 호출은 리터럴 명령 검사로 차단하지 못한다 |
+| 판단 답 보류 | mtime을 사용하지 않는다. 사용자가 두뇌 턴 중 쓴 답도 held가 되므로 /judged <번호>로 확인한다. 턴 종료 후 분리된 자식이 늦게 쓴 답은 종료 스냅숏 비교로 잡지 못한다. 비정상 종료 뒤 잔존 스냅숏은 다음 begin/recover에서 먼저 정산된다. 복구 시 살아 있는 다른 Pi 인스턴스의 스냅숏은 건드리지 않는다. 턴 중 무인자 적용은 스냅숏과 달라진 답을 미적용으로 남기며 번호 명시 적용은 유지한다 |
 | 변수·인용·경로 확장 | 토큰을 cwd 기준으로 resolve하며 셸 변수·glob·치환·cd 효과는 실행/추적하지 않는다. 훅은 기존 조상과 symlink를 realpath로 확인하지만 사후 감사는 리터럴 경로 기준이다. 인용된 인라인 코드는 일부만 감사한다 |
 | Codex 자식 | Codex는 Claude 훅 밖이다. FODH_CODEX_CHILD=1의 훅 거부는 보조이며 실제 방어는 CLI 진입 거부다 |
 | 100개 이상 삭제 | 훅은 삭제 개수를 세지 않는다. 대량 삭제 판정은 사후 검수 몫이며 자동 100개 임계 감사는 구현하지 않는다 |
@@ -159,9 +159,9 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 전이·명령 | 하네스가 확인·기록하는 증거 |
 |---|---|
 | 판단 변경 → 적용 | 턴 밖 안정화된 비held 답 자동 적용. 턴 중에는 지연 후 내용 스냅숏 비교로 held 처리, /judged <번호>로만 해제 |
-| PICK | `fodh pick --dry`로 후보를 보고 `fodh pick`으로 outcome을 확정. 후보가 있으면 사용자 대기를 거부하며, 후보 없는 DONE_ALL/WAIT_*와 EMPTY는 기존 대기 유지 |
-| task 진행 중 사용자 대기 | SPEC·IMPLEMENT·VERIFY·FIX·REVIEW·MERGE·DOCS·CLEANUP에서 현재 task를 막는 열린 판단이 없으면 대기를 거부·재개. 사용자 결정은 `fodh judgment add`로 등록. 위임·슬롯 대기가 우선하며 재개 3회 후 정체 판단으로 중단 |
-| 위임 | `fodh codex task` 또는 Claude Agent만 사용. 직접 codex/claude/cswap·companion·Codex 플러그인 도구는 훅 거부 |
+| PICK | `fodh pick --dry`로 후보를 보고 `fodh pick`으로 outcome을 확정. 자동 턴에서 후보가 있으면 사용자 대기를 거부하며, 사용자 입력 턴·후보 없는 DONE_ALL/WAIT_*·EMPTY는 기존 대기 유지 |
+| task 진행 중 사용자 대기 | SPEC·IMPLEMENT·VERIFY·FIX·REVIEW·MERGE·DOCS·CLEANUP에서 현재 task를 막는 열린 판단이 없으면 자동 턴의 대기를 거부·재개. 사용자 입력으로 시작한 턴의 명시적 대기는 수용한다(PICK도 동일). 사용자 결정은 `fodh judgment add … --blocks <taskId> --reclaim`으로 등록하고 RECLAIM→PICK 경로를 따른다. `fodh state await-user`는 사용자 전용이다. 위임·슬롯 대기가 우선하며 재개 3회 후 정체 판단으로 중단 |
+| 위임 | `fodh codex task` 또는 Claude Agent만 사용. 직접 codex/claude/cswap·companion·Codex 플러그인 도구·Skill은 훅 거부. npx/bunx/pnpm dlx/yarn dlx의 Codex 패키지·glob 경로·find 실행 우회도 거부 |
 | VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd, git worktree의 검증 당시 clean=true. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
 | DOCS → CLEANUP | `${docs.root}/작업일지/YYYY-MM-DD.md`의 오늘 또는 어제(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
 | `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 scope all 성공 보고서(processes·storage·worktrees 성공, 잔존 0). task.cleanup.ok 자동 기록(dry-run 제외) |

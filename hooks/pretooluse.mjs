@@ -1,5 +1,5 @@
 import { shellParts } from './shell-parts.mjs';
-import { readFileSync, realpathSync, lstatSync, readlinkSync } from 'node:fs';
+import { readFileSync, realpathSync, lstatSync, readlinkSync, statSync } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,8 +20,9 @@ function withoutRedirects(words) {
 function commandWords(words) {
   let index = 0;
   while (/^[A-Za-z_][A-Za-z_\d]*=/.test(words[index] ?? '')) index++;
-  const wrappers = ['env', 'command', 'sudo', 'npx', 'nohup', 'timeout', 'nice', 'time', 'xargs', 'stdbuf'];
+  const wrappers = ['env', 'command', 'sudo', 'npx', 'nohup', 'timeout', 'nice', 'time', 'xargs', 'stdbuf', 'exec', 'builtin', 'script', 'caffeinate', 'arch', 'bunx'];
   const optionValues = {
+    exec: ['-a'], script: ['-a'], caffeinate: ['-t', '-w'],
     env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'],
     sudo: ['-u', '-g', '-h', '-p', '-C', '-T'], npx: ['-p', '--package', '-c', '--call'],
     timeout: ['-k', '--kill-after', '-s', '--signal'], nice: ['-n', '--adjustment'],
@@ -29,8 +30,11 @@ function commandWords(words) {
     xargs: ['-a', '--arg-file', '-d', '--delimiter', '-E', '--eof', '-I', '--replace', '-L', '--max-lines', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars'],
     stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'],
   };
-  while (wrappers.includes(basename(words[index] ?? ''))) {
+  while (wrappers.includes(basename(words[index] ?? ''))
+    || ['pnpm', 'yarn'].includes(basename(words[index] ?? '')) && words[index + 1] === 'dlx') {
     const wrapper = basename(words[index++]);
+    if (['pnpm', 'yarn'].includes(wrapper)) index++;
+    let scriptLog = false;
     while (index < words.length) {
       const word = words[index];
       if (word === '--') { index++; break; }
@@ -40,7 +44,12 @@ function commandWords(words) {
       }
       if (wrapper === 'env' && /^[A-Za-z_][A-Za-z_\d]*=/.test(word)) { index++; continue; }
       if (!word.startsWith('-')) break;
+      if (wrapper === 'script' && word === '-a') scriptLog = true;
       index += optionValues[wrapper]?.includes(word) ? 2 : 1;
+    }
+    if (wrapper === 'script' && !scriptLog && words[index]) index++;
+    if (['npx', 'bunx', 'pnpm', 'yarn'].includes(wrapper) && /^(?:codex|@openai\/codex[^\s]*)$/.test(words[index] ?? '')) {
+      return ['codex', ...words.slice(index + 1)];
     }
     if (wrapper === 'timeout' && /^\d+(?:\.\d+)?[smhd]?$/.test(words[index] ?? '')) index++;
   }
@@ -55,10 +64,15 @@ function nestedCommands(command, depth = 0) {
   let unterminatedHeredoc = parsed.unterminatedHeredoc;
   for (const words of parsed.groups) {
     const args = commandWords(words);
-    if (!['bash', 'sh', 'zsh'].includes(basename(args[0] ?? ''))) continue;
-    const flag = args.findIndex((arg, i) => i > 0 && /^-[a-zA-Z]*c$/.test(arg));
-    if (flag < 0 || !args[flag + 1]) continue;
-    const nested = nestedCommands(args[flag + 1], depth + 1);
+    const executable = basename(args[0] ?? '');
+    let nestedText;
+    if (executable === 'eval') nestedText = args.slice(1).join(' ');
+    else if (['bash', 'sh', 'zsh'].includes(executable)) {
+      const flag = args.findIndex((arg, i) => i > 0 && /^-[a-zA-Z]*c$/.test(arg));
+      if (flag >= 0) nestedText = args[flag + 1];
+    }
+    if (!nestedText) continue;
+    const nested = nestedCommands(nestedText, depth + 1);
     groups.push(...nested.groups); unterminatedHeredoc ||= nested.unterminatedHeredoc;
   }
   return { groups, unterminatedHeredoc };
@@ -177,7 +191,8 @@ try {
   const brain = process.env.FODH_BRAIN === '1';
   const delegationMessage = '위임은 fodh codex task / Claude Agent 로만 한다';
   if (brain && (name.startsWith('mcp__') && /codex/i.test(name)
-    || ['Agent', 'Task'].includes(name) && /^codex:/.test(String(input.subagent_type ?? '')))) deny(delegationMessage, 'boundary');
+    || ['Agent', 'Task'].includes(name) && /^codex:/.test(String(input.subagent_type ?? ''))
+    || name === 'Skill' && [input.skill, input.name].some(value => typeof value === 'string' && value.startsWith('codex:')))) deny(delegationMessage, 'boundary');
   const editing = /^(?:Write|Edit|MultiEdit|NotebookEdit)$/i.test(name);
   const bash = name === 'Bash';
   let state;
@@ -259,7 +274,10 @@ try {
   }
   const commands = groups.filter(words => words.length).map(commandWords);
   if (brain && commands.some(words => ['codex', 'claude', 'cswap'].includes(basename(words[0] ?? ''))
-    || words.some(word => basename(word).startsWith('codex-companion') || word.includes('/plugins/cache/openai-codex/')))) deny(delegationMessage, 'boundary');
+    || words.some(word => basename(word).startsWith('codex-companion') || word.includes('/plugins/cache/openai-codex/')
+      || /[*?\[]/.test(word) && /plugins\/cache|codex/.test(word))
+    || basename(words[0] ?? '') === 'find' && words.some((word, i) => ['-exec', '-execdir', '-ok'].includes(word)
+      && ['codex', 'claude', 'cswap', 'node'].includes(basename(words[i + 1] ?? ''))))) deny(delegationMessage, 'boundary');
   if (input.run_in_background === true && commands.some(words => basename(words[0] ?? '') === 'fodh' && words[1] === 'codex' && words.includes('--wait'))) {
     deny('--wait 를 백그라운드로 돌리지 마라. 포그라운드로 실행하거나 --wait 없이 시작한 뒤 `대기: 위임 <runId>` 로 턴을 끝내라', 'boundary');
   }
@@ -272,13 +290,23 @@ try {
       const explicitDestinations = operands.flatMap((word, i) => word === '-t' || word === '--target-directory' ? [operands[i + 1]] : word.startsWith('--target-directory=') ? [word.slice(19)] : []);
       const destinations = copying || executable === 'ln' ? explicitDestinations.length ? explicitDestinations : [operands.at(-1)] : [];
       const targetDirectory = destinations.filter(Boolean).some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))));
-      const recursive = operands.some(word => /^-[^-]*[rRa]/.test(word));
+      const sources = operands.slice(1).filter((word, i) => !word.startsWith('-') && !destinations.includes(word)
+        && !['-t', '--target-directory'].includes(operands[i]));
+      const sourceDirectory = sources.some(word => {
+        if (word.endsWith('/')) return true;
+        try { return statSync(resolve(cwd, word)).isDirectory(); } catch { return false; }
+      });
+      const recursive = sourceDirectory && operands.some(word => /^-[^-]*[rRa]/.test(word) || ['--recursive', '--archive'].includes(word));
       const matchingSource = operands.slice(1).some(word => !destinations.includes(word) && basename(word) === basename(judgmentFile));
-      const extracting = executable === 'unzip' || executable === 'tar' && operands.some(word => /^-[^-]*x/.test(word) || word === '--extract' || word === '--get');
+      const tar = ['tar', 'bsdtar', 'gtar'].includes(executable);
+      const extracting = executable === 'unzip' || tar && (operands.some(word => /^-[^-]*x/.test(word) || word === '--extract' || word === '--get')
+        || /^[a-zA-Z]*x[a-zA-Z]*$/.test(operands[1] ?? ''));
       const archiveDestinations = extracting ? operands.flatMap((word, i) =>
-        word === (executable === 'tar' ? '-C' : '-d') || executable === 'tar' && word === '--directory' ? [operands[i + 1]]
-          : executable === 'tar' && word.startsWith('--directory=') ? [word.slice(12)]
-          : word.startsWith(executable === 'tar' ? '-C' : '-d') && word.length > 2 ? [word.slice(2)] : []) : [];
+        word === (tar ? '-C' : '-d') || tar && word === '--directory' ? [operands[i + 1]]
+          : tar && word.startsWith('--directory=') ? [word.slice(12)]
+          : word.startsWith(tar ? '-C' : '-d') && word.length > 2 ? [word.slice(2)] : []) : [];
+      if (extracting && (inside(cwd, resolve(root, '.pi'))
+        || archiveDestinations.some(value => inside(resolve(cwd, value), resolve(root, '.pi'))))) deny('.pi 아래에는 아카이브를 풀 수 없습니다', 'boundary');
       const archiveOverwrite = extracting && (archiveDestinations.length
         ? archiveDestinations.some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))) || judgmentPath(value))
         : samePath(cwd, dirname(resolve(root, judgmentFile))) || operands.some(word => word.includes(basename(judgmentFile))));

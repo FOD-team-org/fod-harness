@@ -173,3 +173,42 @@ it('결과 없는 codex-done은 실패하는 result 호출 대신 재위임·판
   await addInbox(root, { kind: 'codex-done', codexRunId: 'present', codexStatus: 'ok', resultDir: '/result' });
   expect(await buildPrompt(root, '계속', 'brain2')).toContain('fodh codex result present');
 });
+
+const doctorMarkers = { ...markerResult, permission_denials: [...markerResult.permission_denials,
+  { tool_name: 'Write', tool_input: { file_path: 'src/FODH_DOCTOR_MARKER.ts' } }] };
+it.each([false, true])('N1 doctor 플러그인 누출 경고 allowPlugins=%s', async allowPlugins => {
+  const root = await project();
+  const { setConfig } = await import('../src/core/config.ts');
+  const { readLedger } = await import('../src/core/ledger.ts');
+  await setConfig(root, 'notify.channels', '["ledger"]');
+  await setConfig(root, 'brain.allowPlugins', JSON.stringify(allowPlugins));
+  emulate([{ ...init, plugins: [{ name: 'safe', source: 'builtin' }, { name: 'codex', source: 'user' }],
+    agents: ['general-purpose', 'codex:codex-rescue'], slash_commands: ['codex:task'],
+    skills: ['fodh-judgment', 'fodh-review-checklist', 'fodh-spec-writing', 'fodh-workflow', 'codex:review'] }, doctorMarkers]);
+  const result = await doctor(root, { env: environment(root) });
+  expect(result.pluginsLeaked).toEqual(allowPlugins ? [] : ['user', 'codex:codex-rescue', 'codex:task', 'codex:review']);
+  expect(result.skillsMissing).toEqual([]);
+  const entries = await readLedger(root), notices = entries.filter(e => e.action === 'notify:doctor:plugins');
+  expect(notices).toHaveLength(allowPlugins ? 0 : 1);
+  if (!allowPlugins) expect(notices[0].evidence).toMatchObject({ level: 'warning', body: expect.stringContaining('codex:review') });
+  const evidence = entries.find(e => e.action === 'system.init:0')?.evidence;
+  expect(evidence).toMatchObject({ plugins: 2, agents: 2, commands: 1 });
+  expect(JSON.stringify(evidence)).not.toContain('codex:codex-rescue');
+});
+it('N1 doctor builtin 플러그인은 누출 경고 없이 유지', async () => {
+  const root = await project();
+  emulate([{ ...init, plugins: [{ name: 'agents-md', source: 'builtin' }], agents: ['general-purpose'], slash_commands: [] }, doctorMarkers]);
+  expect((await doctor(root, { env: environment(root) })).pluginsLeaked).toEqual([]);
+});
+it('F29 Agent 훅과 Task 결과 별칭은 경계 분류 1건으로 합친다', async () => {
+  const root = await project(); const input = { subagent_type: 'codex:codex-rescue' };
+  emulate([init,
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', id: 'alias', input }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'alias', is_error: true,
+      content: 'PreToolUse hook error: 하네스 가드[경계]: 위임은 fodh codex task / Claude Agent 로만 한다' }] } },
+    { ...done, permission_denials: [{ tool_name: 'Task', tool_input: input }] },
+  ]);
+  expect(await runTurn('별칭', { root, model: 'haiku', env: environment(root) })).toMatchObject({ reason: 'stop' });
+  const { readLedger } = await import('../src/core/ledger.ts'); const entries = await readLedger(root);
+  expect(entries.filter(e => e.action.startsWith('hook:'))).toEqual([expect.objectContaining({ action: 'hook:boundary:0:alias', evidence: expect.objectContaining({ kind: 'boundary' }) })]);
+});

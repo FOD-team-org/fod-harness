@@ -1,10 +1,11 @@
+import * as judgments from '../src/core/judgment.ts';
 import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { project } from './p5-helpers.ts';
 import * as runner from '../src/provider/runner.ts';
-import { runTurn } from '../src/provider/turn.ts';
-import { readState } from '../src/core/state.ts';
+import { runTurn, isTurnInProgress } from '../src/provider/turn.ts';
+import { readState, updateState } from '../src/core/state.ts';
 import { readLedger } from '../src/core/ledger.ts';
 import { addJudgment, answerJudgment, readJudgment } from '../src/core/judgment.ts';
 import { setConfig } from '../src/core/config.ts';
@@ -108,9 +109,68 @@ it.each([false, true])('F27 allowPlugins=%s에 따른 MCP 제한 옵션', async 
   if (allowPlugins) await setConfig(root, 'brain.allowPlugins', 'true');
   vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
     expect(options.args!.includes('--strict-mcp-config')).toBe(!allowPlugins);
+    expect(options.args!.includes('--setting-sources')).toBe(!allowPlugins);
+    if (!allowPlugins) expect(options.args![options.args!.indexOf('--setting-sources') + 1]).toBe('project,local');
     if (!allowPlugins) expect(options.args![options.args!.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}');
     else expect(options.args).not.toContain('--mcp-config');
     return { code: 1, cleaned: true, stderr: '' };
   });
   await runTurn('fixture', { root, env: { HOME: root } });
+});
+
+it('N2 doctor begin은 잔존 답을 먼저 정산하고 자기 진행 중 recover는 건너뛴다', async () => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  const { item } = await addJudgment(root, { title: '잔존 답', background: '', options: ['진행'], recommend: '', blocks: '-' });
+  await judgments.beginJudgmentSnapshot(root, { runId: 'old', startedAt: '2026-01-01T00:00:00.000Z' });
+  await answerJudgment(root, item.id, '1');
+  await updateState(root, { lastEventAt: '2026-01-01T00:01:00.000Z' });
+  const path = join(root, '.pi/harness-judgment-snapshot.json');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async () => {
+    expect((await readJudgment(root)).items[0].held).toMatchObject({ runId: 'old', at: '2026-01-01T00:01:00.000Z' });
+    const snapshot = await readFile(path, 'utf8');
+    expect(JSON.parse(snapshot)).toMatchObject({ pid: process.pid, answers: { [item.id]: '- 답: 1' } });
+    expect(JSON.parse(snapshot).runId).not.toBe('old');
+    expect(isTurnInProgress(root)).toBe(true);
+    await judgments.recoverJudgmentSnapshot(root);
+    expect(await readFile(path, 'utf8')).toBe(snapshot);
+    expect((await readState(root)).brainTurn?.endedAt).toBeUndefined();
+    return { code: 1, cleaned: true, stderr: '' };
+  });
+  await runTurn('fixture', { root, doctor: true, env: { HOME: root } });
+  expect(isTurnInProgress(root)).toBe(false);
+  expect((await readLedger(root)).filter(e => e.action === 'judgment:held')).toEqual([expect.objectContaining({ runId: 'old' })]);
+  await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('N2 begin 직후 원장 예외도 finally 정산으로 스냅숏을 지운다', async () => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  const append = ledger.appendLedger;
+  vi.spyOn(ledger, 'appendLedger').mockImplementation(async (root, entry) => {
+    if (entry.action === 'brain:0' && entry.status === 'pre') throw new Error('pre ledger failure');
+    return append(root, entry);
+  });
+  const run = vi.spyOn(runner, 'runProcess');
+  await expect(runTurn('fixture', { root, env: { HOME: root } })).rejects.toThrow('pre ledger failure');
+  expect(run).not.toHaveBeenCalled();
+  expect((await readState(root)).brainTurn?.endedAt).toBeTruthy();
+  expect(isTurnInProgress(root)).toBe(false);
+  await expect(readFile(join(root, '.pi/harness-judgment-snapshot.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it.each([false, true])('N2 finish 예외는 runner 결과(throw=%s)를 덮지 않고 실패 원장에 남긴다', async throws => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  vi.spyOn(judgments, 'finishJudgmentSnapshot').mockRejectedValue(new Error('snapshot compare failure'));
+  vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
+    const args = options.args!, sid = args[args.indexOf('--session-id') + 1];
+    await options.onEvent?.({ type: 'system', subtype: 'init', session_id: sid, apiKeySource: 'none', permissionMode: 'bypassPermissions', model: 'haiku' });
+    if (throws) throw new Error('runner failure');
+    await options.onEvent?.({ type: 'result', is_error: false });
+    return { code: 0, cleaned: true, stderr: '' };
+  });
+  const result = runTurn('fixture', { root, model: 'haiku', env: { HOME: root } });
+  if (throws) await expect(result).rejects.toThrow('runner failure');
+  else expect(await result).toMatchObject({ reason: 'stop' });
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'judgment:snapshot-finish', status: 'fail', evidence: { error: 'snapshot compare failure' } }));
+  expect(isTurnInProgress(root)).toBe(false);
 });

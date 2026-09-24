@@ -23,7 +23,7 @@ export interface TurnOptions {
 }
 export interface TurnResult {
   hookDenials?: number;
-  init?: { skills: string[]; memory_paths: string[] };
+  init?: { skills: string[]; memory_paths: string[]; plugins: string[]; agents: string[]; commands: string[] };
   reason: 'stop' | 'error' | 'aborted'; classification?: string; usage?: Record<string, number>; contextUsage?: boolean; runId: string;
 }
 export function claudeArgs(root: string, model: string, sid: string, resume: boolean, doctor = false, allowPlugins = false): string[] {
@@ -31,7 +31,7 @@ export function claudeArgs(root: string, model: string, sid: string, resume: boo
     '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     ...doctor ? [] : ['--append-system-prompt-file', join(packageRoot, 'templates/brain-rules.md')],
     '--settings', join(root, '.claude/settings.json'), '--model', model,
-    ...allowPlugins ? [] : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
+    ...allowPlugins ? [] : ['--setting-sources', 'project,local', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
     ...doctor ? ['--max-turns', '3'] : []];
 }
 export async function buildPrompt(root: string, latest: string, runId: string): Promise<string> {
@@ -54,6 +54,9 @@ function canonical(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+const turnsInProgress = new Set<string>();
+export const isTurnInProgress = (root: string): boolean => turnsInProgress.has(resolve(root));
+const canonicalTool = (name: unknown): unknown => name === 'Task' ? 'Agent' : name;
 export async function runTurn(latest: string, options: TurnOptions): Promise<TurnResult> {
   const { root } = options;
   const runId = randomUUID();
@@ -84,8 +87,6 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       reportText = '';
       const action = `brain:${attempt}`;
       const brainTurn = { runId, startedAt: new Date().toISOString() };
-      await beginJudgmentSnapshot(root, brainTurn);
-      await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
       let init: TurnResult['init'];
       let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
       let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
@@ -93,7 +94,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       const denials = new Map<string, any>();
       type DenialKind = 'approval' | 'boundary' | 'guard' | 'unknown';
       const rememberDenial = (denial: any, kind: DenialKind = 'unknown', toolUseId?: string) => {
-        const safe = safeValue(denial), key = canonical({ tool: safe.tool_name, input: safe.tool_input });
+        const safe = safeValue(denial), key = canonical({ tool: canonicalTool(safe.tool_name), input: safe.tool_input });
         const previous = denials.get(key);
         denials.set(key, { ...safe, kind: kind === 'unknown' ? previous?.kind ?? kind : kind,
           tool_use_id: toolUseId ?? previous?.tool_use_id ?? safe.tool_use_id ?? `result-${denials.size}` });
@@ -128,7 +129,10 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       pendingDenials.push(persistDenials);
       const text = (value: string) => options.onText?.(redact(value));
       let outcome: ProcessResult;
+      turnsInProgress.add(resolve(root));
       try {
+        await beginJudgmentSnapshot(root, brainTurn);
+        await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
         outcome = await runProcess({ root, command: config.brain.command,
           args: claudeArgs(root, model, sessionId, resume, options.doctor, config.brain.allowPlugins),
           input: prompt, runId, maxMs: turnDeadlineMs(config.brain.maxTurnMinutes, options.doctor), env, signal: options.signal,
@@ -139,10 +143,11 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
             }
             if (event.type === 'system' && event.subtype === 'init') {
               const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-              init = { skills: strings(event.skills), memory_paths: strings(event.memory_paths && !Array.isArray(event.memory_paths) && typeof event.memory_paths === 'object' ? Object.values(event.memory_paths) : event.memory_paths) };
+              init = { plugins: Array.isArray(event.plugins) ? event.plugins.flatMap((plugin: unknown) => plugin && typeof plugin === 'object' && 'source' in plugin && typeof plugin.source === 'string' ? [plugin.source] : []) : [],
+                agents: strings(event.agents), commands: strings(event.slash_commands), skills: strings(event.skills), memory_paths: strings(event.memory_paths && !Array.isArray(event.memory_paths) && typeof event.memory_paths === 'object' ? Object.values(event.memory_paths) : event.memory_paths) };
               const evidence = safeValue({
                 session_id: event.session_id, model: event.model, permissionMode: event.permissionMode,
-                ...init, memory_paths: event.memory_paths, apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
+                skills: init.skills, plugins: init.plugins.length, agents: init.agents.length, commands: init.commands.length, memory_paths: event.memory_paths, apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
               });
               await appendLedger(root, { runId, action: `system.init:${attempt}`, status: 'ok', evidence });
               if (event.apiKeySource !== 'none') return 'billing';
@@ -212,7 +217,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                 usage: event.usage,
               }) });
               for (const denial of event.permission_denials ?? []) {
-                if (!denials.has(canonical(safeValue({ tool: denial.tool_name, input: denial.tool_input })))) {
+                if (!denials.has(canonical(safeValue({ tool: canonicalTool(denial.tool_name), input: denial.tool_input })))) {
                   text('\n[훅 차단] 분류 없음: 원장을 확인하세요.\n');
                 }
                 rememberDenial(denial);
@@ -221,14 +226,19 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           },
         });
       } finally {
-        await finishJudgmentSnapshot(root);
+        try { await finishJudgmentSnapshot(root); }
+        catch (error) {
+          try { await appendLedger(root, { runId, action: 'judgment:snapshot-finish', status: 'fail',
+            evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
+          catch { /* Preserve the runner result even when diagnostic storage fails. */ }
+        }
         if (lastEventAt) await patchState({ lastEventAt, runId });
       }
       if (!options.doctor) {
         const suspicious = new Set<string>();
         const worktrees = (await readState(root)).worktrees ?? [];
         for (const tool of toolInputs.values()) {
-          if (denials.has(canonical(safeValue({ tool: tool.tool_name, input: tool.tool_input })))) continue;
+          if (denials.has(canonical(safeValue({ tool: canonicalTool(tool.tool_name), input: tool.tool_input })))) continue;
           for (const path of auditPaths(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
             root, docsRoot: config.docs.root, worktrees,
           })) suspicious.add(redact(path));
@@ -341,7 +351,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           for (const path of fresh) notifiedAuditPaths.add(`${resolve(root)}\0${path}`);
         } catch { await appendLedger(root, { runId, action: 'audit:notify', status: 'fail' }); }
       }
-    } finally { await release?.(); }
+    } finally { turnsInProgress.delete(resolve(root)); await release?.(); }
   }
 }
 export function latestMessage<T extends {

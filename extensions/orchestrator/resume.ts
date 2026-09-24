@@ -88,9 +88,9 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     if (prefix) content = prefix + '\n' + content;
     let beforeSend: Partial<HarnessState> = {};
     state = await updateState(root, current => {
-      beforeSend = { autoTurns: current.autoTurns,
+      beforeSend = { autoTurns: current.autoTurns, userTurn: current.userTurn,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
-      return { autoTurns: Number(current.autoTurns ?? 0) + 1,
+      return { autoTurns: Number(current.autoTurns ?? 0) + 1, userTurn: false,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
     });
     try {

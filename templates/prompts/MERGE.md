@@ -16,4 +16,4 @@
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 승인 미결 동작을 실행하지 않는다.
 review.commit 을 바꾸는 판단을 만들지 않는다.
-`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add`
+`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add … --blocks {{taskId}} --reclaim`

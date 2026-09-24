@@ -688,7 +688,7 @@ it('S1 진행 중 인박스는 지연하고 타이머 재시도는 종료 뒤 he
     expect((await readJudgment(t.root)).completed).toEqual([]);
     expect((await listInbox(t.root))[0].status).not.toBe('applied');
     await finishJudgmentSnapshot(t.root);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(5000);
     // The timer callback starts async filesystem work; await the same decision path to settle it.
     await vi.waitFor(async () => expect((await listInbox(t.root))[0].status).toBe('applied'));
     expect((await readJudgment(t.root)).items[0].held?.runId).toBe('brain');
@@ -800,7 +800,7 @@ it.each(['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEAN
   await t.end('stop', '대기: 사용자');
   expect(await readState(t.root)).toMatchObject({ awaitingUser: false, autoTurns: 1 });
   expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-rejected', evidence: { state, taskId: task.id } }));
-  expect(t.sendMessage.mock.calls[0][0].content).toContain('[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add 로 등록해 WAIT_JUDGMENT 로 가고, 아니면 계속 진행하라]');
+  expect(t.sendMessage.mock.calls[0][0].content).toContain('[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add --title … --blocks <taskId> --reclaim 으로 등록하고(RECLAIM→PICK 으로 간다), 아니면 계속 진행하라]');
 });
 it.each(['blocks', 'status'])('F28 현재 task 판단 차단(%s)이 있으면 사용자 대기 유지', async kind => {
   const t = await setup(), task = await addTask(t.root, { title: '진행', category: 'docs' });
@@ -846,4 +846,57 @@ it('S1 워처가 읽은 뒤 턴이 시작돼도 적용 잠금 안에서 재확�
   await finishJudgmentSnapshot(t.root);
   await t.decide(['judgment-changed']);
   expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
+});
+
+it('N3 턴 중 무인자 적용은 변경 답을 미적용으로 남기고 종료 뒤 번호 확인', async () => {
+  const t = await setup();
+  const { item } = await addJudgment(t.root, { title: '진행 중 답', background: '', options: ['진행'], recommend: '', blocks: '-' });
+  await beginJudgmentSnapshot(t.root, { runId: 'active', startedAt: new Date().toISOString() });
+  await answerJudgment(t.root, item.id, '1');
+  expect(await applyJudgments(t.root)).toMatchObject({ applied: [], unapplied: [{ id: item.id, reason: '두뇌 턴 진행 중(턴 종료 뒤 held 로 확인)' }] });
+  await t.command('judged');
+  expect((await readJudgment(t.root)).items[0].id).toBe(item.id);
+  await finishJudgmentSnapshot(t.root);
+  expect((await readJudgment(t.root)).items[0].held?.runId).toBe('active');
+  await t.command('judged', item.id);
+  expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
+});
+it('N3 턴 중에도 번호 명시 적용과 턴 전의 무변경 답 적용은 유지', async () => {
+  const t = await setup();
+  const a = (await addJudgment(t.root, { title: '기존 답', background: '', options: ['진행'], recommend: '', blocks: '-' })).item;
+  const b = (await addJudgment(t.root, { title: '새 답', background: '', options: ['진행'], recommend: '', blocks: '-' })).item;
+  await answerJudgment(t.root, a.id, '1');
+  await beginJudgmentSnapshot(t.root, { runId: 'active', startedAt: new Date().toISOString() });
+  await answerJudgment(t.root, b.id, '1');
+  expect((await applyJudgments(t.root)).applied.map(item => item.id)).toEqual([a.id]);
+  expect((await applyJudgments(t.root, [b.id])).applied.map(item => item.id)).toEqual([b.id]);
+  await finishJudgmentSnapshot(t.root);
+});
+it.each(['IMPLEMENT', 'PICK'])('N4 사용자 입력 %s 대기는 수용하고 턴 표지를 지운다', async state => {
+  const t = await setup(), task = await addTask(t.root, { title: '작업', category: 'docs' });
+  await updateState(t.root, { state, taskId: task.id });
+  await t.handlers.get('input')!({ source: 'interactive', text: '잠깐' }, t.ctx);
+  expect((await readState(t.root)).userTurn).toBe(true);
+  await t.end('stop', '대기: 사용자');
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userTurn: false });
+  expect(t.sendMessage).not.toHaveBeenCalled();
+  expect((await readLedger(t.root)).filter(e => e.action === 'turn:user-wait-accepted')).toEqual([
+    expect.objectContaining({ evidence: { state, taskId: task.id, userTurn: true } }),
+  ]);
+});
+it('N4 자동 재개는 userTurn을 지우고 extension 턴의 무판단 대기는 거부', async () => {
+  const t = await setup(), task = await addTask(t.root, { title: '작업', category: 'docs' });
+  await updateState(t.root, { state: 'IMPLEMENT', taskId: task.id, userTurn: true });
+  const { autoResume } = await import('../extensions/orchestrator/resume.ts');
+  await autoResume({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.root, { cwd: t.root, hasUI: true, isIdle: () => true, notify: t.ctx.ui.notify }, 'test');
+  expect((await readState(t.root)).userTurn).toBe(false);
+  await t.handlers.get('input')!({ source: 'extension', text: '자동' }, t.ctx);
+  await t.end('stop', '대기: 사용자');
+  expect((await readState(t.root)).awaitingUser).toBe(false);
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-rejected' }));
+});
+it.each(['error', 'aborted'])('N4 %s로 끝나도 userTurn 잔존 없음', async stop => {
+  const t = await setup(); await t.handlers.get('input')!({ source: 'interactive', text: '시작' }, t.ctx);
+  await t.end(stop);
+  expect((await readState(t.root)).userTurn).toBe(false);
 });

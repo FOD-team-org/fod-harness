@@ -83,7 +83,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
   });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {
-    if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
+    if (event.source !== 'extension') await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0, userTurn: true });
     return { action: 'continue' };
   });
   pi.registerCommand('project-start', {
@@ -177,77 +177,88 @@ export default function orchestrator(pi: ExtensionAPI): void {
     },
   });
   pi.on('agent_end', async (event, ctx) => {
-    const last = [...event.messages].reverse().find(message => message.role === 'assistant');
-    if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
-    if (last?.role === 'assistant' && last.stopReason === 'error') {
-      const state = await updateState(ctx.cwd, current => ({ brainErrors: Number(current.brainErrors ?? 0) + 1 }));
-      if (Number(state.brainErrors) >= 3) await notify(ctx.cwd, { key: 'brain-errors', title: '두뇌 오류', level: 'error', body: '두뇌 오류가 3회 연속 발생했습니다. 상태와 원장을 확인하세요' }, resumeContext(ctx));
-      return;
-    }
-    if ((await readState(ctx.cwd)).brainErrors) await updateState(ctx.cwd, { brainErrors: 0 });
-    if (ctx.hasUI === false) return;
-    const text = last?.role === 'assistant' ? last.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : '';
-    const tail = text.split('\n').map(line => line.trim()).filter(Boolean).slice(-3)
-      .map(line => line.replace(/^[`<>]+|[`<>]+$/gu, '').trim());
-    const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
-      .find(Boolean)?.replace(/[`<>]/gu, '');
-    const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
-    const slotState = await readState(ctx.cwd);
-    if (slotState.awaitingSlot && !slotState.delegation
-      && (active.has(slotState.state) && !['recovering', 'INTERVIEW'].includes(slotState.state) || slotState.state === 'paused(slot)')) {
-      if (slotState.state !== 'paused(slot)') await updateState(ctx.cwd, { state: 'paused(slot)', awaitingUser: false, autoTurns: 0 });
-      else await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
-      return;
-    }
-    {
-      const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {
-        const state = await readState(ctx.cwd);
-        const runId = state.delegation?.runId;
-        const meta = runId ? await readMeta(ctx.cwd, runId) : undefined;
-        if (meta && !meta.finishedAt) {
-          if (marker !== runId && state.delegation?.implied !== runId) {
-            await appendLedger(ctx.cwd, { runId: runId!, action: 'delegation:implied', status: 'ok', evidence: { marker: marker ?? null, runId } });
-            await updateState(ctx.cwd, { delegation: { ...state.delegation!, implied: runId } });
-          }
-          await updateState(ctx.cwd, { awaitingDelegation: true, ...(awaitingUser ? { awaitingUser: true } : {}), autoTurns: 0 }); return true;
-        }
-        if (marker) await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
-        await updateState(ctx.cwd, { awaitingDelegation: false }); return false;
-      });
-      if (waiting) return;
-    }
-    if (awaitingUser && (await readState(ctx.cwd)).state === 'PICK') {
-      const state = await readState(ctx.cwd), tasks = await listBacklog(ctx.cwd);
-      const decision = decidePick(tasks, state, { slots: 'ok', now: Date.now() });
-      const open = (await readJudgment(ctx.cwd)).items;
-      const blocked = blockedTaskIds(tasks, open);
-      const candidates = tasks.filter(task => task.status !== 'done' && !blocked.has(task.id)).map(task => task.id);
-      const allBlocked = tasks.some(task => task.status !== 'done') && !candidates.length;
-      if (decision.outcome !== 'EMPTY' && !allBlocked
-        && !(!candidates.length && (decision.outcome === 'DONE_ALL' || decision.outcome.startsWith('WAIT_')))) {
-        await updateState(ctx.cwd, { awaitingUser: false });
-        await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'pick:user-wait-rejected', status: 'skip', evidence: { taskIds: candidates } });
-        await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 결과(${decision.outcome})를 확정하라${candidates.length ? `: ${candidates.join(', ')}` : ''}]`);
+    try {
+      const last = [...event.messages].reverse().find(message => message.role === 'assistant');
+      if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
+      if (last?.role === 'assistant' && last.stopReason === 'error') {
+        const state = await updateState(ctx.cwd, current => ({ brainErrors: Number(current.brainErrors ?? 0) + 1 }));
+        if (Number(state.brainErrors) >= 3) await notify(ctx.cwd, { key: 'brain-errors', title: '두뇌 오류', level: 'error', body: '두뇌 오류가 3회 연속 발생했습니다. 상태와 원장을 확인하세요' }, resumeContext(ctx));
         return;
       }
-    }
-    if (awaitingUser) {
-      const state = await readState(ctx.cwd);
-      if (state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
-        const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
-        const blocking = (await readJudgment(ctx.cwd)).items.some(item => !item.followup
-          && (item.blocks.split(/[\s,]+/u).includes(state.taskId!) || task?.status === `blocked(${item.id})`));
-        if (!blocking) {
+      if ((await readState(ctx.cwd)).brainErrors) await updateState(ctx.cwd, { brainErrors: 0 });
+      if (ctx.hasUI === false) return;
+      const text = last?.role === 'assistant' ? last.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : '';
+      const tail = text.split('\n').map(line => line.trim()).filter(Boolean).slice(-3)
+        .map(line => line.replace(/^[`<>]+|[`<>]+$/gu, '').trim());
+      const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
+        .find(Boolean)?.replace(/[`<>]/gu, '');
+      const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
+      const slotState = await readState(ctx.cwd);
+      if (slotState.awaitingSlot && !slotState.delegation
+        && (active.has(slotState.state) && !['recovering', 'INTERVIEW'].includes(slotState.state) || slotState.state === 'paused(slot)')) {
+        if (slotState.state !== 'paused(slot)') await updateState(ctx.cwd, { state: 'paused(slot)', awaitingUser: false, autoTurns: 0 });
+        else await updateState(ctx.cwd, { awaitingUser: false, autoTurns: 0 });
+        return;
+      }
+      {
+        const waiting = await withFileLock(harnessPath(ctx.cwd, 'harness-resume'), async () => {
+          const state = await readState(ctx.cwd);
+          const runId = state.delegation?.runId;
+          const meta = runId ? await readMeta(ctx.cwd, runId) : undefined;
+          if (meta && !meta.finishedAt) {
+            if (marker !== runId && state.delegation?.implied !== runId) {
+              await appendLedger(ctx.cwd, { runId: runId!, action: 'delegation:implied', status: 'ok', evidence: { marker: marker ?? null, runId } });
+              await updateState(ctx.cwd, { delegation: { ...state.delegation!, implied: runId } });
+            }
+            await updateState(ctx.cwd, { awaitingDelegation: true, ...(awaitingUser ? { awaitingUser: true } : {}), autoTurns: 0 }); return true;
+          }
+          if (marker) await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
+          await updateState(ctx.cwd, { awaitingDelegation: false }); return false;
+        });
+        if (waiting) return;
+      }
+      const waitingState = await readState(ctx.cwd);
+      if (awaitingUser && waitingState.userTurn) {
+        await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-accepted', status: 'ok',
+          evidence: { state: waitingState.state, taskId: waitingState.taskId, userTurn: true } });
+        await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 });
+        return;
+      }
+      if (awaitingUser && waitingState.state === 'PICK') {
+        const state = await readState(ctx.cwd), tasks = await listBacklog(ctx.cwd);
+        const decision = decidePick(tasks, state, { slots: 'ok', now: Date.now() });
+        const open = (await readJudgment(ctx.cwd)).items;
+        const blocked = blockedTaskIds(tasks, open);
+        const candidates = tasks.filter(task => task.status !== 'done' && !blocked.has(task.id)).map(task => task.id);
+        const allBlocked = tasks.some(task => task.status !== 'done') && !candidates.length;
+        if (decision.outcome !== 'EMPTY' && !allBlocked
+          && !(!candidates.length && (decision.outcome === 'DONE_ALL' || decision.outcome.startsWith('WAIT_')))) {
           await updateState(ctx.cwd, { awaitingUser: false });
-          await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-rejected', status: 'skip', evidence: { state: state.state, taskId: state.taskId } });
-          await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', '[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add 로 등록해 WAIT_JUDGMENT 로 가고, 아니면 계속 진행하라]');
+          await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'pick:user-wait-rejected', status: 'skip', evidence: { taskIds: candidates } });
+          await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 결과(${decision.outcome})를 확정하라${candidates.length ? `: ${candidates.join(', ')}` : ''}]`);
           return;
         }
       }
-      await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
+      if (awaitingUser) {
+        const state = await readState(ctx.cwd);
+        if (state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
+          const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
+          const blocking = (await readJudgment(ctx.cwd)).items.some(item => !item.followup
+            && (item.blocks.split(/[\s,]+/u).includes(state.taskId!) || task?.status === `blocked(${item.id})`));
+          if (!blocking) {
+            await updateState(ctx.cwd, { awaitingUser: false });
+            await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-rejected', status: 'skip', evidence: { state: state.state, taskId: state.taskId } });
+            await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', '[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add --title … --blocks <taskId> --reclaim 으로 등록하고(RECLAIM→PICK 으로 간다), 아니면 계속 진행하라]');
+            return;
+          }
+        }
+        await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
+      }
+      if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
+      await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end');
+    } finally {
+      if ((await readState(ctx.cwd)).userTurn) await updateState(ctx.cwd, { userTurn: false });
     }
-    if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
-    await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end');
   });
 }
 
@@ -285,7 +296,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
             await tick(root, { judgmentOnly: true });
             await decideInbox(pi, ctx, root, batch, options);
           });
-          deferDecision(root, 1000, retry);
+          deferDecision(root, 5000, retry);
           await logDeferredDecision(root, batch, applied, resumed);
           continue;
         }
