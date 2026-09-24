@@ -3,7 +3,6 @@ import { redact } from '../../src/provider/privacy.ts';
 import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
 import { substitute, todayKst } from '../../src/core/template-values.ts';
 import { notify } from '../../src/core/notify.ts';
-import { readMeta } from '../../src/core/codex-record.ts';
 import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -49,7 +48,7 @@ export function resumeContext(ctx: ExtensionContext): ResumeContext {
     notify: (message, type) => ctx.ui?.notify?.(message, type) };
 }
 export interface ResumeResult { resumed?: boolean; skipped?: string; stopped?: boolean }
-export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: ResumeContext, reason: string): Promise<ResumeResult> {
+export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: ResumeContext, reason: string, prefix = ''): Promise<ResumeResult> {
   if (ctxLike.hasUI === false) return { skipped: 'print' };
   if (ctxLike.isIdle() === false) return { skipped: 'busy' };
   return withFileLock(harnessPath(root, 'harness-resume'), async () => {
@@ -86,15 +85,12 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
       try { ctxLike.notify(`자동 재개 전송에 실패했습니다. ${redact(error instanceof Error ? error.message : String(error)).slice(0, 120)} 다음 사용자 입력에서 다시 진행합니다.`, 'warning'); } catch { /* disposed UI */ }
       return { skipped: 'send-failed' };
     }
-    const reminder = reason === 'agent_end' && state.delegation && state.delegationReminder !== state.delegation.runId
-      && !(await readMeta(root, state.delegation.runId))?.finishedAt ? state.delegation.runId : undefined;
-    if (reminder) content = `[위임 진행 중 ${reminder} — 결과를 기다리려면 턴을 \`대기: 위임 ${reminder}\` 로 끝내라]\n` + content;
+    if (prefix) content = prefix + '\n' + content;
     let beforeSend: Partial<HarnessState> = {};
     state = await updateState(root, current => {
-      beforeSend = { autoTurns: current.autoTurns, delegationReminder: current.delegationReminder,
+      beforeSend = { autoTurns: current.autoTurns,
         ...(current.state === 'recovering' ? { recoveryAutoResumed: current.recoveryAutoResumed } : {}) };
       return { autoTurns: Number(current.autoTurns ?? 0) + 1,
-        ...(reminder ? { delegationReminder: reminder } : {}),
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
     });
     try {

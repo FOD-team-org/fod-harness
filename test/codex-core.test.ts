@@ -223,6 +223,8 @@ it('cancel은 시작 시각을 검증할 수 없으면 신호 없이 기존 위�
   const identity = await import('../src/core/process-time.ts');
   vi.spyOn(identity, 'processStartedAt').mockResolvedValue(undefined);
   await expect(cancel(root, run.runId)).rejects.toThrow('소유권');
+  await expect(readFile(join(resultDir(root, run.runId), 'cancel.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await readMeta(root, run.runId))?.finishedAt).toBeUndefined();
   expect((await readState(root)).delegation?.runId).toBe(run.runId);
   expect((await slotsStatus()).codex?.runId).toBe(run.runId);
   await finished(root, run.runId);
@@ -356,7 +358,7 @@ it.each(['owned', 'foreign', 'unverified'] as const)('reclaim은 %s codex에 공
   const reason = owner === 'foreign' ? 'pid-reused' : owner === 'unverified' ? 'group-unverified' : undefined;
   const reap = vi.spyOn(codexReclaim, 'reclaimCodexOwner').mockResolvedValue({ reclaimed: true, owner, reason, skippedGroups: [] });
   expect(await reclaimTask(root, task.id, item.id)).toMatchObject({ reclaimed: true });
-  expect(reap).toHaveBeenCalledWith(expect.objectContaining({ pid: 99999999, pgid: 99999999 }), { root, runId: 'reclaimed' });
+  expect(reap).toHaveBeenCalledWith(expect.objectContaining({ pid: 99999999, pgid: 99999999 }), { root, runId: 'reclaimed' }, { by: 'cancel' });
   expect(await readMeta(root, 'reclaimed')).toMatchObject({ status: owner === 'unverified' ? 'lost' : 'cancelled' });
   if (reason) expect(await readLedger(root)).toContainEqual(expect.objectContaining({ evidence: expect.objectContaining({ reason }) }));
   expect((await readState(root)).delegation).toBeUndefined(); expect((await readState(root)).awaitingDelegation).toBe(false);

@@ -136,3 +136,10 @@ it.each(['IMPLEMENT', 'REVIEW', 'RESEARCH', 'FIX'])('F23 %s는 포그라운드 -
   expect(text).toContain('Bash `run_in_background` 로 돌리지 않는다');
   expect(text).toContain('`대기: 위임 <runId>`');
 });
+
+it('F25 PICK은 후보 선택·허용된 사용자 대기·dry 조회를 안내한다', async () => {
+  const text = await readFile('templates/prompts/PICK.md', 'utf8');
+  expect(text).toContain('복귀 가능·ready task 가 있으면 반드시 `fodh pick`');
+  expect(text).toContain('EMPTY 이거나 모든 후보가 열린 판단에 막혔을 때만');
+  expect(text).toContain('fodh pick --dry');
+});

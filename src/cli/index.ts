@@ -15,8 +15,8 @@ import { startCodex, status as codexStatus, result as codexResult, cancel as can
 import { createWorktree, removeWorktree, listWorktrees, commitWorktree, validateTaskCommit } from '../core/worktree.ts';
 import { slotsStatus } from '../core/slots.ts';
 import { getConfig, setConfig, loadConfig } from '../core/config.ts';
-import { addTask, getTask, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
-import { runPick } from '../core/pick.ts';
+import { addTask, getTask, listBacklog, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
+import { runPick, decidePick } from '../core/pick.ts';
 import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
 import { readState, updateState, transitionState, doctorFresh, TransitionError, userOnlyTransitions } from '../core/state.ts';
@@ -36,7 +36,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
-      scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
+      scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, dry: { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
       message: { type: 'string', short: 'm' }, base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
       unknown: { type: 'boolean' }, json: { type: 'boolean' }, system: { type: 'boolean' }, reclaim: { type: 'boolean' },
@@ -155,7 +155,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (values['merge-commit'] !== undefined) patch.merge = { commit: values['merge-commit'] };
       if (values['spec-rev'] !== undefined) patch.spec = { rev: integer(values['spec-rev'], 'spec.rev') };
       result = await setTask(root, rest[0], patch);
-    } else if (group === 'pick' && !action) result = await runPick(root);
+    } else if (group === 'pick' && !action) result = values.dry ? decidePick(await listBacklog(root), await readState(root), { slots: 'ok', now: Date.now() }) : await runPick(root);
     else if (group === 'reclaim' && !action) {
       if (!values.task || !values.judgment) throw new Error('--task 및 --judgment가 필요합니다');
       result = await reclaimTask(root, values.task, values.judgment);

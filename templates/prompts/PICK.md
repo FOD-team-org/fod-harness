@@ -15,3 +15,5 @@ EMPTY(백로그 비어 있음)면 `fodh state transition PLANNING` 은 하지 �
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 선택·대기 판정을 우회하지 않는다. 고아 작업은 판단 답으로만 재개한다. 예산 강제는 범위 밖.
+
+복귀 가능·ready task 가 있으면 반드시 `fodh pick` 을 실행한다. `대기: 사용자` 는 EMPTY 이거나 모든 후보가 열린 판단에 막혔을 때만 쓴다. 후보만 확인하려면 `fodh pick --dry` 를 쓴다.

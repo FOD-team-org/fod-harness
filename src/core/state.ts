@@ -11,10 +11,12 @@ import { loadConfig } from './config.ts';
 import { todayKst } from './template-values.ts';
 import { hasReviewEvidence } from './codex-record.ts';
 
+export interface BrainTurn { startedAt: string; endedAt?: string; runId: string }
 export interface HarnessState {
+  brainTurn?: BrainTurn;
   awaitingSlot?: { kind: 'codex'; owner: import('./slots.ts').SlotOwner; since: string };
-  delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string };
-  awaitingDelegation?: boolean; delegationReminder?: string;
+  delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string; implied?: string };
+  awaitingDelegation?: boolean;
   worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;

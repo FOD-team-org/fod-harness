@@ -5,14 +5,14 @@ import { runPick } from '../src/core/pick.ts';
 import * as pickModule from '../src/core/pick.ts';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import orchestrator, { instruction, decideInbox } from '../extensions/orchestrator/index.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState, transitionState } from '../src/core/state.ts';
-import { addJudgment, answerJudgment, readJudgment } from '../src/core/judgment.ts';
-import { addInbox } from '../src/core/inbox.ts';
+import { addJudgment, answerJudgment, readJudgment, applyJudgments } from '../src/core/judgment.ts';
+import { addInbox, listInbox } from '../src/core/inbox.ts';
 import { appendLedger, readLedger } from '../src/core/ledger.ts';
 import { tick } from '../src/core/watcher.ts';
 import { setConfig } from '../src/core/config.ts';
@@ -627,4 +627,100 @@ it('M3 자동 전송 예외는 원인 앞 120자를 알린다',async()=>{
   const t=await setup();await updateState(t.root,{state:'INTERVIEW'});t.sendMessage.mockImplementation(()=>{throw new Error('전송 실패 원인 '+ 'x'.repeat(200));});await t.end();
   const warning=t.ctx.ui.notify.mock.calls.find(c=>String(c[0]).includes('전송 실패 원인'));
   expect(warning).toBeTruthy();expect(warning![0]).toContain('전송 실패 원인');expect(warning![0]).not.toContain('x'.repeat(121));
+});
+
+it.each(['active', 'ended', 'grace', 'earlier'])('R1 %s 두뇌 턴 창의 답은 held·알림 1회·인박스 해결 후 /judged 확인', async kind => {
+  const t = await setup(), now = Date.now(), start = now - 20000, end = now - 10000;
+  const { item } = await addJudgment(t.root, { title: '확인', background: '', options: ['진행'], recommend: '', blocks: '-' });
+  await answerJudgment(t.root, item.id, '1');
+  const turn = { runId: 'brain-window', startedAt: new Date(start).toISOString(), ...(kind === 'active' ? {} : { endedAt: new Date(end).toISOString() }) };
+  await updateState(t.root, { state: 'WAIT_JUDGMENT', brainTurn: turn });
+  if (kind === 'earlier') {
+    await appendLedger(t.root, { runId: turn.runId, action: 'brain:window', status: 'ok', evidence: turn });
+    await updateState(t.root, { brainTurn: { runId: 'later', startedAt: new Date(now).toISOString() } });
+  }
+  const at = new Date(kind === 'grace' ? end + 2000 : start + 1000);
+  await utimes(join(t.root, 'docs/판단대기.md'), at, at);
+  await t.decide(['judgment-changed']); await t.decide(['judgment-changed']);
+  expect((await readJudgment(t.root)).items[0]).toMatchObject({ id: item.id, held: { reason: 'brain-turn', runId: turn.runId } });
+  expect((await readJudgment(t.root)).completed).toHaveLength(0);
+  expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(t.ctx.ui.notify.mock.calls.filter(([message]) => String(message).includes('판단 답이 두뇌 턴 중'))).toHaveLength(1);
+  expect((await readLedger(t.root)).filter(entry => entry.action === 'judgment:held')).toHaveLength(1);
+  expect((await listInbox(t.root)).every(item => item.status === 'applied')).toBe(true);
+  await t.command('judged', kind === 'active' ? '' : item.id);
+  expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
+  expect(JSON.parse(await readFile(join(t.root, '.pi/harness-judgment-held.json'), 'utf8'))).toEqual([]);
+});
+it.each([-1, 12001])('R1 턴 창 밖 mtime offset=%s는 자동 적용한다', async offset => {
+  const t = await setup(), start = Date.now() - 20000;
+  const { item } = await addJudgment(t.root, { title: '사용자 답', background: '', options: ['진행'], recommend: '', blocks: '-' });
+  await answerJudgment(t.root, item.id, '1');
+  await updateState(t.root, { brainTurn: { runId: 'brain', startedAt: new Date(start).toISOString(), endedAt: new Date(start + 10000).toISOString() } });
+  const at = new Date(start + offset); await utimes(join(t.root, 'docs/판단대기.md'), at, at);
+  await t.decide(['judgment-changed']);
+  expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
+});
+it('참고 implied는 같은 run에서 한 번만, 다음 run에서는 새로 기록한다', async () => {
+  const t = await setup(); await delegationFixture(t.root);
+  await t.end('stop', '작업 중'); await t.end('stop', '대기: 위임 wrong');
+  expect((await readLedger(t.root)).filter(item => item.action === 'delegation:implied')).toHaveLength(1);
+  expect((await readState(t.root)).delegation?.implied).toBe('delegated');
+  await delegationFixture(t.root, 'second'); await t.end('stop', '작업 중');
+  expect((await readLedger(t.root)).filter(item => item.action === 'delegation:implied')).toHaveLength(2);
+});
+it('F25 PICK 후보의 사용자 대기는 거부하고 3턴 뒤 정체 판단으로 멈춘다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'PICK' });
+  const task = await addTask(t.root, { title: '실행', category: 'docs' });
+  await t.end('stop', '대기: 사용자');
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: false, autoTurns: 1 });
+  expect(t.sendMessage.mock.calls[0][0].content).toContain(`[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 후보를 집어라: ${task.id}]`);
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'pick:user-wait-rejected', evidence: { taskIds: [task.id] } }));
+  for (let i = 0; i < 3; i++) await t.end('stop', '대기: 사용자');
+  expect(t.sendMessage).toHaveBeenCalledTimes(3);
+  expect((await readState(t.root)).state).toBe('WAIT_JUDGMENT');
+});
+it.each(['empty', 'blocked'])('F25 PICK %s는 기존 사용자 대기를 유지한다', async kind => {
+  const t = await setup(); await updateState(t.root, { state: 'PICK' });
+  if (kind === 'blocked') {
+    const task = await addTask(t.root, { title: '차단', category: 'docs' });
+    const { item } = await addJudgment(t.root, { title: '사용자 결정', background: '', options: ['진행'], recommend: '', blocks: task.id });
+    await setTask(t.root, task.id, { status: `blocked(${item.id})` });
+  }
+  await t.end('stop', '대기: 사용자');
+  expect((await readState(t.root)).awaitingUser).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+});
+
+it('R1 held 답의 자동 적용 차단·번호별 확인·다음 사용자 변경의 워처 감지 유지', async () => {
+  const t = await setup(), now = Date.now(), path = join(t.root, 'docs/판단대기.md');
+  const first = (await addJudgment(t.root, { title: '첫 답', background: '', options: ['진행', '다른 방식'], recommend: '', blocks: '-' })).item;
+  const second = (await addJudgment(t.root, { title: '둘째 답', background: '', options: ['진행', '다른 방식'], recommend: '', blocks: '-' })).item;
+  await tick(t.root, { now, judgmentOnly: true });
+  const expectedHash = JSON.parse(await readFile(join(t.root, '.pi/harness-watcher.json'), 'utf8')).judgment.expectedHash;
+  await updateState(t.root, { state: 'WAIT_JUDGMENT', brainTurn: { runId: 'brain', startedAt: new Date(now - 1000).toISOString(), endedAt: new Date(now + 1000).toISOString() } });
+  await writeFile(path, (await readFile(path, 'utf8')).replaceAll('- 답:', '- 답: 1'));
+  await utimes(path, new Date(now), new Date(now));
+  await tick(t.root, { now: now + 1, judgmentOnly: true });
+  const changed = await tick(t.root, { now: now + 10001, judgmentOnly: true });
+  expect(changed.emitted).toHaveLength(1);
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, changed.emitted);
+  expect((await applyJudgments(t.root)).applied).toEqual([]);
+  expect(JSON.parse(await readFile(join(t.root, '.pi/harness-watcher.json'), 'utf8')).judgment.expectedHash).toBe(expectedHash);
+  await t.command('judged', first.id);
+  expect((await readJudgment(t.root)).items[0]).toMatchObject({ id: second.id, held: { reason: 'brain-turn' } });
+  await writeFile(path, (await readFile(path, 'utf8')).replace('- 답: 1', '- 답: 2'));
+  await utimes(path, new Date(now + 4000), new Date(now + 4000));
+  await tick(t.root, { now: now + 20000, judgmentOnly: true });
+  const next = await tick(t.root, { now: now + 30000, judgmentOnly: true });
+  expect(next.emitted).toHaveLength(1);
+  await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, next.emitted);
+  expect((await readJudgment(t.root)).completed.map(item => item.id)).toEqual([first.id, second.id]);
+});
+it('F25 PICK의 복귀 후보도 사용자에게 떠넘기지 않는다', async () => {
+  const t = await setup(), task = await addTask(t.root, { title: '복귀', category: 'docs' });
+  await setTask(t.root, task.id, { status: 'doing', resume: { status: 'doing', state: 'IMPLEMENT', at: new Date().toISOString() } });
+  await updateState(t.root, { state: 'PICK' });
+  await t.end('stop', '대기: 사용자');
+  expect((await readState(t.root)).awaitingUser).toBe(false);
+  expect(t.sendMessage.mock.calls[0][0].content).toContain(task.id);
 });

@@ -12,10 +12,10 @@ import { join } from 'node:path';
 import { loadConfig } from '../../src/core/config.ts';
 import { readState, updateState, transitionState, activeStates as active, doctorFresh } from '../../src/core/state.ts';
 import { listBacklog } from '../../src/core/backlog.ts';
-import { runPick } from '../../src/core/pick.ts';
+import { runPick, decidePick } from '../../src/core/pick.ts';
 import { runCleanup } from '../../src/core/cleanup.ts';
 import { notify, setNotifyContext } from '../../src/core/notify.ts';
-import { applyJudgments, readJudgment, JudgmentConflict } from '../../src/core/judgment.ts';
+import { applyJudgments, readJudgment, holdBrainTurnAnswers, JudgmentConflict } from '../../src/core/judgment.ts';
 import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from '../../src/core/storage.ts';
@@ -151,7 +151,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
       if (ids?.some(id => !/^A\d+(?:-\d+)?$/u.test(id))) throw new Error('판단 번호가 올바르지 않습니다');
       await updateState(ctx.cwd, { userAborted: false });
       const before = await readState(ctx.cwd);
-      const result = await applyJudgments(ctx.cwd, ids);
+      const result = await applyJudgments(ctx.cwd, ids, undefined, { releaseHeld: true });
       ctx.ui.notify(JSON.stringify(result), 'info');
       const state = await readState(ctx.cwd);
       if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
@@ -198,13 +198,35 @@ export default function orchestrator(pi: ExtensionAPI): void {
         const runId = state.delegation?.runId;
         const meta = runId ? await readMeta(ctx.cwd, runId) : undefined;
         if (meta && !meta.finishedAt) {
-          if (marker !== runId) await appendLedger(ctx.cwd, { runId: runId!, action: 'delegation:implied', status: 'ok', evidence: { marker: marker ?? null, runId } });
+          if (marker !== runId && state.delegation?.implied !== runId) {
+            await appendLedger(ctx.cwd, { runId: runId!, action: 'delegation:implied', status: 'ok', evidence: { marker: marker ?? null, runId } });
+            await updateState(ctx.cwd, { delegation: { ...state.delegation!, implied: runId } });
+          }
           await updateState(ctx.cwd, { awaitingDelegation: true, ...(awaitingUser ? { awaitingUser: true } : {}), autoTurns: 0 }); return true;
         }
         if (marker) await appendLedger(ctx.cwd, { runId: marker, action: 'delegation:marker', status: 'skip' });
         await updateState(ctx.cwd, { awaitingDelegation: false }); return false;
       });
       if (waiting) return;
+    }
+    if (awaitingUser && (await readState(ctx.cwd)).state === 'PICK') {
+      const state = await readState(ctx.cwd), tasks = await listBacklog(ctx.cwd);
+      const decision = decidePick(tasks, state, { slots: 'ok', now: Date.now() });
+      const open = (await readJudgment(ctx.cwd)).items;
+      const blocked = new Set(tasks.filter(task => open.some(item => item.blocks.split(/[,\s]+/u).includes(task.id)
+        || task.status === `blocked(${item.id})`)).map(task => task.id));
+      for (let size = -1; size !== blocked.size;) {
+        size = blocked.size;
+        for (const task of tasks) if (task.depends.some(id => blocked.has(id))) blocked.add(task.id);
+      }
+      const candidates = tasks.filter(task => task.status !== 'done' && !blocked.has(task.id)).map(task => task.id);
+      const allBlocked = tasks.some(task => task.status !== 'done') && !candidates.length;
+      if (decision.outcome !== 'EMPTY' && !allBlocked) {
+        await updateState(ctx.cwd, { awaitingUser: false });
+        await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'pick:user-wait-rejected', status: 'skip', evidence: { taskIds: candidates } });
+        await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 후보를 집어라: ${candidates.join(', ')}]`);
+        return;
+      }
     }
     if (awaitingUser) {
       await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
@@ -242,7 +264,12 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
     let applied: string[] = [], resumed = false, handled = false, resolve = false;
     try {
       if (kind === 'judgment-changed') {
-        const answered = (await readJudgment(root, { answered: true })).items.filter(item => !item.followup);
+        const held = await holdBrainTurnAnswers(root);
+        const document = await readJudgment(root, { answered: true });
+        const hasHeld = held.length > 0 || document.items.some(item => item.held);
+        if (held.length) await notify(root, { key: 'judgment:held', title: '판단 답 확인', level: 'warning',
+          body: '판단 답이 두뇌 턴 중에 바뀌었습니다. 사용자가 쓴 답이면 /judged 로 확인하세요' }, context, { now: options.now?.() });
+        const answered = document.items.filter(item => !item.followup && !item.held);
         const config = await loadConfig(root);
         const stableFor = await judgmentStableFor(root, options.now?.());
         const waiting = answered.filter(item => item.classification?.applicable && item.classification.kind === 'freeform'
@@ -272,7 +299,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
           if (deferDecision(root, seconds * 1000, retry)) context.notify(`자유 서술 답 ${seconds}초 뒤 적용 예정`, 'info');
         } else {
           clearDecisionTimers(root); resolve = true;
-          if (!applied.length && !handled) context.notify('판단대기 변경 감지 — 적용할 답 없음', 'info');
+          if (!applied.length && !handled && !hasHeld) context.notify('판단대기 변경 감지 — 적용할 답 없음', 'info');
         }
       } else if (kind === 'codex-done') {
         const matching: InboxRecord[] = [];

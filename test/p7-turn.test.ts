@@ -78,3 +78,19 @@ it.each(['notify', 'ledger', 'both'])('N4 %s 진단 실패가 정상 턴 결과�
     expect.objectContaining({ status: 'fail' }),
   ]);
 });
+
+it.each([false, true])('R1 두뇌 턴 시작·종료 창 기록 (runner throw=%s)', async throws => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async () => {
+    expect((await readState(root)).brainTurn).toMatchObject({ runId: expect.any(String), startedAt: expect.any(String) });
+    expect((await readState(root)).brainTurn?.endedAt).toBeUndefined();
+    if (throws) throw new Error('stub crash');
+    return { code: 1, cleaned: true, stderr: '' };
+  });
+  const call = runTurn('fixture', { root, env: { HOME: root } });
+  if (throws) await expect(call).rejects.toThrow('stub crash'); else await call;
+  const window = (await readState(root)).brainTurn!;
+  expect(Date.parse(window.endedAt!)).toBeGreaterThanOrEqual(Date.parse(window.startedAt));
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'brain:window', evidence: window }));
+});

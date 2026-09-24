@@ -425,3 +425,29 @@ it('F24 설정 판단 경로·기본 fallback·판단 저널을 보호한다', a
   for (const path of ['docs/판단대기.md', '.pi/harness-judgment-apply.json']) expect(await invoke('Write', { file_path: path }, 'IDLE', { ...brain, stateFile: 'missing', configFile: 'missing' }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
 });
+
+it.each([
+  'cp /tmp/판단대기.md docs/', 'mv /tmp/판단대기.md docs', 'rsync -a /tmp/stage/ docs/',
+  'tar -xf archive.tar -C docs', 'ln docs/판단대기.md docs/alias.md',
+  'ln /tmp/file docs/판단대기.md', 'cp -r /tmp/stage/. docs',
+  `python3 -c "open('docs/판단대기.md','a').write('1')"`,
+  `node -e "require('fs').appendFileSync('docs/판단대기.md','1')"`,
+  `perl -pi -e 's/x/y/' docs/판단대기.md`, `ruby -i -e 'puts 1' docs/판단대기.md`,
+  `sed -i '' 's/x/y/' docs/판단대기.md`,
+  `bash -c 'cp /tmp/판단대기.md docs/'`, `sh -c 'tee docs/판단대기.md'`,
+  `zsh -lc 'tar -xf archive.tar -C docs'`,
+])('R1 판단 파일 쓰기 우회 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('판단대기 문서는 사용자만') });
+});
+it.each(['cat docs/판단대기.md', 'grep 답 docs/판단대기.md', `bash -c 'cat docs/판단대기.md'`,
+  `python3 -c "print('unrelated')"`, 'cp docs/source.md .pi/scratch/copy.md'])('R1 관련 없는 쓰기·읽기 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each([`bash -c 'fodh codex task --wait --spec docs/task.md'`,
+  `sh -c 'node /opt/pkg/bin/fodh codex task --wait'`, 'node bin/fodh.ts codex task --wait',
+  `zsh -lc 'node /opt/pkg/bin/fodh codex task --wait'`])('R4 셸·node 경유 --wait background 차단: %s', async command => {
+  expect(await invoke('Bash', { command, run_in_background: true }, 'IMPLEMENT', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('--wait 를 백그라운드로 돌리지 마라') });
+  expect((await invoke('Bash', { command, run_in_background: false }, 'IMPLEMENT', brain)).code).toBe(0);
+});

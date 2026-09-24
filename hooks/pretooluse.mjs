@@ -24,7 +24,24 @@ function commandWords(words) {
     index++;
     while (words[index]?.startsWith('-') || /^[A-Za-z_][A-Za-z_\d]*=/.test(words[index] ?? '')) index++;
   }
-  return words.slice(index);
+  const args = words.slice(index);
+  if (basename(args[0] ?? '') === 'node' && /^fodh(?:\.[cm]?[jt]s)?$/.test(basename(args[1] ?? ''))) return ['fodh', ...args.slice(2)];
+  return args;
+}
+
+function nestedCommands(command, depth = 0) {
+  if (depth > 16) deny('중첩 셸 명령이 너무 깊습니다.', 'boundary');
+  const parsed = shellParts(command), groups = [...parsed.groups];
+  let unterminatedHeredoc = parsed.unterminatedHeredoc;
+  for (const words of parsed.groups) {
+    const args = commandWords(words);
+    if (!['bash', 'sh', 'zsh'].includes(basename(args[0] ?? ''))) continue;
+    const flag = args.findIndex((arg, i) => i > 0 && /^-[a-zA-Z]*c$/.test(arg));
+    if (flag < 0 || !args[flag + 1]) continue;
+    const nested = nestedCommands(args[flag + 1], depth + 1);
+    groups.push(...nested.groups); unterminatedHeredoc ||= nested.unterminatedHeredoc;
+  }
+  return { groups, unterminatedHeredoc };
 }
 
 function gitAction(words) {
@@ -201,7 +218,7 @@ try {
   if (brain && editing) boundary(input.file_path ?? input.notebook_path ?? '');
   if (!bash) process.exit(0);
 
-  const { groups, unterminatedHeredoc } = shellParts(command);
+  const { groups, unterminatedHeredoc } = nestedCommands(command);
   if (brain && unterminatedHeredoc) deny('heredoc 종료 표지를 찾을 수 없습니다');
   for (const words of groups) {
     const assignment = words.some(word => /^FODH_[A-Z_]*=/.test(word));
@@ -224,7 +241,19 @@ try {
   for (const words of groups) {
     const args = commandWords(words), executable = basename(args[0] ?? '');
     const paths = writePaths(words);
-    if (brain && paths.some(judgmentPath)) deny(judgmentMessage, 'boundary');
+    if (brain) {
+      const operands = withoutRedirects(args);
+      const destinations = ['cp', 'mv', 'rsync', 'ln'].includes(executable)
+        ? [operands.at(-1), ...operands.flatMap((word, i) => word === '-t' || word === '--target-directory' ? [operands[i + 1]] : word.startsWith('--target-directory=') ? [word.slice(19)] : [])]
+        : executable === 'tar' ? operands.flatMap((word, i) => word === '-C' || word === '--directory' ? [operands[i + 1]] : word.startsWith('--directory=') ? [word.slice(12)] : word.startsWith('-C') ? [word.slice(2)] : []) : [];
+      const inline = ['python', 'python3', 'node', 'perl', 'ruby'].includes(executable)
+        && args.some(word => /^-[^-]*[cei]/.test(word) || word === '--eval' || word.startsWith('--eval='));
+      const sedEdit = executable === 'sed' && args.some(word => /^-[^-]*i/.test(word) || word.startsWith('--in-place'));
+      if (paths.some(judgmentPath)
+        || destinations.filter(Boolean).some(value => judgmentPath(value) || samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))))
+        || executable === 'ln' && operands.slice(1).filter(word => !word.startsWith('-')).some(judgmentPath)
+        || (inline || sedEdit) && args.slice(1).some(word => word.includes(basename(judgmentFile)))) deny(judgmentMessage, 'boundary');
+    }
     if (paths.some(protectedPath)) deny('가드 설정은 fodh로만 변경할 수 있습니다.');
     if (process.env.FODH_CODEX_CHILD === '1' && executable === 'fodh') deny('Codex 자식은 fodh를 실행할 수 없습니다.', 'boundary');
     if (brain) {

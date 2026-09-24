@@ -1,3 +1,7 @@
+import { stat } from 'node:fs/promises';
+import { assertNotBrain } from './brain-guard.ts';
+import { appendLedger, readLedger } from './ledger.ts';
+import type { BrainTurn } from './state.ts';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { loadConfig } from './config.ts';
@@ -7,6 +11,7 @@ import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './st
 
 export interface JudgmentItem {
   id: string; title: string; rev: number; background: string; options: string[]; recommend: string;
+  held?: { at: string; reason: 'brain-turn'; runId: string };
   blocks: string; answer: string; answerRev?: number; classification?: AnswerClassification;
   resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string; followup?: string; dedupeKey?: string; raw: string; start: number; end: number;
 }
@@ -159,6 +164,8 @@ export async function readJudgment(root: string, options: { answered?: boolean }
     const text = await reconcileEdits(root, path, original || initial);
     const expectedHash = text === original ? hash(text) : await save(root, path, text, original);
     const document = parseJudgment(text);
+    const held = await readJson<HeldAnswer[]>(harnessPath(root, 'harness-judgment-held.json'), []);
+    for (const item of document.items) item.held = held.find(record => record.id === item.id && record.answer === item.answer)?.held;
     if (text === original) await rememberQuestions(root, document.items);
     return { ...document, items: document.items.filter(item => !options.answered || item.answer.trim()).map(item => ({
       ...item, ...(options.answered ? { classification: classifyAnswer(item.answer, item.options, item.rev, item.answerRev, approvalRequired(item, config.requiresApproval)) } : {}),
@@ -241,6 +248,7 @@ export async function addJudgment(root: string, input: JudgmentInput): Promise<{
 }
 
 export async function answerJudgment(root: string, id: string, answer: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
+  await assertNotBrain(root, '판단 답변');
   if (/[\r\n]/u.test(answer)) throw new Error('답은 한 줄로 입력해야 합니다');
   const path = await location(root);
   return retryJudgment(() => withFileLock(path, async () => {
@@ -334,11 +342,13 @@ async function markFollowup(root: string, item: JudgmentItem, followup: string):
     await save(root, path, text.slice(0, current.start) + raw + text.slice(current.end), original);
   });
 }
-export async function applyJudgments(root: string, ids?: string[], expectedAnswers?: Record<string, string>): Promise<{
+export async function applyJudgments(root: string, ids?: string[], expectedAnswers?: Record<string, string>, options: { releaseHeld?: boolean } = {}): Promise<{
   applied: ApplyEntry[]; unapplied: { id: string; reason: string }[];
 }> {
+  await assertNotBrain(root, '판단 적용');
   const applied: ApplyEntry[] = [];
   return retryJudgment(() => withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    if (options.releaseHeld) await releaseHeldAnswers(root, ids);
     const unapplied: { id: string; reason: string }[] = [];
     const journalPath = harnessPath(root, 'harness-judgment-apply.json');
     let journal = await readJson<ApplyJournal[]>(journalPath, []);
@@ -388,6 +398,7 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
       }
     }
     for (const item of document.items.filter(item => !ids?.length || ids.includes(item.id))) {
+      if (item.held) { unapplied.push({ id: item.id, reason: '두뇌 턴 중 변경된 답입니다. /judged 로 확인하세요' }); continue; }
       // Automatic application must not accept a new answer typed after its stability check.
       if (expectedAnswers && expectedAnswers[item.id] !== item.raw) throw new JudgmentConflict();
       if (item.followup) { unapplied.push({ id: item.id, reason: `후속 질문 ${item.followup}의 답을 기다립니다` }); continue; }
@@ -426,5 +437,46 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
     }
     const remaining = new Set((await readJudgment(root)).items.map(item => item.id));
     return { applied, unapplied: unapplied.filter(item => remaining.has(item.id) || !document.items.some(open => open.id === item.id)) };
+  }));
+}
+
+interface HeldAnswer { id: string; answer: string; held: NonNullable<JudgmentItem['held']> }
+async function releaseHeldAnswers(root: string, ids?: string[]): Promise<void> {
+  const path = harnessPath(root, 'harness-judgment-held.json');
+  await withFileLock(path, async () => {
+    const records = await readJson<HeldAnswer[]>(path, []);
+    await atomicWrite(path, JSON.stringify(ids?.length ? records.filter(item => !ids.includes(item.id)) : []) + '\n');
+  });
+}
+// Completed windows remain in the ledger so a later turn cannot erase attribution.
+export async function holdBrainTurnAnswers(root: string): Promise<string[]> {
+  const path = await location(root);
+  return withFileLock(harnessPath(root, 'harness-judgment-apply'), () => withFileLock(path, async () => {
+    const modified = await stat(path).then(value => value.mtimeMs).catch(error => {
+      if (error.code === 'ENOENT') return NaN;
+      throw error;
+    });
+    const current = (await readState(root)).brainTurn;
+    const windows = (await readLedger(root)).filter(entry => entry.action === 'brain:window')
+      .map(entry => entry.evidence as BrainTurn);
+    if (current) windows.push(current);
+    const window = windows.findLast(turn => modified >= Date.parse(turn.startedAt)
+      && (!turn.endedAt || modified <= Date.parse(turn.endedAt) + 2000));
+    if (!window) return [];
+    const answered = parseJudgment(await readText(path)).items.filter(item => item.answer.trim() && !item.followup);
+    const heldPath = harnessPath(root, 'harness-judgment-held.json');
+    const added: string[] = [];
+    await withFileLock(heldPath, async () => {
+      let records = await readJson<HeldAnswer[]>(heldPath, []);
+      for (const item of answered) {
+        if (records.some(record => record.id === item.id && record.answer === item.answer)) continue;
+        records = records.filter(record => record.id !== item.id);
+        records.push({ id: item.id, answer: item.answer, held: { at: new Date().toISOString(), reason: 'brain-turn', runId: window.runId } });
+        added.push(item.id);
+      }
+      if (added.length) await atomicWrite(heldPath, JSON.stringify(records, null, 2) + '\n');
+    });
+    if (added.length) await appendLedger(root, { runId: window.runId, action: 'judgment:held', status: 'skip', evidence: { ids: added } });
+    return answered.map(item => item.id);
   }));
 }

@@ -82,6 +82,8 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
     for (let attempt = 0; attempt < 2; attempt++) {
       reportText = '';
       const action = `brain:${attempt}`;
+      const brainTurn = { runId, startedAt: new Date().toISOString() };
+      await patchState({ brainTurn });
       await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
       let init: TurnResult['init'];
       let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
@@ -218,6 +220,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           },
         });
       } finally {
+        const completedTurn = { ...brainTurn, endedAt: new Date().toISOString() };
+        await patchState({ brainTurn: completedTurn });
+        if (!options.doctor) await appendLedger(root, { runId, action: 'brain:window', status: 'ok', evidence: completedTurn });
         if (lastEventAt) await patchState({ lastEventAt, runId });
       }
       if (!options.doctor) {

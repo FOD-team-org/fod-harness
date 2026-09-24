@@ -38,7 +38,7 @@ export async function buildHeader(meta: Pick<CodexMeta, 'kind' | 'runId' | 'task
       : meta.kind === 'research' ? ' research 는 `## 조사 결과` + 출처 목록.' : '' };
   return (await readFile(join(pkg, 'templates/codex-header.md'), 'utf8')).replace(/\{\{(\w+)\}\}/gu, (_, key: string) => values[key] ?? '');
 }
-export async function startCodex(root: string, kind: CodexKind, options: StartOptions) {
+export async function startCodex(root: string, kind: CodexKind, options: StartOptions, launcher: { bin?: string; timeoutMs?: number } = {}) {
   root = await realpath(root);
   const started = await withFileLock(harnessPath(root, 'harness-delegation'), async () => {
     const state = await readState(root), config = await loadConfig(root), cfg = config.delegate.codex;
@@ -105,14 +105,25 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
           ...(kind === 'task' && !worktree ? { fallback: 'root' } : {}) } });
       const log = await open(join(dir, 'supervisor.log'), 'a', 0o600);
       try {
-        const child = spawn(process.execPath, [join(pkg, 'bin/fodh-codex-supervisor'), root, runId, '--launch'], {
+        const child = spawn(process.execPath, [launcher.bin ?? join(pkg, 'bin/fodh-codex-supervisor'), root, runId, '--launch'], {
           detached: true, stdio: ['ignore', 'pipe', log.fd], cwd: root,
           env: { ...childEnv(), FODH_PROJECT_ROOT: root, FODH_RUN_ID: runId },
         });
         let output = '';
         child.stdout!.setEncoding('utf8');
         child.stdout!.on('data', chunk => { output = (output + chunk).slice(0, 4096); });
-        const code = await new Promise<number | null>((ok, fail) => { child.once('close', ok); child.once('error', fail); });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const code = await new Promise<number | null>((ok, fail) => {
+          child.once('close', ok); child.once('error', fail);
+          timer = setTimeout(() => {
+            try {
+              const reported = JSON.parse(output.trim());
+              if (Number.isSafeInteger(reported.pid) && reported.pid > 1 && reported.pid !== process.pid) pid = reported.pid;
+            } catch { /* A launcher without a complete pid response has no known supervisor. */ }
+            if (child.pid && child.pid > 1) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }
+            fail(new Error('감독 런처 종료 대기 시간 초과'));
+          }, launcher.timeoutMs ?? 15000);
+        }).finally(() => clearTimeout(timer));
         const launched = code === 0 ? JSON.parse(output.trim() || '{}') : {};
         if (!Number.isSafeInteger(launched.pid) || launched.pid <= 1) throw new Error('감독 런처가 pid를 반환하지 않았습니다');
         pid = launched.pid;
@@ -127,7 +138,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
         await writeMeta(root, { ...current, pid, processStartedAt: identity });
       });
       if (kind === 'task') await setTask(root, task!.id, { delegate: 'codex' });
-      await updateState(root, { delegation: { runId, kind, taskId: task?.id, title: options.title, startedAt }, awaitingDelegation: false, delegationReminder: undefined });
+      await updateState(root, { delegation: { runId, kind, taskId: task?.id, title: options.title, startedAt }, awaitingDelegation: false });
       return { runId, kind, taskId: task?.id, cwd, sandbox, pid, resultDir: dir, worktree, routeHint: meta.routeHint, wait: false, timeoutMinutes: cfg.timeoutMinutes };
     } catch (error) {
       // Supervisor is still waiting on our start lock; it cannot have spawned Codex yet.
@@ -179,17 +190,17 @@ export async function cancel(root: string, runId: string) {
       return { runId, cancelled: true, meta: null };
     }
     if (!meta.finishedAt) {
-      await requestCancel(root, runId, 'cancel');
       const record = (await listProcs(root)).find(proc => proc.runId === runId && proc.kind === 'codex');
       const owner = record ?? (meta.pid ? { pid: meta.pid, pgid: meta.pid, startedAt: meta.processStartedAt } : undefined);
       if (owner && await codexOwnership(owner) === 'owned') {
+        await requestCancel(root, runId, 'cancel');
         try { process.kill(owner.pid, 'SIGTERM'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
         const deadline = Date.now() + 10000;
         while (Date.now() < deadline && !(await readMeta(root, runId))?.finishedAt) await delay(100);
       }
       const latest = await readMeta(root, runId);
       if (!latest?.finishedAt) {
-      const reclaimed = owner ? await reclaimCodexOwner({ ...owner, childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups }, { root, runId }) : undefined;
+      const reclaimed = owner ? await reclaimCodexOwner({ ...owner, childPid: meta.childPid, childStartedAt: meta.childStartedAt, toolGroups: meta.toolGroups }, { root, runId }, { by: 'cancel' }) : undefined;
       if (reclaimed && !reclaimed.reclaimed) throw new Error('감독 프로세스 트리 회수 실패');
       await finishRun(root, runId, { status: reclaimed?.owner === 'unverified' ? 'lost' : 'cancelled', exit: null, reason: reclaimed?.reason });
       }
