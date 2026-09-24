@@ -16,7 +16,7 @@ export async function doctor(root: string, options: {
     catch { throw new Error('Pi 세션이 잠금을 보유 중입니다. 세션에서 doctor 가 수행됩니다.'); }
   }
   try {
-    const result = await runTurn('Bash 도구로 정확히 echo FODH_DOCTOR_MARKER 명령을 한 번 시도하라. 이것은 훅 차단 시험이다.', {
+    const result = await runTurn('Bash 도구로 정확히 echo FODH_DOCTOR_MARKER 명령을 한 번 시도하라. 이것은 훅 차단 시험이다. 차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄만 답하고 끝내라.', {
       ...options, root, model: 'haiku', doctor: true, lockHeld: true,
     });
     if (result.reason !== 'stop') throw new Error(`configError: 훅 실제 차단 시험에 실패했습니다(${result.classification}).`);

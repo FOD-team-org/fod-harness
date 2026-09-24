@@ -187,6 +187,38 @@ describe('doctor와 CLI', () => {
     const root = await project(); expect(await doctor(root, { env: environment(root) })).toMatchObject({ ok: true, hookDenials: 1 });
     await writeFile(join(root, '.claude/settings.json'), '{}');
     await expect(doctor(root, { env: environment(root) })).rejects.toThrow('configError');
+    expect((await readState(root)).doctor).toMatchObject({ ok: false });
+    expect((await readLedger(root)).findLast(entry => entry.action === 'brain:0')?.evidence).toMatchObject({ code: 0, cleaned: true });
+  });
+  it.each(['doctor-max-turns', 'doctor-max-turns-tool-result'])('F8: %s 차단→다른 도구 성공→max_turns/exit 1도 doctor 성공', async scenario => {
+    const root = await project();
+    expect(await doctor(root, { env: environment(root, scenario) })).toMatchObject({ ok: true, hookDenials: 1 });
+    expect((await readState(root)).doctor).toMatchObject({ ok: true });
+    const ledger = await readLedger(root);
+    expect(ledger.find(entry => entry.action === 'hook:0:doctor-marker')?.evidence).toMatchObject({ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } });
+    expect(ledger.find(entry => entry.action === 'tool_result:0:doctor-followup')?.evidence).toMatchObject({ is_error: false });
+    expect(ledger.find(entry => entry.action === 'result:0')?.evidence).toMatchObject({ is_error: true, terminal_reason: 'max_turns',
+      permission_denials: scenario.endsWith('tool-result') ? [] : [expect.objectContaining({ tool_name: 'Bash' })] });
+    expect(ledger.findLast(entry => entry.action === 'brain:0')?.evidence).toMatchObject({ code: 1, cleaned: true });
+    expect((await readJudgment(root)).items).toHaveLength(0);
+  });
+  it('F8: max_turns 자체는 차단 증거가 아니므로 훅 없으면 configError', async () => {
+    const root = await project(); await writeFile(join(root, '.claude/settings.json'), '{}');
+    await expect(doctor(root, { env: environment(root, 'doctor-max-turns') })).rejects.toThrow('configError');
+    expect((await readState(root)).doctor).toMatchObject({ ok: false });
+    expect((await readLedger(root)).some(entry => entry.action.startsWith('hook:'))).toBe(false);
+  });
+  it('F8: doctor만 brain-rules를 제외하고 max-turns 2와 전용 프롬프트를 사용한다', async () => {
+    const root = await project(); await doctor(root, { env: environment(root) });
+    await runTurn('일반 턴', { root, model: 'haiku', env: environment(root) });
+    const [check, normal] = await records(root, 'fake-calls.jsonl');
+    expect(check.args).not.toContain('--append-system-prompt-file');
+    expect(check.args).not.toContain(join(packageRoot, 'templates/brain-rules.md'));
+    expect(check.args[check.args.indexOf('--max-turns') + 1]).toBe('2');
+    expect(check.args[check.args.indexOf('--settings') + 1]).toBe(join(root, '.claude/settings.json'));
+    expect(check.prompt).toContain('차단되면 다른 도구를 쓰지 말고 `차단 확인` 한 줄만 답하고 끝내라');
+    expect(normal.args[normal.args.indexOf('--append-system-prompt-file') + 1]).toBe(join(packageRoot, 'templates/brain-rules.md'));
+    expect(normal.args).not.toContain('--max-turns');
   });
   it('apiKeyHelper가 있으면 실행 전 실패', async () => {
     const root = await project(); await writeFile(join(root, '.claude/settings.json'), '{"apiKeyHelper":"사용하지않음"}');

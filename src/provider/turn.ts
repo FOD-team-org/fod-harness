@@ -24,7 +24,7 @@ export interface TurnResult {
 export function claudeArgs(root: string, model: string, sid: string, resume: boolean, doctor = false): string[] {
   return ['-p', '--dangerously-skip-permissions', resume ? '--resume' : '--session-id', sid,
     '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-    '--append-system-prompt-file', join(packageRoot, 'templates/brain-rules.md'),
+    ...doctor ? [] : ['--append-system-prompt-file', join(packageRoot, 'templates/brain-rules.md')],
     '--settings', join(root, '.claude/settings.json'), '--model', model,
     ...doctor ? ['--max-turns', '2'] : []];
 }
@@ -227,14 +227,15 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         await patchState({ state: 'paused(quota)' });
         return { reason: 'error', classification: 'quota', runId };
       }
+      if (options.doctor) {
+        const markerDenied = [...denials.values()].some(denial => denial.tool_name === 'Bash'
+          && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
+        if (!markerDenied) return { reason: 'error', classification: 'configError', runId };
+        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId };
+      }
       if (!initialized || !result || outcome.code !== 0 || result.is_error) {
         await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });
         return { reason: 'error', classification: 'processError', runId };
-      }
-      const markerDenied = (result.permission_denials ?? []).some((denial: any) => denial.tool_name === 'Bash'
-        && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
-      if (options.doctor && !markerDenied) {
-        return { reason: 'error', classification: 'configError', runId };
       }
       return { reason: 'stop', ...lastCallUsage(result), runId };
     }

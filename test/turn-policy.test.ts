@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { runProcess, childEnv, type RunOptions } from '../src/provider/runner.ts';
+import { runProcess, childEnv, type RunOptions, type ProcessResult } from '../src/provider/runner.ts';
 import { setConfig } from '../src/core/config.ts';
 import { streamClaude } from '../extensions/provider/stream.ts';
 import { runTurn } from '../src/provider/turn.ts';
@@ -24,7 +24,7 @@ async function project() {
   return root;
 }
 const environment = (root: string) => ({ ...childEnv(), HOME: root });
-function emulate(events: Record<string, any>[], cleaned = true) {
+function emulate(events: Record<string, any>[], cleaned = true, terminal: Partial<ProcessResult> = {}) {
   vi.mocked(runProcess).mockImplementation(async (options: RunOptions) => {
     if (options.kind === 'switch') return { code: 0, stderr: '', cleaned: true };
     const args = options.args!;
@@ -34,7 +34,7 @@ function emulate(events: Record<string, any>[], cleaned = true) {
       const abortKind = await options.onEvent?.(emitted);
       if (abortKind) return { code: null, stderr: '', abortKind, cleaned };
     }
-    return { code: 0, stderr: '', cleaned };
+    return { code: 0, stderr: '', cleaned, ...terminal };
   });
 }
 const init = { type: 'system', subtype: 'init', model: 'haiku', permissionMode: 'bypassPermissions', apiKeySource: 'none' };
@@ -124,4 +124,30 @@ it('정책: 기본 fable과 config 변경을 다음 턴에 읽고 동일 세션�
   expect(await runTurn('직접 편집', { root, env: environment(root) })).toMatchObject({ reason: 'stop' });
   expect(vi.mocked(runProcess).mock.calls.at(-1)![0].args).toContain('fable');
   expect((await readState(root)).sessionId).toBe(sid);
+});
+const markerResult = { ...done, permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] };
+it.each([
+  ['quota', { abortKind: 'quota' }, 'error', 'configError: quota'],
+  ['billing', { abortKind: 'billing' }, 'aborted', 'billing'],
+  ['config', { abortKind: 'configError' }, 'error', 'configError'],
+  ['deadline', { abortKind: 'deadline' }, 'aborted', 'deadline'],
+  ['user', { abortKind: 'user' }, 'aborted', 'user'],
+  ['protocol', { abortKind: 'protocolError' }, 'error', 'protocolError'],
+  ['cleanup', { cleaned: false }, 'error', 'cleanupFailed'],
+] as const)('F8: doctor 차단 관측 뒤에도 %s 중단/실패 판정을 유지한다', async (_name, terminal, reason, classification) => {
+  const root = await project(); emulate([init, markerResult], true, terminal);
+  expect(await runTurn('doctor 시험', { root, doctor: true, env: environment(root) })).toMatchObject({ reason, classification });
+  expect(vi.mocked(runProcess).mock.calls).toHaveLength(1);
+});
+it('F8: 일반 턴은 marker 차단을 관측해도 max_turns 실패를 성공으로 바꾸지 않는다', async () => {
+  const root = await project();
+  emulate([init, { ...markerResult, subtype: 'error_max_turns', is_error: true, terminal_reason: 'max_turns' }], true, { code: 1 });
+  expect(await runTurn('일반 턴', { root, model: 'haiku', env: environment(root) })).toMatchObject({ reason: 'error', classification: 'processError' });
+});
+it.each([
+  { tool_name: 'Read', tool_input: { command: 'FODH_DOCTOR_MARKER' } },
+  { tool_name: 'Bash', tool_input: { command: 'echo OTHER_MARKER' } },
+])('F8: 다른 도구 또는 다른 마커 차단으로 doctor를 통과시키지 않는다 (%#)', async denial => {
+  const root = await project(); emulate([init, { ...done, permission_denials: [denial] }]);
+  expect(await runTurn('doctor 시험', { root, doctor: true, env: environment(root) })).toMatchObject({ reason: 'error', classification: 'configError' });
 });

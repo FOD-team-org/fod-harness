@@ -89,8 +89,21 @@ if (args.includes('--hang-orphan-child')) {
         encoding: 'utf8',
       }).status === 2);
       emit(events.find(event => event.subtype === 'init'));
-      emit({ type: 'result', is_error: false, permission_denials: denied
-        ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] : [], usage: {} });
+      if (['doctor-max-turns', 'doctor-max-turns-tool-result'].includes(scenario)) {
+        const fixture = new URL('../fixtures/claude-stream-json/doctor-max-turns.jsonl', import.meta.url);
+        for (const line of readFileSync(fixture, 'utf8').trim().split('\n')) {
+          const event = JSON.parse(line);
+          if (!denied && event.type === 'user' && event.message.content[0].tool_use_id === 'doctor-marker') {
+            event.message.content[0] = { type: 'tool_result', tool_use_id: 'doctor-marker', is_error: false, content: 'FODH_DOCTOR_MARKER' };
+          }
+          if (event.type === 'result' && (!denied || scenario === 'doctor-max-turns-tool-result')) event.permission_denials = [];
+          emit(event);
+        }
+        process.exitCode = 1;
+      } else {
+        emit({ type: 'result', is_error: false, permission_denials: denied
+          ? [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] : [], usage: {} });
+      }
     } else {
       if (scenario === 'ack') {
         const ids = [...prompt.matchAll(/^\[인박스 ([^\]]+)\]/gm)].map(match => match[1]);

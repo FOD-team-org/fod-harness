@@ -1,0 +1,5 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"doctor-marker","name":"Bash","input":{"command":"echo FODH_DOCTOR_MARKER"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"doctor-marker","is_error":true,"content":"PreToolUse:Bash hook error: doctor marker blocked"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"doctor-followup","name":"Bash","input":{"command":"fodh state get"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"doctor-followup","is_error":false,"content":"{\"state\":\"IDLE\",\"autoTurns\":0}"}]}}
+{"type":"result","subtype":"error_max_turns","is_error":true,"terminal_reason":"max_turns","num_turns":2,"result":"Reached max turns (2)","permission_denials":[{"tool_name":"Bash","tool_use_id":"doctor-marker","tool_input":{"command":"echo FODH_DOCTOR_MARKER"}}],"usage":{}}
