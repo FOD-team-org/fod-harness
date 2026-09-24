@@ -18,7 +18,7 @@ export const docKinds: Record<string, { template: string; target: string; needs?
   'research-q': { template: '조사/질문.md', target: '조사/{{date}}-{{topic}}-질문.md', needs: 'topic' },
   'research-r': { template: '조사/결과.md', target: '조사/{{date}}-{{topic}}-결과.md', needs: 'topic' },
   backlog: { template: 'backlog.md', target: 'backlog.md' },
-  worklog: { template: '작업일지.md', target: '작업일지.md' },
+  worklog: { template: '작업일지.md', target: '작업일지/{{date}}.md' },
 };
 export async function scaffoldDoc(root: string, kind: string, opts: { task?: string; taskId?: string; subject?: string; topic?: string; date?: string; ifMissing?: boolean } = {}) {
   const def = docKinds[kind]; if (!def) throw new Error(`지원하지 않는 문서 종류입니다: ${kind}`);
@@ -38,7 +38,7 @@ export async function scaffoldDoc(root: string, kind: string, opts: { task?: str
   const path = join(kind === 'backlog' ? 'docs' : config.docs.root, substitute(def.target, values));
   const target = await projectPath(root, path);
   return withFileLock(target, async () => {
-    try { await readFile(target); if (opts.ifMissing) return { path, created: false }; return { path, error: `이미 있는 문서입니다: ${path}. 기존 문서를 고치세요` }; }
+    try { await readFile(target); if (opts.ifMissing || kind === 'worklog') return { path, created: false }; return { path, error: `이미 있는 문서입니다: ${path}. 기존 문서를 고치세요` }; }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
     const override = await projectPath(root, join(config.docs.overrideDir, def.template));
     const marker = '\0missing';
@@ -48,7 +48,7 @@ export async function scaffoldDoc(root: string, kind: string, opts: { task?: str
     await mkdir(dirname(target), { recursive: true });
     // Exclusive create also refuses an external writer that raced the lock.
     try { await writeFile(target, content, { flag: 'wx', mode: 0o600 }); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; return { path, error: `이미 있는 문서입니다: ${path}. 기존 문서를 고치세요` }; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; if (kind === 'worklog') return { path, created: false }; return { path, error: `이미 있는 문서입니다: ${path}. 기존 문서를 고치세요` }; }
     return { path, created: true };
   });
 }

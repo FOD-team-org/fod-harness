@@ -21,21 +21,22 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   const state = await readState(root), config = await loadConfig(root);
   if (!['VERIFY', 'FIX'].includes(state.state)) return { ok: false, error: 'VERIFY 또는 FIX 상태에서만 검증할 수 있습니다' };
   const runId = randomUUID(), startedAt = new Date().toISOString();
+  root = await realpath(root);
+  const task = state.taskId ? await getTask(root, state.taskId) : undefined;
+  const taskPath = state.worktrees?.find(item => item.taskId === state.taskId)?.path || task?.worktree || root;
+  const cwd = await realpath(resolve(root, options.cwd ?? taskPath));
+  const registered = await Promise.all((state.worktrees ?? []).map(w => realpath(w.path).catch(() => '')));
+  if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
+  if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
   async function finish<T extends { ok: boolean }>(report: T) {
     const finishedAt = new Date().toISOString();
-    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy };
+    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd };
     await atomicWrite(harnessPath(root, `verify/${runId}/result.json`), `${JSON.stringify(result, null, 2)}\n`);
-    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy } });
+    await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd } });
     return result;
   }
   const commands = options.heavy ? config.verify.heavy : config.verify.commands;
   if (!commands.length) return finish({ ok: false, error: `verify.${options.heavy ? 'heavy' : 'commands'} 가 비어 있습니다` });
-  root = await realpath(root);
-  const task = state.taskId ? await getTask(root, state.taskId) : undefined;
-  const cwd = await realpath(resolve(root, options.cwd ?? task?.worktree ?? root));
-  const registered = await Promise.all((state.worktrees ?? []).map(w => realpath(w.path).catch(() => '')));
-  if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
-  if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
   const ownerStartedAt = await processStartedAt(process.pid) ?? `spawn:${startedAt}`;
   if (options.heavy) {
     const acquired = await acquireSlot('heavy', { root, runId, taskId: state.taskId, pid: process.pid,

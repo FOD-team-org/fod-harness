@@ -1,3 +1,4 @@
+import { todayKst } from '../src/core/template-values.ts';
 import * as cleanupModule from '../src/core/cleanup.ts';
 import * as notifyModule from '../src/core/notify.ts';
 import { runPick } from '../src/core/pick.ts';
@@ -47,14 +48,14 @@ it('project-start는 없는 문서 생성·INTERVIEW 전이·프로젝트 이름
   expect(JSON.parse(await readFile(join(test.root, '.pi/harness-interview.json'), 'utf8')).round).toBe(0);
   expect(await readFile(join(test.root, 'CLAUDE.md'), 'utf8')).toContain('# 새 프로젝트');
   expect(await readFile(join(test.root, '.claude/skills/fodh-workflow/SKILL.md'), 'utf8')).toContain('name: fodh-workflow');
-  for (const name of ['backlog.md', '판단대기.md', '작업일지.md']) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
+  for (const name of ['backlog.md', '판단대기.md', `작업일지/${todayKst()}.md`]) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
   expect(test.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: 'harness-orchestrator',
     content: expect.stringContaining('18 영역') }), { triggerTurn: true });
 });
 it('project-start는 기존 초기 문서와 사용자 답을 보존한다', async () => {
   const test = await setup();
   await test.command('project-start');
-  const paths = ['backlog.md', '작업일지.md', '판단대기.md'].map(name => join(test.root, 'docs', name));
+  const paths = ['backlog.md', `작업일지/${todayKst()}.md`, '판단대기.md'].map(name => join(test.root, 'docs', name));
   const before = await Promise.all(paths.map(path => readFile(path, 'utf8')));
   await updateState(test.root, { state: 'IDLE' });
   await test.command('project-start');
@@ -70,7 +71,7 @@ it('develop-start에 백로그가 없으면 빈 템플릿 뒤 PLANNING 지시문
   const test = await setup(); await test.command('develop-start');
   expect((await readState(test.root)).state).toBe('PLANNING');
   expect(test.sendMessage.mock.calls[0][0].content).toContain('# PLANNING');
-  for (const name of ['backlog.md', '판단대기.md', '작업일지.md']) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
+  for (const name of ['backlog.md', '판단대기.md', `작업일지/${todayKst()}.md`]) expect(await readFile(join(test.root, 'docs', name), 'utf8')).not.toBe('');
 });
 it.each(['IDLE', 'PROJECT_READY', 'DONE_ALL'])('develop-start는 %s에서 기존 백로그 PICK을 실행한다', async state => {
   const test = await setup(); const task = await addTask(test.root, { title: '우선 작업', category: 'docs' });

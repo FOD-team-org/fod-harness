@@ -14,7 +14,7 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
   current: { taskId?: string; resumeState?: string } = state.resumeTask ?? state): PickDecision {
   const now = resources.now ?? Date.parse(state.savedAt ?? state.enteredAt ?? '1970-01-01T00:00:00Z');
   const paused = /^paused\(([^)]+)\)$/u.exec(state.state)?.[1] ?? state.lastPaused;
-  if (['memory', 'budget', 'slot'].includes(paused ?? '') || resources.slots === false || resources.slots === 'unavailable') {
+  if ((['memory', 'budget'].includes(paused ?? '') || paused === 'slot' && (state.state !== 'PICK' || !!state.awaitingSlot)) || resources.slots === false || resources.slots === 'unavailable') {
     return { outcome: 'WAIT_RESOURCE', reason: '슬롯·메모리·예산 회복 확인이 필요합니다' };
   }
   if (['billing', 'cleanup'].includes(paused ?? '')) {
@@ -28,7 +28,7 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
       count: retry.count + 1, nextAt: new Date(now + [5, 15, 60][retry.count] * 60000).toISOString(),
     } };
   }
-  if (state.phase === 'project' && !current.taskId && ['RESEARCH', 'REVIEW'].includes(current.resumeState ?? '')) {
+  if (state.lastPaused === 'slot' && state.phase === 'project' && !current.taskId && ['RESEARCH', 'REVIEW'].includes(current.resumeState ?? '')) {
     return { outcome: 'RESUME', next: current.resumeState, reason: '슬롯 대기로 중단된 프로젝트 단계로 복귀' };
   }
   const pending = backlog.filter(task => task.status !== 'done');
@@ -91,6 +91,7 @@ export async function runPick(root: string, resources: PickResources = { slots: 
     }
     if (decision.outcome === 'RESUME') {
       await transitionState(root, decision.next!, { taskId: decision.task?.id, resume: true });
+      await updateState(root, { lastPaused: undefined });
     } else if (decision.outcome === 'SPEC') {
       await transitionState(root, 'SPEC', { taskId: decision.task!.id });
       await updateState(root, { retry: undefined, lastPaused: undefined, resumeTask: undefined });

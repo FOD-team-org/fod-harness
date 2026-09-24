@@ -17,7 +17,7 @@ async function taskProject(state = 'VERIFY') {
 it.each(['missing', 'fail', 'other', 'old'])('F12 %s 검증 증거는 REVIEW를 거부한다', async kind => {
   const { root, task } = await taskProject();
   if (kind !== 'missing') await updateState(root, { verify: { runId: 'fixture', taskId: kind === 'other' ? 'T99' : task.id,
-    ok: kind !== 'fail', at: kind === 'old' ? '2000-01-01T00:00:00Z' : new Date().toISOString(), heavy: false } });
+    ok: kind !== 'fail', at: kind === 'old' ? '2000-01-01T00:00:00Z' : new Date().toISOString(), heavy: false, cwd: root } });
   await expect(transitionState(root, 'REVIEW', task.id)).rejects.toThrow('검증 증거가 없습니다');
   expect((await getTask(root, task.id)).verify?.ok).not.toBe(true);
 });
@@ -25,7 +25,7 @@ it('F12 실행 결과 파일·마지막 상태·자동 DoD와 FIX 재진입 무�
   const { root, task } = await taskProject();
   await setConfig(root, 'verify.commands', JSON.stringify([`${process.execPath} -e "process.exit(0)"`]));
   const report = await runVerify(root);
-  expect(report).toMatchObject({ ok: true, taskId: task.id, heavy: false });
+  expect(report).toMatchObject({ ok: true, taskId: task.id, heavy: false, cwd: root });
   if (!('runId' in report)) throw new Error('결과 없음');
   expect(JSON.parse(await readFile(join(root, '.pi/verify', report.runId, 'result.json'), 'utf8'))).toEqual(report);
   await transitionState(root, 'REVIEW', task.id);
@@ -42,7 +42,7 @@ it('F12 실행 결과 파일·마지막 상태·자동 DoD와 FIX 재진입 무�
 it('F12 paused→PICK→VERIFY 복귀는 검증 시계를 보존한다', async () => {
   const { root, task } = await taskProject();
   const since = (await readState(root)).verifySince;
-  await updateState(root, { verify: { runId: 'ok', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false } });
+  await updateState(root, { verify: { runId: 'ok', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false, cwd: root } });
   await updateState(root, { state: 'paused(error)' });
   await transitionState(root, 'PICK');
   await transitionState(root, 'VERIFY', { taskId: task.id, resume: true });
@@ -83,8 +83,49 @@ it('F15 cleanup 성공은 현재 task에만 자동 기록하고 dry-run·진입 
   await runCleanup(root, { scope: 'processes', taskId: other.id });
   expect((await getTask(root, task.id)).cleanup?.ok).not.toBe(true);
   expect((await getTask(root, other.id)).cleanup?.ok).not.toBe(true);
-  const report = await runCleanup(root, { scope: 'processes', taskId: task.id });
+  await runCleanup(root, { scope: 'storage', taskId: task.id });
+  expect((await getTask(root, task.id)).cleanup?.ok).not.toBe(true);
+  const report = await runCleanup(root, { scope: 'all', taskId: task.id });
   expect(report).toMatchObject({ ok: true, taskId: task.id });
   expect(JSON.parse(await readFile(join(root, '.pi/cleanup-last.json'), 'utf8'))).toEqual(report);
   expect((await getTask(root, task.id)).cleanup?.ok).toBe(true);
+});
+it.each([0, 1, 2])('M1 설정 경로 scaffold 및 KST %i일 전 작업일지 게이트', async days => {
+  const { scaffoldDoc } = await import('../src/core/docs.ts');
+  const { root, task } = await taskProject('DOCS');
+  await setConfig(root, 'docs.root', '문서');
+  const date = todayKst(new Date(Date.now() - days * 86400000));
+  const doc = await scaffoldDoc(root, 'worklog', { date });
+  expect(doc.path).toBe(`문서/작업일지/${date}.md`);
+  await writeFile(join(root, doc.path), task.id);
+  expect(await scaffoldDoc(root, 'worklog', { date })).toEqual({ path: doc.path, created: false });
+  expect(await readFile(join(root, doc.path), 'utf8')).toBe(task.id);
+  if (days < 2) await transitionState(root, 'CLEANUP', task.id);
+  else await expect(transitionState(root, 'CLEANUP', task.id)).rejects.toThrow('작업일지·백로그');
+});
+it('M2 확인 불가 잔존은 all 증거와 CLEANUP→PICK 모두 차단한다', async () => {
+  const { vi } = await import('vitest');
+  const identity = await import('../src/core/process-identity.ts');
+  const { registerProc } = await import('../src/core/procs.ts');
+  const { setTask } = await import('../src/core/backlog.ts');
+  const { root, task } = await taskProject('CLEANUP');
+  vi.spyOn(identity, 'processIdentity').mockResolvedValue('unknown');
+  await registerProc(root, { pid: 99999999, pgid: 99999999, kind: 'verify', runId: 'residual', taskId: task.id, startedAt: 'spawn:unknown' });
+  const report = await runCleanup(root, { scope: 'all', taskId: task.id });
+  expect(report.ok).toBe(false);
+  expect(report.processes?.unverified).toHaveLength(1);
+  expect((await getTask(root, task.id)).cleanup?.ok).not.toBe(true);
+  // A stale successful DoD must not bypass a later residual report.
+  await setTask(root, task.id, { verify: { ok: true }, review: { commit: 'none', high: 0 }, merge: { commit: 'none' }, docs: { ok: true }, cleanup: { ok: true } });
+  await setTask(root, task.id, { status: 'done' });
+  await expect(transitionState(root, 'PICK')).rejects.toThrow('정리 잔존');
+});
+it('L1 T1 작업일지 게이트는 T10을 같은 task로 보지 않는다', async () => {
+  const { scaffoldDoc } = await import('../src/core/docs.ts');
+  const { root, task } = await taskProject('DOCS');
+  const doc = await scaffoldDoc(root, 'worklog');
+  await writeFile(join(root, doc.path), `${task.id}0`);
+  await expect(transitionState(root, 'CLEANUP', task.id)).rejects.toThrow('작업일지·백로그');
+  await writeFile(join(root, doc.path), `완료: [${task.id}]`);
+  await transitionState(root, 'CLEANUP', task.id);
 });

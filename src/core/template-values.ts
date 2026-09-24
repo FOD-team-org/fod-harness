@@ -1,8 +1,8 @@
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
-export function todayKst(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+export function todayKst(date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
 export function substitute(template: string, values: Record<string, string>, requireValue = true): string {
   return template.replace(/\{\{([^{}]+)\}\}/gu, (_match, key: string) => {

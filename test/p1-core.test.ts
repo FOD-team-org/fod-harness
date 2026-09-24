@@ -48,7 +48,7 @@ it.each(Object.entries(graph).flatMap(([from, next]) => next.map(to => [from, to
   if (from === 'REVIEW' && ['PROJECT_READY', 'MERGE'].includes(to)) await atomicWrite(harnessPath(root, 'codex/review-fixture/meta.json'),
     JSON.stringify({ kind: 'review', status: 'ok', taskId: to === 'MERGE' ? t.id : undefined, startedAt: (await readState(root)).reviewSince }));
   if (from === 'VERIFY' && to === 'REVIEW') await updateState(root, { verify: {
-    runId: 'verify-fixture', taskId: t.id, ok: true, at: new Date().toISOString(), heavy: false,
+    runId: 'verify-fixture', taskId: t.id, ok: true, at: new Date().toISOString(), heavy: false, cwd: root,
   } });
   if (from === 'DOCS' && to === 'CLEANUP') await atomicWrite(join(root, `docs/작업일지/${todayKst()}.md`), t.id);
   const result = await transitionState(root, to, { taskId: t.id, commit: 'sha1', system: from === 'WAIT_JUDGMENT' });

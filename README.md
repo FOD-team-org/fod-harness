@@ -152,13 +152,13 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 | 전이·명령 | 하네스가 확인·기록하는 증거 |
 |---|---|
-| VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
-| DOCS → CLEANUP | `docs/작업일지/`의 오늘(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
-| `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 실제 정리 성공 보고서. task.cleanup.ok 자동 기록(dry-run 제외) |
-| CLEANUP → PICK | `backlog set T --status done`의 DoD 충족 및 현재 task 완료 |
+| VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
+| DOCS → CLEANUP | `${docs.root}/작업일지/YYYY-MM-DD.md`의 오늘 또는 어제(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
+| `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 scope all 성공 보고서(processes·storage·worktrees 성공, 잔존 0). task.cleanup.ok 자동 기록(dry-run 제외) |
+| CLEANUP → PICK | `backlog set T --status done`의 DoD 충족 및 현재 task 완료, 마지막 정리 보고서와 프로세스 레지스트리 잔존 없음 |
 
 `--verify-ok`, `--docs-ok`, `--cleanup-ok` 자기 보고 옵션은 지원하지 않는다. 실패한 검사는 두뇌가 면제할 수 없으며 `fodh judgment add`로 사용자 판단을 받는다.
 
-검수 커밋은 task의 등록 워크트리(없으면 루트)에 실제로 존재하고 미커밋 변경이 없어야 한다. 병합 커밋은 루트에 존재하며 검수 커밋을 조상으로 포함해야 한다. 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 워크트리에서 변경·새 파일과 staged diff의 비밀 패턴을 검사하고 add·commit 및 원장 기록을 수행한다.
+검수 커밋은 등록 브랜치의 워크트리 HEAD이며 생성 base 이후 커밋이 1개 이상이고 미커밋 변경이 없어야 한다. 병합 커밋은 검수 커밋을 포함하고 루트 HEAD의 조상이어야 한다. 검수 커밋 자체를 쓰는 경우에는 루트 HEAD도 같아야 한다(fast-forward). 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 브랜치에서 diff 추가 줄과 1 MB 이하 텍스트 새 파일의 비밀 패턴을 검사한다. 큰 파일·바이너리는 이름만 원장에 남기고, `.pi/`를 add에서 제외하며 변경이 없으면 안내 결과를 반환한다.
 
 Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 소유자의 생존을 확인한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.

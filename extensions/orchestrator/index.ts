@@ -284,7 +284,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         const waiting = state.awaitingSlot;
         const matching = waiting && batch.some(record => record.since === waiting.since && record.ownerRunId === waiting.owner.runId);
         if (matching && (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot')) {
-          await updateState(root, { awaitingSlot: undefined, lastPaused: undefined, autoTurns: 0 });
+          await updateState(root, { awaitingSlot: undefined, autoTurns: 0 });
           await transitionState(root, 'PICK');
           resumed = (await autoResume(pi, root, context, kind)).resumed === true;
         }

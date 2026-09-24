@@ -1,73 +1,108 @@
-import { expect, it, vi } from 'vitest';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { expect, it } from 'vitest';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-const execute = vi.hoisted(() => vi.fn());
-vi.mock('node:child_process', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:child_process')>();
-  return { ...actual, execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: execute }) };
-});
+import { gitProject, git } from './p7-git-helpers.ts';
 import { project, cli } from './p5-helpers.ts';
 import { addTask, setTask } from '../src/core/backlog.ts';
-import { updateState } from '../src/core/state.ts';
+import { readState, updateState } from '../src/core/state.ts';
 import { commitWorktree, validateTaskCommit } from '../src/core/worktree.ts';
 import { readLedger } from '../src/core/ledger.ts';
 
-async function setup(git = true) {
-  execute.mockReset().mockResolvedValue({ stdout: '' });
-  const root = await project('VERIFY'), path = await project('IDLE');
-  if (git) await mkdir(join(root, '.git'));
-  const task = await addTask(root, { title: '커밋', category: 'docs' });
-  await setTask(root, task.id, { worktree: path, review: { commit: 'aaaa1111' } });
-  await updateState(root, { taskId: task.id, worktrees: [{ taskId: task.id, path, branch: 'fixture', createdAt: 'now' }] });
-  return { root, path, task };
+async function implement(root: string, path: string, taskId: string) {
+  await writeFile(join(path, 'code.txt'), 'implemented\n');
+  const result = await commitWorktree(root, taskId, 'implementation');
+  if (!('commit' in result)) throw new Error('commit missing');
+  return result.commit;
 }
-it('F14 없는 SHA·dirty 거부, 커밋 후 clean 검수 허용: 등록 워크트리만 검사', async () => {
-  const { root, path, task } = await setup();
-  execute.mockRejectedValueOnce(new Error('missing'));
-  await expect(validateTaskCommit(root, task.id, 'deadbeef', 'review')).rejects.toThrow('검수 대상 커밋이 없거나 미커밋 변경이 있습니다');
-  execute.mockResolvedValueOnce({ stdout: '' }).mockResolvedValueOnce({ stdout: '?? change.ts' });
-  expect(await cli(root, ['backlog', 'set', task.id, '--review-commit', 'aaaa1111'])).toMatchObject({ code: 1 });
-  expect(await cli(root, ['backlog', 'set', task.id, '--review-commit', 'bbbb2222'])).toMatchObject({ code: 0 });
-  expect(execute).toHaveBeenCalledWith('git', ['-C', path, 'cat-file', '-e', 'bbbb2222^{commit}'], expect.anything());
-  expect(execute).toHaveBeenCalledWith('git', ['-C', path, 'status', '--porcelain'], expect.anything());
+it('H1 실제 git: base·없는 SHA·dirty·과거 SHA 거부, 새 HEAD만 검수 허용', async () => {
+  const { root, path, task, base, worktree } = await gitProject();
+  expect((await readState(root)).worktrees?.[0]).toMatchObject({ base, branch: worktree.branch });
+  for (const sha of [base, 'deadbeef']) await expect(validateTaskCommit(root, task.id, sha, 'review')).rejects.toThrow('검수 대상');
+  const commit = await implement(root, path, task.id);
+  await expect(validateTaskCommit(root, task.id, base, 'review')).rejects.toThrow('검수 대상');
+  await writeFile(join(path, 'dirty.txt'), 'dirty');
+  expect((await cli(root, ['backlog', 'set', task.id, '--review-commit', commit])).code).toBe(1);
+  await git(path, 'add', '.'); await git(path, 'commit', '-m', 'followup');
+  const head = await git(path, 'rev-parse', 'HEAD');
+  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('검수 대상');
+  expect((await cli(root, ['backlog', 'set', task.id, '--review-commit', head])).code).toBe(0);
 });
-it('F14 merge는 루트에서 존재·review 조상을 검사한다', async () => {
-  const { root, task } = await setup();
-  execute.mockResolvedValueOnce({ stdout: '' }).mockRejectedValueOnce(new Error('not ancestor'));
-  expect(await cli(root, ['backlog', 'set', task.id, '--merge-commit', 'bbbb2222'])).toMatchObject({ code: 1 });
-  expect(await cli(root, ['backlog', 'set', task.id, '--merge-commit', 'cccc3333'])).toMatchObject({ code: 0 });
-  expect(execute).toHaveBeenCalledWith('git', ['-C', root, 'merge-base', '--is-ancestor', 'aaaa1111', 'cccc3333'], expect.anything());
+it.each(['merge', 'ff'])('H1 실제 %s 병합 전 review 자체는 거부하고 병합 뒤 루트 HEAD만 인정한다', async mode => {
+  const { root, path, task } = await gitProject();
+  const review = await implement(root, path, task.id);
+  await setTask(root, task.id, { review: { commit: review } });
+  await expect(validateTaskCommit(root, task.id, review, 'merge')).rejects.toThrow('병합 커밋');
+  await git(root, 'merge', mode === 'ff' ? '--ff-only' : '--no-ff', review, '-m', 'merge implementation');
+  const merged = await git(root, 'rev-parse', 'HEAD');
+  expect((await cli(root, ['backlog', 'set', task.id, '--merge-commit', merged])).code).toBe(0);
+  if (mode === 'merge') await expect(validateTaskCommit(root, task.id, review, 'merge')).rejects.toThrow('병합 커밋');
 });
-it('F14 비-git은 none만 허용하며 git을 실행하지 않는다', async () => {
-  const { root, task } = await setup(false);
+it('H1 기존 등록의 base 누락은 루트 브랜치와 merge-base로 보완한다', async () => {
+  const { root, path, task, base } = await gitProject();
+  const commit = await implement(root, path, task.id);
+  await updateState(root, state => ({ worktrees: state.worktrees?.map(item => ({ ...item, base: undefined })) }));
+  await validateTaskCommit(root, task.id, commit, 'review');
+  expect((await readState(root)).worktrees?.[0].base).toBe(base);
+});
+it('H1 다른 브랜치·detached HEAD 검수는 거부한다', async () => {
+  const { root, path, task } = await gitProject(); const commit = await implement(root, path, task.id);
+  await git(path, 'checkout', '-b', 'other');
+  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('검수 대상');
+  await git(path, 'checkout', '--detach');
+  await expect(validateTaskCommit(root, task.id, commit, 'review')).rejects.toThrow('검수 대상');
+});
+it('F14 비-git은 none만 허용한다', async () => {
+  const root = await project(), task = await addTask(root, { title: 'plain', category: 'docs' });
   for (const kind of ['review', 'merge'] as const) {
     await expect(validateTaskCommit(root, task.id, 'aaaa1111', kind)).rejects.toThrow('none');
     await validateTaskCommit(root, task.id, 'none', kind);
   }
-  expect(execute).not.toHaveBeenCalled();
 });
-it('F14 worktree commit은 등록 경로 add→commit과 원장 증거를 남긴다', async () => {
-  const { root, path, task } = await setup();
-  execute.mockImplementation(async (_file, args: string[]) => ({ stdout: args.includes('rev-parse') ? 'bbbb2222\n' : '' }));
-  vi.stubEnv('FODH_BRAIN', '1');
-  expect(await cli(root, ['worktree', 'commit', task.id, '-m', '구현'])).toMatchObject({ code: 0, value: { commit: 'bbbb2222', worktree: path } });
-  const calls = execute.mock.calls.map(call => call[1]);
-  expect(calls).toContainEqual(['-C', path, 'add', '-A']);
-  expect(calls.indexOf(calls.find(args => args.includes('add')))).toBeLessThan(calls.indexOf(calls.find(args => args.includes('commit'))));
-  expect((await readLedger(root)).filter(e => e.action === 'worktree:commit').map(e => e.status)).toEqual(['pre', 'ok']);
-  await updateState(root, { worktrees: [] });
-  await expect(commitWorktree(root, task.id, 'invalid')).rejects.toThrow('등록된');
-});
-it.each(['tracked', 'untracked', 'staged'])('F14 %s 비밀 패턴은 커밋하지 않고 원장도 마스킹한다', async kind => {
-  const { root, path, task } = await setup();
+it.each(['tracked', 'untracked', 'staged'])('F14 실제 git %s 비밀 추가는 커밋을 거부한다', async kind => {
+  const { root, path, task, base } = await gitProject();
   const secret = 'sk-ant-FAKE_TEST_CREDENTIAL';
-  await writeFile(join(path, 'new.txt'), secret);
-  execute.mockImplementation(async (_file, args: string[]) => ({ stdout:
-    kind === 'untracked' && args.includes('ls-files') ? 'new.txt\0'
-      : args.includes('diff') && (kind === 'tracked' || kind === 'staged' && args.includes('--cached')) ? `+${secret}` : '' }));
+  await writeFile(join(path, kind === 'untracked' ? 'new.txt' : 'code.txt'), kind === 'staged' ? `++${secret}` : secret);
+  if (kind === 'staged') await git(path, 'add', '.');
   await expect(commitWorktree(root, task.id, 'unsafe')).rejects.toThrow('비밀값');
-  expect(execute.mock.calls.some(call => call[1].includes('commit'))).toBe(false);
+  expect(await git(path, 'rev-parse', 'HEAD')).toBe(base);
   const ledger = await readLedger(root);
   expect(JSON.stringify(ledger)).not.toContain(secret);
   expect(ledger.findLast(e => e.action === 'worktree:commit')?.status).toBe('fail');
+});
+it('L4 등록 브랜치가 아니면 커밋 전에 거부한다', async () => {
+  const { root, path, task, base } = await gitProject();
+  await git(path, 'checkout', '-b', 'wrong');
+  await writeFile(join(path, 'code.txt'), 'change');
+  await expect(commitWorktree(root, task.id, 'wrong branch')).rejects.toThrow('등록된 task 브랜치');
+  expect(await git(path, 'rev-parse', 'HEAD')).toBe(base);
+  expect(await git(path, 'diff', '--cached', '--name-only')).toBe('');
+});
+it('L4 큰 untracked·바이너리는 내용 대신 이름만 원장에 남긴다', async () => {
+  const { root, path, task } = await gitProject();
+  const secret = 'sk-ant-FAKE_TEST_CREDENTIAL';
+  await writeFile(join(path, 'large.txt'), secret + 'x'.repeat(1024 * 1024));
+  await writeFile(join(path, 'binary.dat'), Buffer.from(`\0${secret}`));
+  expect(await commitWorktree(root, task.id, 'assets')).toHaveProperty('commit');
+  const ledger = await readLedger(root);
+  expect(ledger.find(e => e.action === 'worktree:commit:unscanned')?.evidence).toEqual({ files: ['binary.dat', 'large.txt'] });
+  expect(JSON.stringify(ledger)).not.toContain(secret);
+});
+it('L4 기존 비밀 문맥·삭제 줄은 새 추가 검사에 포함하지 않는다', async () => {
+  const { root, path, task } = await gitProject();
+  await writeFile(join(path, 'code.txt'), 'sk-ant-FAKE_OLD_CREDENTIAL\nold\nsk-ant-FAKE_REMOVED_CREDENTIAL\n');
+  await git(path, 'add', '.'); await git(path, 'commit', '-m', 'legacy fixture');
+  await writeFile(join(path, 'code.txt'), 'sk-ant-FAKE_OLD_CREDENTIAL\nnew\n');
+  expect(await commitWorktree(root, task.id, 'safe edit')).toHaveProperty('commit');
+});
+it('L4 .pi는 add에서 제외하고 변경 없으면 구조화된 결과를 반환한다', async () => {
+  const { mkdir } = await import('node:fs/promises');
+  const { root, path, task, base } = await gitProject();
+  expect(await commitWorktree(root, task.id, 'empty')).toEqual({ ok: false, error: '커밋할 변경이 없습니다' });
+  expect(await git(path, 'rev-parse', 'HEAD')).toBe(base);
+  await writeFile(join(path, '.gitignore'), 'docs/\n');
+  await mkdir(join(path, '.pi'));
+  await writeFile(join(path, '.pi/private.txt'), 'sk-ant-FAKE_TEST_CREDENTIAL');
+  expect(await commitWorktree(root, task.id, 'exclude harness')).toHaveProperty('commit');
+  expect(await git(path, 'ls-tree', '-r', '--name-only', 'HEAD')).not.toContain('.pi/');
+  expect(await commitWorktree(root, task.id, 'only pi')).toEqual({ ok: false, error: '커밋할 변경이 없습니다' });
 });

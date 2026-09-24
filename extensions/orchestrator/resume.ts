@@ -1,3 +1,4 @@
+import { slotOwnerAlive } from '../../src/core/slots.ts';
 import { redact } from '../../src/provider/privacy.ts';
 import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
 import { substitute, todayKst } from '../../src/core/template-values.ts';
@@ -9,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { harnessPath, withFileLock } from '../../src/core/storage.ts';
 import { getConfig, loadConfig } from '../../src/core/config.ts';
-import { activeStates as active, readState, updateState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
+import { activeStates as active, readState, updateState, transitionState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
 
 const templates = fileURLToPath(new URL('../../templates/', import.meta.url));
 export async function instruction(root: string, state: HarnessState, promptState = state.state): Promise<string> {
@@ -56,7 +57,14 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     let state = await readState(root);
     if (state.userAborted) return { skipped: 'user-aborted' };
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
-    if (state.awaitingSlot) return { skipped: 'slot' };
+    if (state.awaitingSlot) {
+      if (await slotOwnerAlive(state.awaitingSlot.owner)) return { skipped: 'slot' };
+      const waiting = state.awaitingSlot;
+      state = await updateState(root, current => current.awaitingSlot?.since === waiting.since
+        && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});
+      if (state.awaitingSlot) return { skipped: 'slot' };
+      if (state.state === 'paused(slot)') state = await transitionState(root, 'PICK');
+    }
     if (state.awaitingDelegation) return { skipped: 'delegation' };
     if (!active.has(state.state)) {
       if (state.state.startsWith('WAIT_') || state.state.startsWith('paused(') || state.state === 'DONE_ALL' || state.state === 'CLEANUP_FAILED') await notify(root, { key: `state:${state.state}`, title: '하네스 상태', body: `하네스 상태: ${state.state}`, level: state.state.startsWith('paused(') ? 'warning' : 'info' }, ctxLike);

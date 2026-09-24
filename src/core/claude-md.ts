@@ -38,7 +38,7 @@ export async function generateClaudeMd(root: string, options: { check?: boolean 
     const digest = claudeMdHash(config);
     const verification = `## 검증\n일반 명령: ${JSON.stringify(config.verify.commands.map(redact))}\nheavy 명령: ${JSON.stringify(config.verify.heavy.map(redact))} — VERIFY의 \`fodh verify run --heavy\` 로만 실행.\n`;
     const restrictions = `## 금지·승인 필수\n설정 requiresApproval: ${config.requiresApproval.join(', ')}\n${approvals.map((v, i) => `${i + 1}. ${v}`).join('\n')}\n전체 테스트는 VERIFY만. codex·git worktree 직접 실행 금지. 비밀값 출력·기록 금지.\n`;
-    const docs = `## 문서 위치\n| 폴더 | 내용 |\n|---|---|\n${['설계', '위임스펙', '검수', '조사', '결정기록'].map(v => `| ${config.docs.root}/${v}/ | ${v} 문서 |`).join('\n')}\nPRD: ${config.docs.root}/PRD.md, 작업일지: ${config.docs.root}/작업일지.md\n백로그: docs/backlog.md (고정), 판단대기: ${config.judgment.file}\n`;
+    const docs = `## 문서 위치\n| 폴더 | 내용 |\n|---|---|\n${['설계', '위임스펙', '검수', '조사', '결정기록'].map(v => `| ${config.docs.root}/${v}/ | ${v} 문서 |`).join('\n')}\nPRD: ${config.docs.root}/PRD.md, 작업일지: ${config.docs.root}/작업일지/YYYY-MM-DD.md\n백로그: docs/backlog.md (고정), 판단대기: ${config.judgment.file}\n`;
     const sections = [
       '하네스 두뇌 세션 전용. 위임 수행자(Codex·Claude Agent)는 위임 프롬프트를 따르고 이 흐름표의 fodh 명령을 치지 않는다.',
       `- doctor 표식: ${claudeMdMarker(config)}`,

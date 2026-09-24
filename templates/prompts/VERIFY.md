@@ -1,6 +1,6 @@
 # VERIFY
 ## 지금 할 일
-1. 프로젝트 루트를 유지하고 `fodh verify run`으로 verify.commands를 실행한다. cwd는 현재 task 워크트리(없으면 루트), 필요하면 --cwd를 쓴다.
+1. 프로젝트 루트를 유지하고 `fodh verify run`으로 verify.commands를 실행한다. cwd는 현재 task 워크트리(없으면 루트), 증거의 realpath가 해당 경로와 정확히 일치해야 REVIEW로 전이한다.
 2. 전체 테스트·전체 빌드는 verify.heavy에 설정하고 `fodh verify run --heavy`로만 실행한다. Codex 슬롯과 머신 전체 배타다.
 3. 설정이 비면 `fodh judgment add --title "<검증 판단>" --background "<설정 또는 실패 증거>" --options "설정·범위 결정|보류" --recommend "<추천>" --blocks {{taskId}}`로 사용자에게 verify.commands 설정을 요청하고 기다린다.
 4. interrupted가 있으면 코드 결함으로 보지 말고 검증을 다시 실행한다.

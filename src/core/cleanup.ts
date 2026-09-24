@@ -199,7 +199,9 @@ export async function runCleanup(root: string, options: CleanupOptions) {
     report.finishedAt = new Date().toISOString();
     await atomicWrite(harnessPath(root, 'cleanup-last.json'), JSON.stringify(report, null, 2) + '\n');
     const state = await readState(root);
-    if (report.ok && !report.dryRun && report.taskId && state.state === 'CLEANUP' && state.taskId === report.taskId
+    if (report.scope === 'all' && report.ok && report.processes?.ok && report.storage?.ok && report.worktrees?.ok
+      && !report.processes.residual.length && !report.processes.unverified.length && !report.worktrees.kept.length
+      && !report.dryRun && report.taskId && state.state === 'CLEANUP' && state.taskId === report.taskId
       && Date.parse(report.startedAt) >= Date.parse(state.enteredAt ?? '')) {
       await setTask(root, report.taskId, { cleanup: { ok: true } });
     }

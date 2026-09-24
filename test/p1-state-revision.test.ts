@@ -63,7 +63,7 @@ it('M2: 각 task 전이는 백로그 상태도 기록하고 M3는 완료 전 PIC
   const { root, task } = await setup();
   for (const [to, status] of [['VERIFY', 'verify'], ['REVIEW', 'review'], ['FIX', 'fix'], ['VERIFY', 'verify'], ['REVIEW', 'review'], ['MERGE', 'merge'], ['DOCS', 'merge'], ['CLEANUP', 'merge']]) {
     if (to === 'REVIEW') await updateState(root, { verify: {
-      runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false,
+      runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false, cwd: root,
     } });
     if (to === 'CLEANUP') await storage.atomicWrite(join(root, `docs/작업일지/${todayKst()}.md`), task.id);
     if (to === 'MERGE') await storage.atomicWrite(storage.harnessPath(root, 'codex/review-fixture/meta.json'),

@@ -8,17 +8,19 @@ import { appendLedger } from './ledger.ts';
 export interface SlotOwner { kind?: 'codex' | 'heavy'; root: string; runId: string; taskId?: string; pid: number; startedAt: string; acquiredAt: string; childPid?: number; childStartedAt?: string }
 export interface Slots { codex: SlotOwner | null; heavy?: SlotOwner | null; claude: null }
 export const slotsPath = () => join(process.env.FODH_SLOTS_DIR ?? join(homedir(), '.pi/agent/fod-harness'), 'slots.json');
-export async function slotOwnerAlive(owner: CodexOwner & { root?: string; runId?: string; kind?: string }): Promise<boolean> {
+export async function slotOwnerIdentity(owner: CodexOwner & { root?: string; runId?: string; kind?: string }) {
   if (owner.kind === 'heavy') {
-    const leader = await processIdentity(owner.pid, owner.startedAt);
-    return leader === 'owned' || leader === 'unknown';
+    return processIdentity(owner.pid, owner.startedAt);
   }
   let identity = owner;
   if (!owner.childPid && owner.root && owner.runId && /^[A-Za-z0-9_-]+$/u.test(owner.runId)) {
     const meta = await readJson<Partial<CodexOwner> | undefined>(join(owner.root, '.pi/codex', owner.runId, 'meta.json'), undefined);
     if (meta) identity = { ...owner, childPid: meta.childPid, childStartedAt: meta.childStartedAt };
   }
-  return ['owned', 'unknown', 'orphan'].includes(await codexOwnership(identity));
+  return codexOwnership(identity);
+}
+export async function slotOwnerAlive(owner: CodexOwner & { root?: string; runId?: string; kind?: string }): Promise<boolean> {
+  return ['owned', 'unknown', 'orphan'].includes(await slotOwnerIdentity(owner));
 }
 export async function acquireSlot(kind: 'codex' | 'heavy', owner: SlotOwner): Promise<{ acquired: true } | { acquired: false; owner: SlotOwner }> {
   const path = slotsPath();

@@ -94,7 +94,7 @@ it('L3 업그레이드 전 REVIEW는 enteredAt 이후 증거로 복귀하며 두
 it('N3 task paused→PICK→resume REVIEW는 시각을 보존하고 VERIFY 새 진입은 갱신한다', async () => {
   const root = await project('PICK'), task = await addTask(root, { title: '복귀', category: 'docs' });
   await updateState(root, { state: 'VERIFY', taskId: task.id, phase: 'task', doctor: { ok: true, checkedAt: new Date().toISOString() } });
-  await updateState(root, { verify: { runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false } });
+  await updateState(root, { verify: { runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false, cwd: root } });
   await transitionState(root, 'REVIEW', task.id);
   await updateState(root, { reviewSince: '2026-09-24T00:00:00Z' });
   await evidence(root, 'review', task.id, { startedAt: '2026-09-24T00:00:01Z' });
@@ -105,7 +105,7 @@ it('N3 task paused→PICK→resume REVIEW는 시각을 보존하고 VERIFY 새 �
   expect((await readState(root)).reviewSince).toBe('2026-09-24T00:00:00Z');
   await transitionState(root, 'MERGE', task.id);
   await updateState(root, { state: 'VERIFY' });
-  await updateState(root, { verify: { runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false } });
+  await updateState(root, { verify: { runId: 'verify-fixture', taskId: task.id, ok: true, at: new Date().toISOString(), heavy: false, cwd: root } });
   await transitionState(root, 'REVIEW', task.id);
   expect((await readState(root)).reviewSince).not.toBe('2026-09-24T00:00:00Z');
   await expect(transitionState(root, 'MERGE', task.id)).rejects.toThrow('교차검수 증거');

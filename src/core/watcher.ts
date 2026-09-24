@@ -1,3 +1,4 @@
+import { notify } from './notify.ts';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sampleMemory, judgeMemory, type MemorySample, type MemoryWatch } from './memory.ts';
@@ -13,13 +14,13 @@ import { loadConfig } from './config.ts';
 import { addInboxOnce, queueInbox, listInbox, type InboxRecord } from './inbox.ts';
 import { isProcessAlive } from './lock.ts';
 import { listProcs } from './procs.ts';
-import { activeStates, isPaused, readState } from './state.ts';
+import { activeStates, isPaused, readState, updateState } from './state.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 
-import { slotOwnerAlive } from './slots.ts';
+import { slotOwnerIdentity } from './slots.ts';
 
 export interface WatchState {
-  slotCheck?: { since: string; at: string };
+  slotCheck?: { since: string; at: string; ownerRunId?: string; unknownCount?: number; unknownNotified?: boolean };
   memory?: MemoryWatch; memorySampleFailed?: boolean;
   lastTickAt?: string;
   judgment: { path?: string; observed: { hash: string | null; since: string }; lastEmitted?: string | null };
@@ -124,12 +125,25 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
     if (!options.judgmentOnly) {
       const state = await readState(root);
       const waiting = state.awaitingSlot;
-      if (waiting && (state.state === 'paused(slot)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'slot')
-        && (watch.slotCheck?.since !== waiting.since || now - Date.parse(watch.slotCheck.at) >= 60000)) {
-        watch.slotCheck = { since: waiting.since, at };
-        if (!await slotOwnerAlive(waiting.owner)) await emit({ kind: 'slot-free',
+      if (waiting && state.state !== 'paused(slot)') {
+        await updateState(root, current => current.state !== 'paused(slot)' && current.awaitingSlot?.since === waiting.since
+          && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});
+        delete watch.slotCheck;
+      } else if (waiting && (watch.slotCheck?.since !== waiting.since || watch.slotCheck.ownerRunId !== waiting.owner.runId
+        || now - Date.parse(watch.slotCheck.at) >= 60000)) {
+        const previous = watch.slotCheck?.since === waiting.since && watch.slotCheck.ownerRunId === waiting.owner.runId ? watch.slotCheck : undefined;
+        const identity = await slotOwnerIdentity(waiting.owner);
+        watch.slotCheck = { since: waiting.since, at, ownerRunId: waiting.owner.runId,
+          unknownCount: identity === 'unknown' ? (previous?.unknownCount ?? 0) + 1 : 0,
+          unknownNotified: previous?.unknownNotified };
+        if (watch.slotCheck.unknownCount! >= 10 && !watch.slotCheck.unknownNotified) {
+          await notify(root, { key: 'slot:unknown-owner', title: '슬롯 소유자 확인 불가', level: 'warning',
+            body: '슬롯 소유자를 10회 연속 확인하지 못했습니다. 대기를 유지합니다. fodh slots status 로 확인하세요.' }, undefined, { now, config });
+          watch.slotCheck.unknownNotified = true;
+        }
+        if (!['owned', 'unknown', 'orphan'].includes(identity)) await emit({ kind: 'slot-free',
           dedupeKey: `slot-free:${waiting.since}:${waiting.owner.runId}`, since: waiting.since, ownerRunId: waiting.owner.runId }, true);
-      }
+      } else if (!waiting) delete watch.slotCheck;
       const procs = await listProcs(root);
       const aliveByPid = new Map<number, boolean>();
       for (const proc of procs) aliveByPid.set(proc.pid, await (options.isProcessAlive ?? isProcessAlive)(proc.pid));
