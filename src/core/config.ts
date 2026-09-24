@@ -15,7 +15,7 @@ export interface HarnessConfig {
   claudeMd: { targets: ('CLAUDE.md' | 'AGENTS.md')[] };
   brain: {
     command: string | string[]; switchCommand: string | string[]; model: string;
-    skipPermissions: boolean; maxTurnMinutes: number; doctorTtlHours: number; rotateAtTokens: number;
+    skipPermissions: boolean; allowPlugins: boolean; maxTurnMinutes: number; doctorTtlHours: number; rotateAtTokens: number;
   };
   delegate: {
     claude: { subagentModel: string; maxChildAgents: number };
@@ -67,6 +67,8 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
   };
   const model = defaultValue(brain.model, 'fable');
   const skipPermissions = defaultValue(brain.skipPermissions, true);
+  const allowPlugins = defaultValue(brain.allowPlugins, false);
+  if (typeof allowPlugins !== 'boolean') throw new Error('brain.allowPlugins는 불리언이어야 합니다');
   const maxTurnMinutes = defaultValue(brain.maxTurnMinutes, 45);
   if (typeof model !== 'string' || !['fable', 'opus', 'sonnet', 'haiku'].includes(model)) {
     throw new Error('brain.model은 fable, opus, sonnet, haiku 중 하나여야 합니다');
@@ -181,7 +183,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     brain: {
       command: command(brain.command, 'claude', 'brain.command'),
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
-      model, skipPermissions, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
+      model, skipPermissions, allowPlugins, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
     },
     cleanup: { rebuildablePaths: strings(cleanup.rebuildablePaths, [], 'cleanup.rebuildablePaths'), keepPaths: strings(cleanup.keepPaths, [], 'cleanup.keepPaths'),
       sharedCaches: { enabled, paths: strings(caches.paths, [], 'cleanup.sharedCaches.paths') }, codexRunsKeep: nonnegativeInteger(defaultValue(cleanup.codexRunsKeep, 20), 'cleanup.codexRunsKeep'),

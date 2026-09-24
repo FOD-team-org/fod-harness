@@ -1,6 +1,7 @@
-import { stat } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
+import { notify } from './notify.ts';
 import { assertNotBrain } from './brain-guard.ts';
-import { appendLedger, readLedger } from './ledger.ts';
+import { appendLedger } from './ledger.ts';
 import type { BrainTurn } from './state.ts';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -348,6 +349,8 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
   await assertNotBrain(root, '판단 적용');
   const applied: ApplyEntry[] = [];
   return retryJudgment(() => withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    // Recheck watcher reads under the apply lock against a turn that started meanwhile.
+    if (expectedAnswers && await hasActiveJudgmentSnapshot(root)) throw new JudgmentConflict();
     if (options.releaseHeld) await releaseHeldAnswers(root, ids);
     const unapplied: { id: string; reason: string }[] = [];
     const journalPath = harnessPath(root, 'harness-judgment-apply.json');
@@ -448,35 +451,57 @@ async function releaseHeldAnswers(root: string, ids?: string[]): Promise<void> {
     await atomicWrite(path, JSON.stringify(ids?.length ? records.filter(item => !ids.includes(item.id)) : []) + '\n');
   });
 }
-// Completed windows remain in the ledger so a later turn cannot erase attribution.
-export async function holdBrainTurnAnswers(root: string): Promise<string[]> {
-  const path = await location(root);
-  return withFileLock(harnessPath(root, 'harness-judgment-apply'), () => withFileLock(path, async () => {
-    const modified = await stat(path).then(value => value.mtimeMs).catch(error => {
-      if (error.code === 'ENOENT') return NaN;
-      throw error;
+interface JudgmentSnapshot { runId: string; startedAt: string; answers: Record<string, string> }
+const snapshotPath = (root: string) => harnessPath(root, 'harness-judgment-snapshot.json');
+const rawAnswer = (item: JudgmentItem) => item.raw.match(/^- 답:[^\r\n]*$/mu)?.[0] ?? '';
+
+export async function hasActiveJudgmentSnapshot(root: string): Promise<boolean> {
+  const turn = (await readState(root)).brainTurn;
+  const snapshot = await readJson<JudgmentSnapshot | null>(snapshotPath(root), null);
+  return !!turn && !turn.endedAt && snapshot?.runId === turn.runId;
+}
+export async function beginJudgmentSnapshot(root: string, turn: BrainTurn): Promise<void> {
+  await withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    const path = await location(root);
+    await withFileLock(path, async () => {
+      const answers = Object.fromEntries(parseJudgment(await readText(path)).items.map(item => [item.id, rawAnswer(item)]));
+      await atomicWrite(snapshotPath(root), JSON.stringify({ runId: turn.runId, startedAt: turn.startedAt, answers }) + '\n');
+      await updateState(root, { brainTurn: turn });
     });
-    const current = (await readState(root)).brainTurn;
-    const windows = (await readLedger(root)).filter(entry => entry.action === 'brain:window')
-      .map(entry => entry.evidence as BrainTurn);
-    if (current) windows.push(current);
-    const window = windows.findLast(turn => modified >= Date.parse(turn.startedAt)
-      && (!turn.endedAt || modified <= Date.parse(turn.endedAt) + 2000));
-    if (!window) return [];
-    const answered = parseJudgment(await readText(path)).items.filter(item => item.answer.trim() && !item.followup);
-    const heldPath = harnessPath(root, 'harness-judgment-held.json');
-    const added: string[] = [];
-    await withFileLock(heldPath, async () => {
-      let records = await readJson<HeldAnswer[]>(heldPath, []);
-      for (const item of answered) {
-        if (records.some(record => record.id === item.id && record.answer === item.answer)) continue;
-        records = records.filter(record => record.id !== item.id);
-        records.push({ id: item.id, answer: item.answer, held: { at: new Date().toISOString(), reason: 'brain-turn', runId: window.runId } });
-        added.push(item.id);
-      }
-      if (added.length) await atomicWrite(heldPath, JSON.stringify(records, null, 2) + '\n');
-    });
-    if (added.length) await appendLedger(root, { runId: window.runId, action: 'judgment:held', status: 'skip', evidence: { ids: added } });
-    return answered.map(item => item.id);
-  }));
+  });
+}
+export async function finishJudgmentSnapshot(root: string, endedAt = new Date().toISOString()): Promise<void> {
+  const added = await withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    const snapshot = await readJson<JudgmentSnapshot | null>(snapshotPath(root), null);
+    const ids: string[] = [];
+    if (snapshot) {
+      const path = await location(root);
+      await withFileLock(path, async () => {
+        const changed = parseJudgment(await readText(path)).items.filter(item => !item.followup && item.answer.trim()
+          && rawAnswer(item) !== snapshot.answers[item.id]);
+        const heldPath = harnessPath(root, 'harness-judgment-held.json');
+        await withFileLock(heldPath, async () => {
+          let records = await readJson<HeldAnswer[]>(heldPath, []);
+          for (const item of changed) {
+            if (records.some(record => record.id === item.id && record.answer === item.answer)) continue;
+            records = records.filter(record => record.id !== item.id);
+            records.push({ id: item.id, answer: item.answer, held: { at: endedAt, reason: 'brain-turn', runId: snapshot.runId } });
+            ids.push(item.id);
+          }
+          if (ids.length) await atomicWrite(heldPath, JSON.stringify(records, null, 2) + '\n');
+        });
+      });
+      if (ids.length) await appendLedger(root, { runId: snapshot.runId, action: 'judgment:held', status: 'skip', evidence: { ids } });
+    }
+    const turn = (await readState(root)).brainTurn;
+    if (turn && !turn.endedAt) await updateState(root, { brainTurn: { ...turn, endedAt } });
+    if (snapshot) await unlink(snapshotPath(root));
+    return ids;
+  });
+  if (added.length) await notify(root, { key: 'judgment:held', title: '판단 답 확인', level: 'warning',
+    body: '판단 답이 두뇌 턴 중에 바뀌었습니다. 사용자가 쓴 답이면 /judged 로 확인하세요' });
+}
+export async function recoverJudgmentSnapshot(root: string): Promise<void> {
+  const state = await readState(root);
+  await finishJudgmentSnapshot(root, typeof state.lastEventAt === 'string' ? state.lastEventAt : new Date().toISOString());
 }

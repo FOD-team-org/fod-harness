@@ -10,7 +10,7 @@ import { acquireLock } from '../core/lock.ts';
 import { appendLedger, unknownEntries } from '../core/ledger.ts';
 import { listInbox, deliverInbox } from '../core/inbox.ts';
 import { reclaimTask } from '../core/reclaim.ts';
-import { addJudgment } from '../core/judgment.ts';
+import { addJudgment, beginJudgmentSnapshot, finishJudgmentSnapshot } from '../core/judgment.ts';
 import { runProcess, type ProcessResult } from './runner.ts';
 import { checkBillingEnvironment } from './preflight.ts';
 import { redact, safeValue } from './privacy.ts';
@@ -26,11 +26,12 @@ export interface TurnResult {
   init?: { skills: string[]; memory_paths: string[] };
   reason: 'stop' | 'error' | 'aborted'; classification?: string; usage?: Record<string, number>; contextUsage?: boolean; runId: string;
 }
-export function claudeArgs(root: string, model: string, sid: string, resume: boolean, doctor = false): string[] {
+export function claudeArgs(root: string, model: string, sid: string, resume: boolean, doctor = false, allowPlugins = false): string[] {
   return ['-p', '--dangerously-skip-permissions', resume ? '--resume' : '--session-id', sid,
     '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     ...doctor ? [] : ['--append-system-prompt-file', join(packageRoot, 'templates/brain-rules.md')],
     '--settings', join(root, '.claude/settings.json'), '--model', model,
+    ...allowPlugins ? [] : ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'],
     ...doctor ? ['--max-turns', '3'] : []];
 }
 export async function buildPrompt(root: string, latest: string, runId: string): Promise<string> {
@@ -83,7 +84,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       reportText = '';
       const action = `brain:${attempt}`;
       const brainTurn = { runId, startedAt: new Date().toISOString() };
-      await patchState({ brainTurn });
+      await beginJudgmentSnapshot(root, brainTurn);
       await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
       let init: TurnResult['init'];
       let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
@@ -129,7 +130,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       let outcome: ProcessResult;
       try {
         outcome = await runProcess({ root, command: config.brain.command,
-          args: claudeArgs(root, model, sessionId, resume, options.doctor),
+          args: claudeArgs(root, model, sessionId, resume, options.doctor, config.brain.allowPlugins),
           input: prompt, runId, maxMs: turnDeadlineMs(config.brain.maxTurnMinutes, options.doctor), env, signal: options.signal,
           onEvent: async event => {
             lastEventAt = new Date().toISOString();
@@ -220,9 +221,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           },
         });
       } finally {
-        const completedTurn = { ...brainTurn, endedAt: new Date().toISOString() };
-        await patchState({ brainTurn: completedTurn });
-        if (!options.doctor) await appendLedger(root, { runId, action: 'brain:window', status: 'ok', evidence: completedTurn });
+        await finishJudgmentSnapshot(root);
         if (lastEventAt) await patchState({ lastEventAt, runId });
       }
       if (!options.doctor) {

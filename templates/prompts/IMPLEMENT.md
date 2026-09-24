@@ -21,3 +21,5 @@
 Claude Agent에도 워크트리 범위·git·전체 테스트/빌드·비밀값·산출물 금지와 동시 자식 한도를 명시한다. 두뇌는 루트 cwd 유지.
 
 `--wait` 는 포그라운드로만 쓴다. Bash `run_in_background` 로 돌리지 않는다(턴 종료 시 프로세스 트리가 죽는다). 결과가 안 오면 `대기: 위임 <runId>` 로 턴을 끝낸다.
+위임은 `fodh codex task` 또는 Claude Agent 로만 한다. `codex`·companion 스크립트·플러그인 도구 직접 호출 금지
+`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add`

@@ -63,7 +63,13 @@ it('INTERVIEW 요약·docsRoot·날짜 치환, 그 외 인터뷰 없이 렌더',
 it('M4/F3/L7/L11 운영 지시·필수 플래그·scaffold path 회귀',async()=>{
   const cleanup=await readFile('templates/prompts/CLEANUP.md','utf8');for(const value of ['pendingReclaim','fodh reclaim --task','fodh state transition CLEANUP --task','1회 재시도','paused(cleanup)'])expect(cleanup).toContain(value);
   expect(cleanup).toContain('`fodh cleanup run --task {{taskId}} --scope processes` 1회 재시도');expect(cleanup).toContain('첫 실패가 storage·worktrees였으면');expect(cleanup).toContain('등록하고 `fodh state transition CLEANUP_FAILED` 후 `대기: 사용자`');
-  for(const file of await files('templates/prompts'))for(const command of (await readFile(file,'utf8')).matchAll(/`(fodh judgment add[^`]*)`/gu))for(const flag of ['--title','--background','--options','--recommend','--blocks'])expect(command[1],file).toContain(flag);
+  for (const file of await files('templates/prompts')) {
+    // F28's required advisory names the command; executable examples still require every flag.
+    const examples = (await readFile(file, 'utf8')).replace(/^`대기: 사용자` 는 쓰지 않는다\. 사용자 결정은 `fodh judgment add`$/mu, '');
+    for (const command of examples.matchAll(/`(fodh judgment add[^`]*)`/gu)) {
+      for (const flag of ['--title', '--background', '--options', '--recommend', '--blocks']) expect(command[1], file).toContain(flag);
+    }
+  }
   const interview=await readFile('templates/prompts/INTERVIEW.md','utf8');expect(interview).toContain('`next`가 이미 판단대기로 넘겼다');expect(interview).toContain('결과 `deferred`');expect(interview).toContain('질문을 그대로 다시 보여 주고');expect(interview).toContain('`repeated:true`');expect(interview).toContain('같은 라운드');expect(interview).toContain('skipDue');expect(interview).toContain('은행 파일·템플릿을 바꾸지 않는다');
   for(const state of ['RESEARCH','FIX','SPEC','PLANNING']){const text=await readFile(`templates/prompts/${state}.md`,'utf8');expect(text).not.toContain('{{today}}');expect(text).toContain('scaffold 결과의 `path`');expect(text).toContain('`--spec`');}
   const review=await readFile('templates/prompts/REVIEW.md','utf8'), branch=review.split('\n').find(l=>l.startsWith('2. task면'))!.split('프로젝트면')[1];
@@ -142,4 +148,13 @@ it('F25 PICK은 후보 선택·허용된 사용자 대기·dry 조회를 안내�
   expect(text).toContain('복귀 가능·ready task 가 있으면 반드시 `fodh pick`');
   expect(text).toContain('EMPTY 이거나 모든 후보가 열린 판단에 막혔을 때만');
   expect(text).toContain('fodh pick --dry');
+});
+
+it('F27·F28 흐름표에 정식 위임과 판단 등록 경로를 명시한다', async () => {
+  for (const state of ['IMPLEMENT', 'FIX', 'REVIEW', 'RESEARCH']) {
+    expect(await readFile(`templates/prompts/${state}.md`, 'utf8')).toContain('위임은 `fodh codex task` 또는 Claude Agent 로만 한다. `codex`·companion 스크립트·플러그인 도구 직접 호출 금지');
+  }
+  for (const state of ['IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP']) {
+    expect(await readFile(`templates/prompts/${state}.md`, 'utf8')).toContain('`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add`');
+  }
 });

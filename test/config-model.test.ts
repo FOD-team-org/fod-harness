@@ -227,3 +227,11 @@ it('L8 일반 문서 하위 경로는 계속 허용한다', async () => {
   const root = await project(); await setConfig(root, 'docs.root', 'notes/project');
   expect((await loadConfig(root)).docs.root).toBe('notes/project');
 });
+
+it('F27 brain.allowPlugins는 기본 false이고 boolean만 받는다', async () => {
+  const root = await project();
+  expect((await loadConfig(root)).brain.allowPlugins).toBe(false);
+  await setConfig(root, 'brain.allowPlugins', 'true');
+  expect((await loadConfig(root)).brain.allowPlugins).toBe(true);
+  await expect(setConfig(root, 'brain.allowPlugins', 'yes')).rejects.toThrow('불리언');
+});

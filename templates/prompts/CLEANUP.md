@@ -16,3 +16,4 @@
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 sharedCaches는 보고만. 저장공간·워크트리 실패를 processes 성공으로 덮지 않는다. 연속 실패는 paused(cleanup)+알림에 맡긴다.
+`대기: 사용자` 는 쓰지 않는다. 사용자 결정은 `fodh judgment add`

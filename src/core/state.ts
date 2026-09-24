@@ -98,6 +98,11 @@ export async function updateState(
   }
   if (!committedState) throw new Error('상태 갱신 경합이 계속됩니다');
   const next = committedState;
+  if (stateChanged && next.state === 'recovering') {
+    const { recoverJudgmentSnapshot } = await import('./judgment.ts');
+    await recoverJudgmentSnapshot(root);
+    next.brainTurn = (await readState(root)).brainTurn;
+  }
   const recordFailure = async (action: string, error: unknown) => {
     try { await appendLedger(root, { runId: typeof next.runId === 'string' ? next.runId : randomUUID(), action, status: 'fail',
       evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }

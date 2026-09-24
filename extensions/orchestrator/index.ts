@@ -15,7 +15,7 @@ import { listBacklog } from '../../src/core/backlog.ts';
 import { runPick, decidePick, blockedTaskIds } from '../../src/core/pick.ts';
 import { runCleanup } from '../../src/core/cleanup.ts';
 import { notify, setNotifyContext } from '../../src/core/notify.ts';
-import { applyJudgments, readJudgment, holdBrainTurnAnswers, JudgmentConflict } from '../../src/core/judgment.ts';
+import { applyJudgments, readJudgment, hasActiveJudgmentSnapshot, recoverJudgmentSnapshot, JudgmentConflict } from '../../src/core/judgment.ts';
 import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.ts';
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from '../../src/core/storage.ts';
@@ -53,6 +53,7 @@ async function prepareProject(root: string, ctx: ExtensionContext, reportChanges
 export default function orchestrator(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     setNotifyContext(ctx.cwd, resumeContext(ctx));
+    await recoverJudgmentSnapshot(ctx.cwd);
     try { await ensureHarnessGitignore(ctx.cwd); }
     catch (error) {
       const message = redact(error instanceof Error ? error.message : String(error));
@@ -149,10 +150,16 @@ export default function orchestrator(pi: ExtensionAPI): void {
     handler: async (args, ctx) => {
       const ids = args.trim() ? args.trim().split(/\s+/u) : undefined;
       if (ids?.some(id => !/^A\d+(?:-\d+)?$/u.test(id))) throw new Error('판단 번호가 올바르지 않습니다');
+      const held = (await readJudgment(ctx.cwd)).items.filter(item => item.held);
+      if (!ids && held.length) {
+        ctx.ui.notify(`held: ${held.map(item => `${item.id}=${JSON.stringify(item.answer)}(두뇌 턴 ${item.held!.runId.slice(0, 8)})`).join(', ')}`, 'info');
+        return;
+      }
+      const released = held.filter(item => ids?.includes(item.id)).map(({ id, answer }) => ({ id, answer }));
       await updateState(ctx.cwd, { userAborted: false });
       const before = await readState(ctx.cwd);
       const result = await applyJudgments(ctx.cwd, ids, undefined, { releaseHeld: true });
-      ctx.ui.notify(JSON.stringify(result), 'info');
+      ctx.ui.notify(JSON.stringify({ ...result, released }), 'info');
       const state = await readState(ctx.cwd);
       if ((before.state === 'WAIT_JUDGMENT' || before.state === 'paused(cleanup)') && result.applied.length && active.has(state.state)) {
         await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
@@ -216,14 +223,27 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const blocked = blockedTaskIds(tasks, open);
       const candidates = tasks.filter(task => task.status !== 'done' && !blocked.has(task.id)).map(task => task.id);
       const allBlocked = tasks.some(task => task.status !== 'done') && !candidates.length;
-      if (decision.outcome !== 'EMPTY' && !allBlocked) {
+      if (decision.outcome !== 'EMPTY' && !allBlocked
+        && !(!candidates.length && (decision.outcome === 'DONE_ALL' || decision.outcome.startsWith('WAIT_')))) {
         await updateState(ctx.cwd, { awaitingUser: false });
         await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'pick:user-wait-rejected', status: 'skip', evidence: { taskIds: candidates } });
-        await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 후보를 집어라: ${candidates.join(', ')}]`);
+        await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 결과(${decision.outcome})를 확정하라${candidates.length ? `: ${candidates.join(', ')}` : ''}]`);
         return;
       }
     }
     if (awaitingUser) {
+      const state = await readState(ctx.cwd);
+      if (state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
+        const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
+        const blocking = (await readJudgment(ctx.cwd)).items.some(item => !item.followup
+          && (item.blocks.split(/[\s,]+/u).includes(state.taskId!) || task?.status === `blocked(${item.id})`));
+        if (!blocking) {
+          await updateState(ctx.cwd, { awaitingUser: false });
+          await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-rejected', status: 'skip', evidence: { state: state.state, taskId: state.taskId } });
+          await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', '[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add 로 등록해 WAIT_JUDGMENT 로 가고, 아니면 계속 진행하라]');
+          return;
+        }
+      }
       await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
     }
     if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
@@ -259,11 +279,18 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
     let applied: string[] = [], resumed = false, handled = false, resolve = false;
     try {
       if (kind === 'judgment-changed') {
-        const held = await holdBrainTurnAnswers(root);
+        if (await hasActiveJudgmentSnapshot(root)) {
+          deferred.push(...batch.map(record => record.id));
+          const retry = options.retry ?? (async () => {
+            await tick(root, { judgmentOnly: true });
+            await decideInbox(pi, ctx, root, batch, options);
+          });
+          deferDecision(root, 1000, retry);
+          await logDeferredDecision(root, batch, applied, resumed);
+          continue;
+        }
         const document = await readJudgment(root, { answered: true });
-        const hasHeld = held.length > 0 || document.items.some(item => item.held);
-        if (held.length) await notify(root, { key: 'judgment:held', title: '판단 답 확인', level: 'warning',
-          body: '판단 답이 두뇌 턴 중에 바뀌었습니다. 사용자가 쓴 답이면 /judged 로 확인하세요' }, context, { now: options.now?.() });
+        const hasHeld = document.items.some(item => item.held);
         const answered = document.items.filter(item => !item.followup && !item.held);
         const config = await loadConfig(root);
         const stableFor = await judgmentStableFor(root, options.now?.());

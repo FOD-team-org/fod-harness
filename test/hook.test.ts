@@ -451,3 +451,39 @@ it.each([`bash -c 'fodh codex task --wait --spec docs/task.md'`,
     .toMatchObject({ code: 2, stderr: expect.stringContaining('--wait 를 백그라운드로 돌리지 마라') });
   expect((await invoke('Bash', { command, run_in_background: false }, 'IMPLEMENT', brain)).code).toBe(0);
 });
+
+it.each(['cp README.md docs/', 'mv docs/x docs/', 'rsync README.md docs/', 'tar -cf docs/archive.tar -C docs README.md',
+  'tar -xf archive.tar', 'unzip archive.zip'])('S5 일반 복사·이동·아카이브 오탐 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});
+it.each(['nohup cp docs/판단대기.md docs/', 'timeout -k 5 10 cp /tmp/판단대기.md docs/',
+  'nice -n 10 sh -c "cp /tmp/판단대기.md docs/"', 'time -o docs/timing cp /tmp/판단대기.md docs/',
+  'xargs -n 1 cp /tmp/판단대기.md docs/', 'stdbuf -o L cp /tmp/판단대기.md docs/',
+  'env LANG=C cp /tmp/판단대기.md docs/', 'cp -t docs /tmp/판단대기.md', 'mv --target-directory=docs /tmp/판단대기.md', 'cp -r /tmp/files docs/', 'rsync -a /tmp/files docs/',
+  'tar -xf archive.tar -C docs', 'unzip archive.zip -d docs', 'tar -xf archive.tar 판단대기.md', 'unzip archive.zip 판단대기.md'])('S5 래퍼·재귀·추출 판단 쓰기 차단: %s', async command => {
+  const result = await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } });
+  expect(result.code).toBe(2); expect(result.stderr).toContain('판단');
+});
+it.each(['tar -xf archive.tar', 'unzip archive.zip'])('S5 cwd가 판단 디렉터리인 추출 차단: %s', async command => {
+  const result = await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' },
+    setup: root => writeFile(join(root, '.pi/harness.json'), JSON.stringify({ judgment: { file: '판단대기.md' } })) });
+  expect(result.code).toBe(2); expect(result.stderr).toContain('판단');
+});
+it('S5 nohup의 --wait 백그라운드 거부', async () => {
+  const result = await invoke('Bash', { command: 'nohup fodh codex task --spec docs/spec.md --wait', run_in_background: true }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } });
+  expect(result.code).toBe(2); expect(result.stderr).toContain('--wait 를 백그라운드로');
+});
+it.each(['codex exec hi', 'claude -p hi', 'cswap switch', 'nohup codex exec hi', 'env -S "codex exec hi"', 'env --split-string="claude -p hi"', 'timeout --signal TERM 30 claude -p hi',
+  'node "/Users/example/.claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs" task --write hi',
+  'node /tmp/codex-companion.mjs task hi', 'sh -c "env LANG=C node /tmp/codex-companion.mjs task hi"',
+  'node /tmp/plugins/cache/openai-codex/anything/script.mjs task hi'])('F27 두뇌 직접 실행·companion 우회 차단: %s', async command => {
+  const result = await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } });
+  expect(result.code).toBe(2); expect(result.stderr).toContain('위임은 fodh codex task / Claude Agent 로만 한다');
+});
+it.each(['mcp__codex__task', 'mcp__plugin_codex__rescue', 'Agent', 'Task'])('F27 플러그인 도구 %s 차단', async name => {
+  const result = await invoke(name, { subagent_type: 'codex:codex-rescue' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } });
+  expect(result.code).toBe(2); expect(result.stderr).toContain('위임은 fodh codex task / Claude Agent 로만 한다');
+});
+it.each([['Bash', { command: 'fodh codex task --spec docs/spec.md' }], ['Agent', { subagent_type: 'general-purpose' }]] as const)('F27 정식 위임 %s 허용', async (name, input) => {
+  expect((await invoke(name, input, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
+});

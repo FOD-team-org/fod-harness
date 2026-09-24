@@ -1,11 +1,12 @@
 import { expect, it, vi } from 'vitest';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { project } from './p5-helpers.ts';
 import * as runner from '../src/provider/runner.ts';
 import { runTurn } from '../src/provider/turn.ts';
 import { readState } from '../src/core/state.ts';
 import { readLedger } from '../src/core/ledger.ts';
+import { addJudgment, answerJudgment, readJudgment } from '../src/core/judgment.ts';
 import { setConfig } from '../src/core/config.ts';
 import { setNotifyContext } from '../src/core/notify.ts';
 import * as notifications from '../src/core/notify.ts';
@@ -79,18 +80,37 @@ it.each(['notify', 'ledger', 'both'])('N4 %s 진단 실패가 정상 턴 결과�
   ]);
 });
 
-it.each([false, true])('R1 두뇌 턴 시작·종료 창 기록 (runner throw=%s)', async throws => {
+it.each([{ throws: false, doctor: false }, { throws: true, doctor: false }, { throws: false, doctor: true }, { throws: true, doctor: true }])('S1 두뇌·doctor 스냅숏 $doctor / throw $throws', async ({ throws, doctor }) => {
   const root = await project('RESEARCH');
   await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  const { item } = await addJudgment(root, { title: '답 변경', background: '', options: ['진행'], recommend: '', blocks: '-' });
   vi.spyOn(runner, 'runProcess').mockImplementation(async () => {
+    const snapshot = JSON.parse(await readFile(join(root, '.pi/harness-judgment-snapshot.json'), 'utf8'));
+    expect(snapshot).toMatchObject({ runId: (await readState(root)).brainTurn?.runId, answers: { [item.id]: '- 답:' } });
+    await answerJudgment(root, item.id, '1');
     expect((await readState(root)).brainTurn).toMatchObject({ runId: expect.any(String), startedAt: expect.any(String) });
     expect((await readState(root)).brainTurn?.endedAt).toBeUndefined();
     if (throws) throw new Error('stub crash');
     return { code: 1, cleaned: true, stderr: '' };
   });
-  const call = runTurn('fixture', { root, env: { HOME: root } });
+  const call = runTurn('fixture', { root, doctor, env: { HOME: root } });
   if (throws) await expect(call).rejects.toThrow('stub crash'); else await call;
   const window = (await readState(root)).brainTurn!;
   expect(Date.parse(window.endedAt!)).toBeGreaterThanOrEqual(Date.parse(window.startedAt));
-  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'brain:window', evidence: window }));
+  expect((await readLedger(root)).some(entry => entry.action === 'brain:window')).toBe(false);
+  expect((await readJudgment(root)).items[0].held?.runId).toBe(window.runId);
+  await expect(readFile(join(root, '.pi/harness-judgment-snapshot.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it.each([false, true])('F27 allowPlugins=%s에 따른 MCP 제한 옵션', async allowPlugins => {
+  const root = await project('RESEARCH');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  if (allowPlugins) await setConfig(root, 'brain.allowPlugins', 'true');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
+    expect(options.args!.includes('--strict-mcp-config')).toBe(!allowPlugins);
+    if (!allowPlugins) expect(options.args![options.args!.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}');
+    else expect(options.args).not.toContain('--mcp-config');
+    return { code: 1, cleaned: true, stderr: '' };
+  });
+  await runTurn('fixture', { root, env: { HOME: root } });
 });
