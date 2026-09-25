@@ -156,3 +156,19 @@ it('M2/F2: 다른 task done과 제거된 repair 옵션은 거부한다',async()=
   expect((await cli(root,'backlog','set',task.id,'--repair','0')).code).toBe(1);
   expect((await getTask(root,task.id)).repair).toBe(0);
 });
+
+it.each([false, true])('F34 CLI 직접 RECLAIM 진입은 사용자·두뇌=%s 모두 거부하고 정식 경로는 허용한다', async brain => {
+  const { root, task } = await setup();
+  const { liveHarness } = await import('./p7-brain-helpers.ts');
+  await liveHarness(root);
+  vi.stubEnv('FODH_BRAIN', brain ? '1' : '');
+  try {
+    for (const flags of [[], ['--system']]) {
+      expect(await cli(root, 'state', 'transition', 'RECLAIM', '--task', task.id, ...flags))
+        .toEqual({ code: 1, value: { error: 'RECLAIM 은 fodh judgment add --blocks <task> --reclaim 또는 fodh reclaim --task <task> --judgment <A번호> 로만 들어간다' } });
+      expect((await readState(root)).state).toBe('IMPLEMENT');
+    }
+    expect((await cli(root, 'judgment', 'add', '--title', '회수 판단', '--background', '', '--options', '진행|보류', '--recommend', '1', '--blocks', task.id, '--reclaim')).value)
+      .toMatchObject({ reclaimed: true, next: 'PICK' });
+  } finally { vi.unstubAllEnvs(); }
+});

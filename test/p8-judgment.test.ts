@@ -193,3 +193,16 @@ it('P8-b 토이 A19·A20을 distinct로 함께 둬도 A21의 CLI 중복 등록�
   expect((await readJudgment(root)).items).toHaveLength(2);
   expect((await getTask(root, c.id)).status).toBe('ready');
 });
+
+it('A16 R9 답 있는 판단도 이미 연결된 task의 same-as 재시도는 멱등이다', async () => {
+  const { root, a, b } = await taskProject();
+  const first = await cli(root, add(a.id)), id = first.value.item.id;
+  expect((await cli(root, ['judgment', 'add', '--same-as', id, '--blocks', b.id])).code).toBe(0);
+  expect((await cli(root, ['judgment', 'answer', id, '1'])).code).toBe(0);
+  const before = await readFile(join(root, 'docs/판단대기.md'), 'utf8');
+  expect(await cli(root, ['judgment', 'add', '--same-as', id, '--blocks', b.id]))
+    .toMatchObject({ code: 0, value: { item: { id, answer: '1', blocks: `${a.id}, ${b.id}` } } });
+  expect(await readFile(join(root, 'docs/판단대기.md'), 'utf8')).toBe(before);
+  expect((await readJudgment(root)).items).toHaveLength(1);
+  expect((await getTask(root, b.id)).status).toBe(`blocked(${id})`);
+});

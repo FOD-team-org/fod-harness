@@ -3,7 +3,9 @@ import { redact } from '../../src/provider/privacy.ts';
 import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
 import { substitute, todayKst } from '../../src/core/template-values.ts';
 import { notify } from '../../src/core/notify.ts';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import { appendLedger } from '../../src/core/ledger.ts';
+import { randomUUID } from 'node:crypto';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,18 +43,39 @@ export async function send(pi: ExtensionAPI, root: string, state: HarnessState, 
 }
 export interface ResumeContext {
   cwd: string; hasUI: boolean; isIdle: () => boolean;
+  idleAtStart?: boolean;
+  signal?: () => AbortSignal | undefined;
+  hasPendingMessages?: () => boolean;
   notify: (message: string, type: 'info' | 'warning' | 'error') => void;
 }
 export function resumeContext(ctx: ExtensionContext): ResumeContext {
-  return { cwd: ctx.cwd, hasUI: ctx.hasUI, isIdle: () => ctx.isIdle?.() ?? true,
+  return { cwd: ctx.cwd, hasUI: ctx.hasUI, idleAtStart: ctx.isIdle?.() ?? true, isIdle: () => ctx.isIdle?.() ?? true,
+    signal: () => ctx.signal,
+    hasPendingMessages: () => ctx.hasPendingMessages?.() ?? false,
     notify: (message, type) => ctx.ui?.notify?.(message, type) };
 }
 export interface ResumeResult { resumed?: boolean; skipped?: string; stopped?: boolean }
 export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: ResumeContext, reason: string, prefix = ''): Promise<ResumeResult> {
   if (ctxLike.hasUI === false) return { skipped: 'print' };
-  if (ctxLike.isIdle() === false) return { skipped: 'busy' };
+  const idleAtStart = ctxLike.idleAtStart ?? ctxLike.isIdle();
+  const blocked = () => {
+    if (reason === 'agent_end') {
+      if (ctxLike.signal?.()?.aborted) return 'aborted';
+      if (ctxLike.hasPendingMessages?.()) return 'pending-input';
+      return idleAtStart && ctxLike.isIdle() === false ? 'busy' : undefined;
+    }
+    return ctxLike.isIdle() === false ? 'busy' : undefined;
+  };
+  const skip = async (skipped: string): Promise<ResumeResult> => {
+    if (skipped === 'aborted') await updateState(root, { userAborted: true });
+    if (skipped === 'pending-input') await appendLedger(root, { runId: randomUUID(), action: 'orchestrator:resume', status: 'skip', evidence: { reason, skipped } });
+    return { skipped };
+  };
+  const beforeLock = blocked();
+  if (beforeLock) return skip(beforeLock);
   return withFileLock(harnessPath(root, 'harness-resume'), async () => {
-    if (!ctxLike.isIdle()) return { skipped: 'busy' };
+    const afterLock = blocked();
+    if (afterLock) return skip(afterLock);
     let state = await readState(root);
     if (state.userAborted) return { skipped: 'user-aborted' };
     if (state.awaitingUser && reason === 'slot-free' && state.lastPaused === 'slot') state = await updateState(root, { awaitingUser: false });
@@ -94,10 +117,11 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
         ...(current.state === 'recovering' ? { recoveryAutoResumed: true } : {}) };
     });
     try {
-      // No await between the final idle check and Pi's synchronous streaming transition.
-      if (!ctxLike.isIdle()) {
+      // No await between the final idle/queued-input check and Pi's synchronous followUp enqueue.
+      const beforeMessage = blocked();
+      if (beforeMessage) {
         await updateState(root, beforeSend);
-        return { skipped: 'busy' };
+        return skip(beforeMessage);
       }
       pi.sendMessage({ customType: 'harness-orchestrator', content, display: true,
         details: { state: state.state, taskId: state.taskId } }, { triggerTurn: true, deliverAs: 'followUp' });

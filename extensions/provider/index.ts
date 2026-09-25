@@ -1,25 +1,27 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { appendLedger } from '../../src/core/ledger.ts';
 import { installShutdownReclaim, ensureShutdownReclaimFirst } from '../../src/provider/shutdown.ts';
 import { getCurrentBrainGroup } from '../../src/provider/runner.ts';
 import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { setNotifyContext } from '../../src/core/notify.ts';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { createAssistantMessageEventStream, type AssistantMessage } from '@mariozechner/pi-ai';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { readState, doctorFresh, updateState } from '../../src/core/state.ts';
 import { loadConfig, setConfig, brainModels, defaultAllowedModels } from '../../src/core/config.ts';
 import { join } from 'node:path';
 import { acquireLock } from '../../src/core/lock.ts';
 import { streamClaude } from './stream.ts';
 import { doctor } from '../../src/cli/doctor.ts';
+import { waitForShutdown } from '../../src/core/shutdown-wait.ts';
+import { compactionDisabled } from './compaction.ts';
 const reorderKey = Symbol.for('fodh.shutdownReorderedSignals');
 const shared = globalThis as typeof globalThis & { [reorderKey]?: Set<string> };
 const reorderedSignals = shared[reorderKey] ??= new Set<string>();
-export default function provider(pi: ExtensionAPI) {
+export default function provider(pi: ExtensionAPI, options: { shutdownWaitMs?: number } = {}) {
   let root = process.cwd();
   let models: string[], modelWarning: string | undefined;
-  try { models = brainModels(JSON.parse(readFileSync(join(root, '.pi/harness.json'), 'utf8'))).allowedModels; }
+  try { models = brainModels(JSON.parse(readFileSync(join(root, '.pi/harness.json'), 'utf8').trim() || '{}')).allowedModels; }
   catch (error) {
     models = [...defaultAllowedModels];
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') modelWarning = '두뇌 모델 설정을 읽거나 검증하지 못했습니다. 기본 모델 목록을 사용합니다. .pi/harness.json을 확인하세요';
@@ -65,7 +67,8 @@ export default function provider(pi: ExtensionAPI) {
           .catch(() => notify?.('종료 신호 처리기 순서 복구 원장을 기록하지 못했습니다.'));
       }
       const stream = streamClaude(model, context, { ...options, signal }, { root, lockHeld: true, notify, useConfiguredModel: true });
-      pending = stream.result().finally(() => { pending = undefined; });
+      const completion = stream.result().finally(() => { if (pending === completion) pending = undefined; });
+      pending = completion;
       return stream;
     },
   });
@@ -85,7 +88,7 @@ export default function provider(pi: ExtensionAPI) {
     setNotifyContext(root, { hasUI: ctx.hasUI, notify: (body, level) => ctx.ui.notify(body, level) });
     notify = message => ctx.ui.notify(message, 'warning');
     if (modelWarning) { notify(modelWarning); modelWarning = undefined; }
-    notify('Pi 자동 컴팩션을 꺼 주세요: .pi/settings.json 또는 ~/.pi/agent/settings.json의 compaction.enabled=false');
+    if (!compactionDisabled(root, ctx.isProjectTrusted?.() ?? true)) notify('Pi 자동 컴팩션을 꺼 주세요: .pi/settings.json 또는 ~/.pi/agent/settings.json의 compaction.enabled=false. 0.79 부터 프로젝트 설정은 신뢰 전에는 무시되므로 전역 ~/.pi/agent/settings.json 을 권장');
     release = await acquireLock(join(root, '.pi/harness.lock'));
     await recoverOrphanBrain(root, true);
     selectTools(ctx.model?.provider === 'claude-code');
@@ -108,9 +111,17 @@ export default function provider(pi: ExtensionAPI) {
     }
   });
   pi.on('session_shutdown', async () => {
-    controller.abort();
+    controller.abort(); ready = false;
     uninstallShutdownReclaim?.(); uninstallShutdownReclaim = undefined;
     setNotifyContext(root);
-    try { await pending; } finally { await release?.(); release = undefined; ready = false; selectTools(false); }
+    try { await waitForShutdown(root, 'provider', [pending], options.shutdownWaitMs, () => {
+      const pgid = getCurrentBrainGroup();
+      if (pgid && Number.isSafeInteger(pgid) && pgid > 1 && pgid !== process.pid) {
+        try { process.kill(-pgid, 'SIGKILL'); } catch { /* Already gone; preserve the marker for recovery. */ }
+        try { writeFileSync(join(root, '.pi/harness-brain-orphan.json'), JSON.stringify({ pgid, signal: 'shutdown-timeout', at: new Date().toISOString() }) + '\n', { mode: 0o600 }); }
+        catch { /* Failure to write recovery evidence must not prevent shutdown cleanup. */ }
+      }
+    }); }
+    finally { pending = undefined; await release?.(); release = undefined; selectTools(false); }
   });
 }

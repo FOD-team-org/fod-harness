@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { mkdir, readFile, writeFile, symlink, lstat, readlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { project } from './p5-helpers.ts';
 import orchestrator, { initialize } from '../extensions/orchestrator/index.ts';
 import { readLedger } from '../src/core/ledger.ts';

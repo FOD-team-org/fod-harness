@@ -206,7 +206,7 @@ it.each([false, true])('L2 finish 실패 뒤 recover 재시도 실패=%s도 활�
 it('참고 jiti 모듈 재평가도 global Symbol의 진행 턴을 공유한다', async () => {
   const root = await project('RESEARCH');
   await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
-  const piRequire = createRequire(new URL('../node_modules/@mariozechner/pi-coding-agent/package.json', import.meta.url));
+  const piRequire = createRequire(new URL('../node_modules/@earendil-works/pi-coding-agent/package.json', import.meta.url));
   const { createJiti } = piRequire('jiti');
   const jiti = createJiti(import.meta.url, { moduleCache: false, fsCache: false });
   const other = await jiti.import('../src/provider/turn.ts') as typeof import('../src/provider/turn.ts');

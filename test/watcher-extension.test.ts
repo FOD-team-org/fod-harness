@@ -1,7 +1,7 @@
 import { runCleanup } from '../src/core/cleanup.ts';
 vi.mock('../src/core/cleanup.ts', () => ({ runCleanup: vi.fn().mockResolvedValue({ ok: true }) }));
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { readFile, stat } from 'node:fs/promises';
 import watcher from '../extensions/watcher/index.ts';
 import { tick, memoryTick, detectRecovery, pendingDecisions, recordDecision } from '../src/core/watcher.ts';
@@ -33,10 +33,10 @@ beforeEach(() => {
   vi.mocked(watch).mockReturnValue({ close, on } as any);
 });
 afterEach(async () => { for (const t of sessions.splice(0)) await t.stop(); vi.useRealTimers(); vi.restoreAllMocks(); });
-async function setup(hasUI = true) {
+async function setup(hasUI = true, shutdownWaitMs?: number) {
   const handlers = new Map<string, any>();
   const pi = { on: (name: string, handler: any) => handlers.set(name, handler), sendMessage: vi.fn() } as unknown as ExtensionAPI;
-  watcher(pi);
+  watcher(pi, { shutdownWaitMs });
   const ctx = { cwd: '/test-project', hasUI, isIdle: () => true, ui: { notify: vi.fn() } };
   const t = { pi, ctx, handlers, start: () => handlers.get('session_start')({}, ctx), stop: () => handlers.get('session_shutdown')({}, ctx) };
   sessions.push(t); return t;
@@ -233,4 +233,18 @@ it('P4 M3: 같은 틱의 poll·memory가 한 인박스 레코드를 중복 결�
   expect(memoryTick).toHaveBeenCalledTimes(1); expect(decideInbox).toHaveBeenCalledTimes(1);
   release(); await vi.advanceTimersByTimeAsync(0);
   expect(decideInbox).toHaveBeenCalledTimes(1); expect(decided).toBe(true);
+});
+
+it.each(['tick', 'memory', 'both'])('A16 watcher는 미완료 %s 대기를 한 번의 상한으로 끊고 정리한다', async kind => {
+  const t = await setup(true, 20); await t.start();
+  if (kind !== 'memory') vi.mocked(tick).mockImplementation(() => new Promise(() => {}));
+  if (kind !== 'tick') vi.mocked(memoryTick).mockImplementation(() => new Promise(() => {}));
+  await vi.advanceTimersByTimeAsync(60000);
+  const shutdown = t.stop();
+  await vi.advanceTimersByTimeAsync(20); await shutdown;
+  expect(vi.mocked(appendLedger).mock.calls.filter(([, entry]) => entry.action === 'shutdown:timeout'))
+    .toEqual([[t.ctx.cwd, expect.objectContaining({ evidence: { extension: 'watcher', waitedMs: 20 } })]]);
+  expect(runCleanup).toHaveBeenCalledWith(t.ctx.cwd, expect.objectContaining({ scope: 'processes' }));
+  expect(close).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+  expect(process.env.FODH_SESSION_ID).toBeUndefined();
 });

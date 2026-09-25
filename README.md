@@ -5,15 +5,28 @@ Pi 기반 개인 하네스 터미널. 설계: docs/설계/, 판단: docs/판단�
 
 ## Pi 컴팩션 설정
 
-Pi 0.73.1 설치본 README와 확장 타입으로 확인한 설정 위치는 전역
-`~/.pi/agent/settings.json`, 프로젝트 `.pi/settings.json`입니다. 프로젝트 설정이 우선합니다.
-Claude Code가 자신의 문맥을 관리하므로 Pi 세션을 시작하기 전에 다음을 설정하세요.
+Pi 0.87.1(`@earendil-works/pi-coding-agent`) 기준입니다. 다음 명령으로 설치합니다.
+
+```sh
+npm install -g @earendil-works/pi-coding-agent@0.87.1
+```
+
+Claude Code가 자신의 문맥을 관리하므로 전역 `~/.pi/agent/settings.json`에 다음을 설정하는 것을 권장합니다.
+`PI_CODING_AGENT_DIR`가 있으면 그 디렉터리의 `settings.json`을 사용합니다.
+프로젝트 `.pi/settings.json`도 지원하지만, Pi 0.79부터는 프로젝트를 신뢰하기 전까지 무시됩니다.
 
 ```json
 { "compaction": { "enabled": false } }
 ```
 
-공개 확장 API에는 자동 컴팩션 설정을 바꾸는 메서드가 없어 세션 시작 시 경고를 표시합니다.
+전역 설정 또는 신뢰된 프로젝트 설정의 실효값이 false 이면 경고하지 않습니다. 신뢰된 프로젝트 설정이 전역 설정보다 우선하며, 확인하지 못하면 세션 시작 시 설정을 안내합니다.
+저장소 루트에서 실행하는 예시입니다. `PI_SKIP_VERSION_CHECK=1`은 자동 업데이트 조회를 끕니다.
+
+```sh
+export PI_SKIP_VERSION_CHECK=1
+pi -e ./extensions/provider/index.ts -e ./extensions/orchestrator/index.ts -e ./extensions/watcher/index.ts --model claude-code/claude-fable-5-1
+```
+
 `brain.doctorTtlHours`는 `.pi/harness.json`에서 설정하며 기본 12시간입니다.
 `fodh state transition IMPLEMENT|MERGE`는 별도로 최근 12시간 doctor 성공 기록을 요구합니다.
 Pi가 잠금을 보유한 동안 `fodh doctor`는 즉시 오류를 반환합니다.

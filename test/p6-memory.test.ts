@@ -10,7 +10,7 @@ import { readLedger } from '../src/core/ledger.ts';
 import { addInbox, listInbox } from '../src/core/inbox.ts';
 import { readState, updateState } from '../src/core/state.ts';
 import { decideInbox } from '../extensions/orchestrator/index.ts';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 it('P6 memory reset CLI는 표본·다른 워처 필드를 보존하고 이전 critical을 닫아 5분을 다시 센다', async () => {
   const root = await project(), now = Date.now();

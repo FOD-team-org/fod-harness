@@ -170,7 +170,7 @@ it('src import 그래프에는 Pi 패키지 참조가 없다', async () => {
     for (const file of await readdir(path, { withFileTypes: true })) {
       const next = join(path, file.name);
       if (file.isDirectory()) await scan(next);
-      else if (file.name.endsWith('.ts')) expect(await readFile(next, 'utf8')).not.toContain('@mariozechner');
+      else if (file.name.endsWith('.ts')) expect(await readFile(next, 'utf8')).not.toMatch(/@(?:mariozechner|earendil-works)\//u);
     }
   }
   await scan('src');
@@ -210,4 +210,3 @@ it('잠금 소유자의 실제 프로세스 시작 시각이 다르면 PID가 �
   expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: startedAt.toISOString() })).toBe(true);
   expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: new Date(startedAt.getTime() - 10000).toISOString() })).toBe(false);
 });
-

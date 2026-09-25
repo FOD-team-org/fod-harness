@@ -43,7 +43,7 @@ export async function doctor(root: string, options: {
     await updateState(root, current => ({ doctor: { ok: true, checkedAt }, brain: { ...(current.brain as Record<string, unknown> | undefined), model: config.brain.model } }));
     const skills = result.init?.skills ?? [], memory_paths = result.init?.memory_paths ?? [];
     const pluginsLeaked = config.brain.allowPlugins ? [] : [...new Set([
-      ...(result.init?.plugins ?? []).filter(source => source !== 'builtin'),
+      ...(result.init?.plugins ?? []).filter(source => source !== 'builtin' && !source.endsWith('@builtin')),
       ...[...(result.init?.agents ?? []), ...(result.init?.commands ?? []), ...skills].filter(name => name.startsWith('codex:')),
     ])];
     if (pluginsLeaked.length) await notify(root, { key: 'doctor:plugins', level: 'warning', title: '전역 플러그인 로드 확인', body: `발견 항목: ${pluginsLeaked.join(', ')}` });

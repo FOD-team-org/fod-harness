@@ -2,7 +2,7 @@ import { setConfig } from '../src/core/config.ts';
 import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { project as baseProject } from './p5-helpers.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState, transitionState } from '../src/core/state.ts';

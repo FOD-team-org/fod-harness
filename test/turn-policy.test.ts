@@ -246,3 +246,13 @@ it.each(['claude-opus-5-5[1m]', 'claude-opus-5-5'])('P8-c [1m] 목록·요청은
   expect(args[args.indexOf('--model') + 1]).toBe(model);
   expect((await readLedger(root)).some(entry => entry.action === 'brain:model-rejected')).toBe(false);
 });
+
+it.each([false, true])('A16 F33 @builtin은 제외하고 사용자 플러그인 혼재=%s만 경고한다', async user => {
+  const root = await project(); await setConfig(root, 'notify.channels', '["ledger"]');
+  const sources = ['agents-md@builtin', 'telemetry@builtin', ...(user ? ['foo@user'] : [])];
+  emulate([{ ...init, plugins: sources.map(source => ({ name: source.split('@')[0], source })) }, doctorMarkers]);
+  expect((await doctor(root, { env: environment(root) })).pluginsLeaked).toEqual(user ? ['foo@user'] : []);
+  const notices = (await readLedger(root)).filter(entry => entry.action === 'notify:doctor:plugins');
+  expect(notices).toHaveLength(user ? 1 : 0);
+  if (user) expect(notices[0].evidence).toMatchObject({ body: '발견 항목: foo@user' });
+});

@@ -110,6 +110,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'state' && action === 'await-user') { exact(0); await assertNotBrain(root, '사용자 대기 표시'); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
       exact(1);
+      if (rest[0] === 'RECLAIM') throw new Error('RECLAIM 은 fodh judgment add --blocks <task> --reclaim 또는 fodh reclaim --task <task> --judgment <A번호> 로만 들어간다');
       const from = (await readState(root)).state, transition = `${from}→${rest[0]}`;
       if (userOnlyTransitions.has(transition) || values.system) {
         try { await assertNotBrain(root, `${transition} 전이${values.system ? ' --system' : ''}`); }

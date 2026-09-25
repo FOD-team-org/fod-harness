@@ -5,7 +5,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import type { Model, AssistantMessageEvent } from '@mariozechner/pi-ai';
+import type { Model, AssistantMessageEvent } from '@earendil-works/pi-ai';
 import { streamClaude } from '../extensions/provider/stream.ts';
 import { runTurn, buildPrompt, latestMessage, packageRoot } from '../src/provider/turn.ts';
 import { groupAlive, commandParts, childEnv } from '../extensions/provider/runner.ts';

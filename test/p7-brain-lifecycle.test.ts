@@ -1,14 +1,14 @@
 import { createRequire } from 'node:module';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import provider from '../extensions/provider/index.ts';
 import { afterAll, afterEach, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { project, cli } from './p5-helpers.ts';
 import { liveHarness } from './p7-brain-helpers.ts';
 import orchestrator from '../extensions/orchestrator/index.ts';
@@ -240,7 +240,7 @@ it('P8 Pi 멈춤 모사 SIGINT 무시 뒤 SIGTERM은 두뇌를 회수한다', as
 function signalExitV3Module(): { path: string; source: string } {
   try {
     // Resolve the installed package link without Pi execution, package export restrictions or Vite import.meta.resolve.
-    const piRequire = createRequire(realpathSync(resolve('node_modules/@mariozechner/pi-coding-agent/package.json')));
+    const piRequire = createRequire(realpathSync(resolve('node_modules/@earendil-works/pi-coding-agent/package.json')));
     const lockRequire = createRequire(piRequire.resolve('proper-lockfile'));
     const version = lockRequire('signal-exit/package.json').version;
     if (version !== '3.0.7') throw new Error(`signal-exit version ${version}, expected 3.0.7`);
@@ -287,17 +287,47 @@ it('P8-c signal-exit v3·v4가 공존하면 count 합으로 SIGINT를 회수한�
   const root = await project();
   const { child, pgid, closed } = await signalStub(root, `
     process.__signal_exit_emitter__ = { count: 1 };
-    process[Symbol.for('signal-exit emitter')] = { count: 1 };
+    globalThis[Symbol.for('signal-exit emitter')] = { count: 1 };
     const v3 = () => {};
     const v4 = () => {
-      const count = process.__signal_exit_emitter__.count + process[Symbol.for('signal-exit emitter')].count;
+      const count = process.__signal_exit_emitter__.count + globalThis[Symbol.for('signal-exit emitter')].count;
       if (process.listenerCount('SIGINT') !== count) return;
       process.off('SIGINT', v3); process.off('SIGINT', v4);
       process.__signal_exit_emitter__.count = 0;
-      process[Symbol.for('signal-exit emitter')].count = 0;
+      globalThis[Symbol.for('signal-exit emitter')].count = 0;
       process.kill(process.pid, 'SIGINT');
     };
     process.on('SIGINT', v3); process.on('SIGINT', v4);
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
+  `);
+  child.kill('SIGINT'); await closed;
+  expect(child.signalCode).toBe('SIGINT'); await waitForGroupDeath(pgid!);
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8'))).toMatchObject({ pgid, signal: 'SIGINT' });
+});
+
+function signalExitV4Module(): { path: string; source: string } {
+  try {
+    const npmRequire = createRequire(resolve(process.execPath, '../../lib/node_modules/npm/package.json'));
+    const path = npmRequire.resolve('signal-exit');
+    const version = JSON.parse(readFileSync(resolve(dirname(path), '../../package.json'), 'utf8')).version;
+    if (!version.startsWith('4.')) throw new Error(`signal-exit version ${version}, expected 4.x`);
+    return { path, source: `npm dependency: signal-exit ${version}` };
+  } catch (error) {
+    console.warn(`A16 real signal-exit v4 unavailable: ${String(error)}; using v4 contract fixture (no test skipped)`);
+    return { path: resolve('test/fixtures/signal-exit-v4.cjs'), source: 'signal-exit v4 contract fixture' };
+  }
+}
+it.each([false, true])('A16 signal-exit v4 실제 전역 위치와 SIGINT 종료(v3 공존=%s)', async withV3 => {
+  const root = await project(), v4 = signalExitV4Module(), v3 = withV3 ? signalExitV3Module() : undefined;
+  console.log(`A16 SIGINT: ${v4.source}${v3 ? ` + ${v3.source}` : ''}`);
+  const { child, pgid, closed } = await signalStub(root, `
+    import { createRequire } from 'node:module';
+    const require = createRequire(${JSON.stringify(v4.path)});
+    ${v3 ? `require(${JSON.stringify(v3.path)})(() => {});` : ''}
+    require(${JSON.stringify(v4.path)}).onExit(() => {});
+    if (globalThis[Symbol.for('signal-exit emitter')]?.count !== 1) throw new Error('v4 global emitter missing');
+    if (process.listenerCount('SIGINT') !== ${withV3 ? 2 : 1}) throw new Error('unexpected listener count');
     const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
     brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
   `);

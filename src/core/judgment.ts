@@ -235,9 +235,12 @@ export async function attachJudgmentTask(root: string, id: string, taskId: strin
     const original = await readText(path);
     let text = await reconcileEdits(root, path, original || initial);
     const item = requireItem(text, id);
-    if (item.answer.trim()) throw new Error('답이 있는 판단에는 task를 붙일 수 없습니다');
     const blocked = /^blocked\((A\d+(?:-\d+)?)\)$/u.exec(task.status);
     if (blocked && blocked[1] !== id) throw new Error(`task ${taskId} 는 이미 ${blocked[1]} 에 묶여 있습니다`);
+    if (blocked?.[1] === id && item.blocks.split(/[,\s]+/u).includes(taskId)) {
+      return { item, expectedHash: await save(root, path, text, original) };
+    }
+    if (item.answer.trim()) throw new Error('답이 있는 판단에는 task를 붙일 수 없습니다');
     if (!item.blocks.split(/[,\s]+/u).includes(taskId)) {
       const blocks = [item.blocks === '-' ? '' : item.blocks, taskId].filter(Boolean).join(', ');
       const line = /^- 막힌 작업:[^\r\n]*$/mu;

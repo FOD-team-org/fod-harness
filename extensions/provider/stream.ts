@@ -1,6 +1,6 @@
 import {
   createAssistantMessageEventStream, type AssistantMessage, type Context, type Model, type SimpleStreamOptions,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 import { loadConfig } from '../../src/core/config.ts';
 import { runTurn, latestMessage, type TurnOptions } from '../../src/provider/turn.ts';
 

@@ -7,7 +7,7 @@ import { startInterview, validateInterviewStart } from '../../src/core/interview
 import { installSkills } from '../../src/core/skills.ts';
 import { generateClaudeMd } from '../../src/core/claude-md.ts';
 import { readMeta } from '../../src/core/codex-record.ts';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/core/config.ts';
@@ -205,6 +205,8 @@ export default function orchestrator(pi: ExtensionAPI): void {
     },
   });
   pi.on('agent_end', async (event, ctx) => {
+    const context = resumeContext(ctx);
+    const holdAtStart = await readState(ctx.cwd);
     try {
       const last = [...event.messages].reverse().find(message => message.role === 'assistant');
       if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
@@ -257,12 +259,26 @@ export default function orchestrator(pi: ExtensionAPI): void {
           && !(!candidates.length && (decision.outcome === 'DONE_ALL' || decision.outcome.startsWith('WAIT_')))) {
           await updateState(ctx.cwd, { awaitingUser: false });
           await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'pick:user-wait-rejected', status: 'skip', evidence: { taskIds: candidates } });
-          await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 결과(${decision.outcome})를 확정하라${candidates.length ? `: ${candidates.join(', ')}` : ''}]`);
+          await autoResume(pi, ctx.cwd, context, 'agent_end', `[PICK 에서는 사용자를 기다리지 않는다. fodh pick 을 실행해 결과(${decision.outcome})를 확정하라${candidates.length ? `: ${candidates.join(', ')}` : ''}]`);
           return;
         }
       }
       if (awaitingUser) {
         const state = await readState(ctx.cwd);
+        if (!state.userHold && state.state === 'RECLAIM' && state.taskId) {
+          const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
+          const open = (await readJudgment(ctx.cwd)).items;
+          const pending = state.pendingReclaim as { taskId?: string; judgmentId?: string } | undefined;
+          const judgment = (pending?.taskId === state.taskId ? pending.judgmentId : undefined)
+            ?? open.find(item => item.blocks.split(/[\s,]+/u).includes(state.taskId!) || task?.status === `blocked(${item.id})`)?.id;
+          await updateState(ctx.cwd, { awaitingUser: false });
+          await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-rejected', status: 'skip',
+            evidence: { state: 'RECLAIM', taskId: state.taskId, judgment: judgment ?? null } });
+          await autoResume(pi, ctx.cwd, context, 'agent_end', judgment
+            ? `[RECLAIM 에서는 기다리지 않는다. fodh reclaim --task ${state.taskId} --judgment ${judgment} 를 실행하라]`
+            : `[RECLAIM 에서는 기다리지 않는다. fodh judgment add --blocks ${state.taskId} --reclaim 으로 판단을 등록하라]`);
+          return;
+        }
         if (!state.userHold && state.taskId && ['SPEC', 'IMPLEMENT', 'VERIFY', 'FIX', 'REVIEW', 'MERGE', 'DOCS', 'CLEANUP'].includes(state.state)) {
           const task = (await listBacklog(ctx.cwd)).find(task => task.id === state.taskId);
           const blocking = (await readJudgment(ctx.cwd)).items.some(item => !item.followup
@@ -270,7 +286,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
           if (!blocking) {
             await updateState(ctx.cwd, { awaitingUser: false });
             await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-rejected', status: 'skip', evidence: { state: state.state, taskId: state.taskId } });
-            await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end', '[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add --title … --blocks <taskId> --reclaim 으로 등록하고(RECLAIM→PICK 으로 간다), 아니면 계속 진행하라]');
+            await autoResume(pi, ctx.cwd, context, 'agent_end', '[task 진행 중에는 사용자를 기다리지 않는다. 사용자 결정이 필요하면 fodh judgment add --title … --blocks <taskId> --reclaim 으로 등록하고(RECLAIM→PICK 으로 간다), 아니면 계속 진행하라]');
             return;
           }
         }
@@ -279,9 +295,15 @@ export default function orchestrator(pi: ExtensionAPI): void {
         await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
       }
       if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
-      await autoResume(pi, ctx.cwd, resumeContext(ctx), 'agent_end');
+      await autoResume(pi, ctx.cwd, context, 'agent_end');
     } finally {
-      if ((await readState(ctx.cwd)).userHold) await updateState(ctx.cwd, { userHold: false, userHoldSource: undefined });
+      if (holdAtStart.userHold) {
+        const current = await readState(ctx.cwd);
+        if (current.userHold === holdAtStart.userHold && current.userHoldSource === holdAtStart.userHoldSource) {
+          await updateState(ctx.cwd, latest => latest.userHold === holdAtStart.userHold
+            && latest.userHoldSource === holdAtStart.userHoldSource ? { userHold: false, userHoldSource: undefined } : {});
+        }
+      }
     }
   });
 }

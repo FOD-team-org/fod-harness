@@ -27,12 +27,12 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-ai": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@mariozechner/pi-coding-agent",
-    "@mariozechner/pi-ai": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai",
+    "@earendil-works/pi-coding-agent": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-ai": "file:/Users/minseok/.nvm/versions/node/v24.13.1/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
     "@types/node": "24.12.3",
     "typescript": "5.9.3",
     "vitest": "3.2.4"

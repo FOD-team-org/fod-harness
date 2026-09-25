@@ -2,10 +2,11 @@ import * as judgmentModule from '../src/core/judgment.ts';
 import { todayKst } from '../src/core/template-values.ts';
 import * as cleanupModule from '../src/core/cleanup.ts';
 import * as notifyModule from '../src/core/notify.ts';
+import * as configModule from '../src/core/config.ts';
 import { runPick } from '../src/core/pick.ts';
 import * as pickModule from '../src/core/pick.ts';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { mkdtemp, readFile, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,7 +29,7 @@ async function setup() {
   const sendMessage = vi.fn();
   orchestrator({ registerCommand: (name: string, command: any) => commands.set(name, command),
     on: (name: string, handler: any) => handlers.set(name, handler), sendMessage } as unknown as ExtensionAPI);
-  const ctx = { cwd: root, hasUI: true, isIdle: vi.fn(() => true), ui: { notify: vi.fn() } };
+  const ctx = { cwd: root, hasUI: true, isIdle: vi.fn(() => true), hasPendingMessages: vi.fn(() => false), signal: undefined as AbortSignal | undefined, ui: { notify: vi.fn() } };
   await handlers.get('session_start')!({}, ctx);
   return { root, commands, handlers, ctx, sendMessage,
     decide: async (kinds: string[]) => decideInbox({ sendMessage } as unknown as ExtensionAPI, ctx as any, root,
@@ -390,15 +391,15 @@ it('P2: /status는 아직 tick하지 않은 워처도 안정된 요약 필드를
   expect(JSON.parse(t.ctx.ui.notify.mock.calls.at(-1)![0]).watcher).toEqual({ lastTickAt: null,
     judgment: { observedHash: null, stableFor: 0, expectedHash: null }, childTimeouts: 0 });
 });
-it('M1/L8: 서로 다른 resume 모듈에서도 전송 직전 idle 확인으로 1회·autoTurns +1', async () => {
+it.each([['stalled', 'agent_end'], ['agent_end', 'stalled']])('M1/L8: %s 먼저 → %s busy, 모듈이 달라도 전송 1회·autoTurns +1', async (leading, following) => {
   const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
   const first = await import('../extensions/orchestrator/resume.ts');
   vi.resetModules(); const second = await import('../extensions/orchestrator/resume.ts');
   expect(first.autoResume).not.toBe(second.autoResume);
   t.sendMessage.mockImplementation(() => { t.ctx.isIdle.mockReturnValue(false); });
   const pi = { sendMessage: t.sendMessage } as unknown as ExtensionAPI;
-  const ctx = { cwd: t.root, hasUI: true, isIdle: t.ctx.isIdle, notify: t.ctx.ui.notify };
-  const results = await Promise.all([first.autoResume(pi, t.root, ctx, 'agent_end'), second.autoResume(pi, t.root, ctx, 'stalled')]);
+  const ctx = first.resumeContext(t.ctx as any); // Both invocations belong to the original idle run.
+  const results = [await first.autoResume(pi, t.root, ctx, leading), await second.autoResume(pi, t.root, ctx, following)];
   expect(t.sendMessage).toHaveBeenCalledTimes(1); expect((await readState(t.root)).autoTurns).toBe(1);
   expect(results).toContainEqual({ resumed: true }); expect(results).toContainEqual({ skipped: 'busy' });
 });
@@ -968,4 +969,91 @@ it.each(['recover', 'stalled'])('P8 %s 안내는 상태와 답 존재에 맞는 
     expect(message.includes('/judged <번호>')).toBe(answered);
     expect(t.sendMessage).not.toHaveBeenCalled();
   }
+});
+
+it.each([false, true])('A16 agent_end는 idle=%s에서도 followUp 재개 1회', async idle => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  t.ctx.isIdle.mockReturnValue(idle);
+  await t.end();
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect(t.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: 'harness-orchestrator' }), { triggerTurn: true, deliverAs: 'followUp' });
+  expect((await readState(t.root)).autoTurns).toBe(1);
+});
+it('A16 agent_end의 큐 입력은 pending-input 원장, 자동 재개 없음', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  t.ctx.isIdle.mockReturnValue(false); t.ctx.hasPendingMessages.mockReturnValue(true);
+  await t.end();
+  expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).autoTurns).toBe(0);
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'orchestrator:resume', status: 'skip', evidence: { reason: 'agent_end', skipped: 'pending-input' } }));
+});
+it.each([1, 2, 3])('A16 agent_end 큐 입력 검사 %s번째에서 멈춰도 카운터를 보존한다', async check => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  const { autoResume, resumeContext } = await import('../extensions/orchestrator/resume.ts');
+  let n = 0; t.ctx.hasPendingMessages.mockImplementation(() => ++n >= check);
+  t.ctx.isIdle.mockReturnValue(false);
+  expect(await autoResume({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.root, resumeContext(t.ctx as any), 'agent_end')).toEqual({ skipped: 'pending-input' });
+  expect(t.sendMessage).not.toHaveBeenCalled(); expect((await readState(t.root)).autoTurns).toBe(0);
+});
+it.each(['stalled', 'judgment-changed', 'codex-done', 'slot-free', 'recover'])('A16 워처 %s는 active run을 여전히 busy로 거부한다', async reason => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  const { autoResume, resumeContext } = await import('../extensions/orchestrator/resume.ts');
+  t.ctx.isIdle.mockReturnValue(false);
+  expect(await autoResume({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.root, resumeContext(t.ctx as any), reason)).toEqual({ skipped: 'busy' });
+  expect(t.sendMessage).not.toHaveBeenCalled();
+});
+
+it.each([1, 2, 3])('A16 보정 1: agent_end의 %s번째 검사에서 Esc면 전송·카운터 증가 없이 userAborted', async check => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  const controller = new AbortController(); let reads = 0;
+  if (check === 1) controller.abort();
+  t.ctx.isIdle.mockReturnValue(false);
+  Object.defineProperty(t.ctx, 'signal', { get: () => {
+    if (++reads === check) controller.abort();
+    return controller.signal;
+  } });
+  await t.end();
+  expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(await readState(t.root)).toMatchObject({ autoTurns: 0, userAborted: true });
+});
+it('A16 보정 1: agent_end 처리 중 새 /hold는 finally 뒤에도 보존한다', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  const original = configModule.getConfig;
+  vi.spyOn(configModule, 'getConfig').mockImplementationOnce(async (...args) => {
+    await t.command('hold'); return original(...args);
+  });
+  await t.end();
+  expect(await readState(t.root)).toMatchObject({ userHold: true, userHoldSource: 'command' });
+});
+it.each(['none', 'open', 'pending'])('F34 RECLAIM %s 판단은 사용자 대기를 거부하고 정식 회수를 안내한다', async mode => {
+  const t = await setup(), task = await addTask(t.root, { title: '회수 대상', category: 'docs' });
+  const first = mode === 'none' ? undefined : (await addJudgment(t.root, { title: '판단', background: '', options: ['진행'], recommend: '1', blocks: task.id })).item;
+  const retry = mode === 'pending' ? (await addJudgment(t.root, { title: '회수 재시도', background: '', options: ['진행'], recommend: '1', blocks: task.id })).item : undefined;
+  const judgment = retry?.id ?? first?.id;
+  await updateState(t.root, { state: 'RECLAIM', taskId: task.id, ...(retry ? { pendingReclaim: { taskId: task.id, judgmentId: retry.id } } : {}) });
+  t.ctx.isIdle.mockReturnValue(false);
+  await t.end('stop', '대기: 사용자');
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect(t.sendMessage.mock.calls[0][0].content).toContain(judgment
+    ? `[RECLAIM 에서는 기다리지 않는다. fodh reclaim --task ${task.id} --judgment ${judgment} 를 실행하라]`
+    : `[RECLAIM 에서는 기다리지 않는다. fodh judgment add --blocks ${task.id} --reclaim 으로 판단을 등록하라]`);
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: false, autoTurns: 1 });
+  expect(await readLedger(t.root)).toContainEqual(expect.objectContaining({ action: 'turn:user-wait-rejected', evidence: { state: 'RECLAIM', taskId: task.id, judgment: judgment ?? null } }));
+});
+it('F34 RECLAIM 대기 반복은 3회 재개 뒤 기존 정체 안전망으로 멈춘다', async () => {
+  const t = await setup(), task = await addTask(t.root, { title: '회수 대상', category: 'docs' });
+  await updateState(t.root, { state: 'RECLAIM', taskId: task.id });
+  t.ctx.isIdle.mockReturnValue(false);
+  for (let n = 0; n < 4; n++) await t.end('stop', '대기: 사용자');
+  expect(t.sendMessage).toHaveBeenCalledTimes(3);
+  expect((await readState(t.root)).state).toBe('WAIT_JUDGMENT');
+  expect((await readJudgment(t.root)).items).toContainEqual(expect.objectContaining({ title: `진행 정체: RECLAIM/${task.id}` }));
+});
+it.each(['command', 'input'])('F34 RECLAIM에서도 M2 명시적 %s 멈춤은 먼저 수락한다', async source => {
+  const t = await setup(), task = await addTask(t.root, { title: '회수 대상', category: 'docs' });
+  await updateState(t.root, { state: 'RECLAIM', taskId: task.id });
+  if (source === 'command') await t.command('hold');
+  else await t.handlers.get('input')!({ source: 'interactive', text: '잠깐 멈춰' }, t.ctx);
+  await t.end('stop', '대기: 사용자');
+  expect(t.sendMessage).not.toHaveBeenCalled();
+  expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userHold: false });
 });

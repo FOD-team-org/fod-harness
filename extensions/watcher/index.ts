@@ -1,5 +1,5 @@
 import { runCleanup } from '../../src/core/cleanup.ts';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { watch, type FSWatcher } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -9,8 +9,9 @@ import { appendLedger } from '../../src/core/ledger.ts';
 import { detectRecovery, tick, memoryTick, pendingDecisions, recordDecision } from '../../src/core/watcher.ts';
 import { redact } from '../../src/provider/privacy.ts';
 import { decideInbox, clearDecisionTimers } from '../orchestrator/index.ts';
+import { waitForShutdown } from '../../src/core/shutdown-wait.ts';
 
-export default function watcher(pi: ExtensionAPI): void {
+export default function watcher(pi: ExtensionAPI, options: { shutdownWaitMs?: number } = {}): void {
   let root: string, ctx: ExtensionContext;
   let sessionStartedAt: string;
   let timers: ReturnType<typeof setInterval>[] = [], periods = '';
@@ -20,6 +21,7 @@ export default function watcher(pi: ExtensionAPI): void {
   let pending: Promise<void> | undefined, memoryPending: Promise<void> | undefined;
   let sessionId: string | undefined;
   let stopped = true, pendingFull = false, lastWarning = -Infinity;
+  let generation = 0;
   const fail = async (action: 'tick' | 'fs-watch', error: unknown) => {
     const message = redact(error instanceof Error ? error.message : '워처 실행 실패');
     try { await appendLedger(root, { runId: sessionStartedAt, action: `watcher:${action}`, status: 'fail', evidence: { message } }); }
@@ -85,39 +87,47 @@ export default function watcher(pi: ExtensionAPI): void {
       setInterval(() => { void run(true); }, pollSeconds * 1000),
       setInterval(() => {
         if (stopped || memoryPending) return;
-        memoryPending = memoryTick(root).then(() => undefined)
-          .catch(error => fail('tick', error)).finally(() => { memoryPending = undefined; });
-        void memoryPending.then(() => { if (!stopped) return run(); });
+        const started = generation;
+        const completion = memoryTick(root).then(() => undefined)
+          .catch(error => { if (started === generation) return fail('tick', error); })
+          .finally(() => { if (memoryPending === completion) memoryPending = undefined; });
+        memoryPending = completion;
+        void completion.then(() => { if (!stopped && started === generation) return run(); });
       }, 60000)];
     for (const timer of timers) timer.unref();
   };
   const run = (judgmentOnly = false): Promise<void> => {
     if (stopped) return Promise.resolve();
     if (pending) { if (!judgmentOnly) pendingFull = true; return pending; }
-    pending = (async () => {
+    const started = generation, current = () => !stopped && started === generation;
+    const completion = (async () => {
       do {
         pendingFull = false;
         try {
           const config = await loadConfig(root);
+          if (!current()) return;
           configureTimers(config.watch.pollSeconds, config.watch.tickSeconds);
           await tick(root, { ctx: liveContext(), judgmentOnly });
-          if (!stopped) await decidePending();
-        } catch (error) { await fail('tick', error); }
-        try { if (!stopped) await ensureWatch(); } catch (error) { await fail('tick', error); }
+          if (current()) await decidePending();
+        } catch (error) { if (current()) await fail('tick', error); }
+        try { if (current()) await ensureWatch(); } catch (error) { if (current()) await fail('tick', error); }
         judgmentOnly = false;
-      } while (!stopped && pendingFull);
-    })().finally(() => { pending = undefined; });
+      } while (current() && pendingFull);
+    })().finally(() => { if (pending === completion) pending = undefined; });
+    pending = completion;
     return pending;
   };
   const shutdown = async () => {
-    stopped = true; pendingFull = false;
+    stopped = true; pendingFull = false; generation++;
     for (const timer of timers) clearInterval(timer);
     timers = []; periods = '';
     if (debounce) clearTimeout(debounce);
     debounce = undefined;
     if (root) clearDecisionTimers(root);
     watcher?.close(); watcher = undefined; watchedDirectory = undefined;
-    await pending; await memoryPending;
+    try { await waitForShutdown(root, 'watcher', [pending, memoryPending], options.shutdownWaitMs); }
+    catch (error) { await fail('tick', error); }
+    pending = undefined; memoryPending = undefined;
     // A decision already in flight may have scheduled a deferred answer after shutdown began.
     if (root) clearDecisionTimers(root);
   };

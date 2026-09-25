@@ -21,7 +21,7 @@ export function installShutdownReclaim(getGroup: () => number | undefined, getRo
     for (const [signal, handler] of handlers) process.off(signal, handler);
     installed.delete(handlers);
   };
-  // Pi registerSignalHandlers prepends listeners after extension load and may exit synchronously.
+  // Pi prepends after extension load: 0.73.1 SIGHUP exits synchronously, 0.77+ shuts down normally; reclaim first in both.
   // session_start reinstalls us first; the turn guard repairs later Pi registration as well.
   // signal-exit v3/v4 listeners are cleanup/re-signal plumbing, not Pi's temporary SIGINT ignore handler.
   for (const signal of ['SIGHUP', 'SIGTERM', 'SIGINT'] as const) {
@@ -29,9 +29,10 @@ export function installShutdownReclaim(getGroup: () => number | undefined, getRo
       if (signal === 'SIGINT') {
         const signalExitKey = Symbol.for('signal-exit emitter');
         const signalProcess = process as typeof process & {
-          __signal_exit_emitter__?: { count: number }; [signalExitKey]?: { count: number };
+          __signal_exit_emitter__?: { count: number };
         };
-        const signalExitCount = (signalProcess.__signal_exit_emitter__?.count ?? 0) + (signalProcess[signalExitKey]?.count ?? 0);
+        const signalExitCount = (signalProcess.__signal_exit_emitter__?.count ?? 0)
+          + ((globalThis as Record<symbol, { count?: number } | undefined>)[signalExitKey]?.count ?? 0);
         const otherCount = process.listeners(signal).filter(listener => !(listener as ReclaimHandler)[shutdownReclaimMarker]).length;
         if (otherCount - signalExitCount > 0) return;
       }

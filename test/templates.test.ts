@@ -168,3 +168,12 @@ it('F27·F28 흐름표에 정식 위임과 판단 등록 경로를 명시한다'
 it('N4 brain-rules는 task 판단을 reclaim 경로로 안내한다', async () => {
   expect(await readFile('templates/brain-rules.md', 'utf8')).toContain('단 task 상태(SPEC~CLEANUP)에서는 쓰지 않고 `fodh judgment add … --blocks <taskId> --reclaim` 으로 등록한다');
 });
+
+it('F34 RECLAIM 템플릿은 판단 유무·재시도에 맞는 정식 입구만 안내한다', async () => {
+  const text = await readFile('templates/prompts/RECLAIM.md', 'utf8');
+  expect(text).toContain('pendingReclaim이 있으면 같은 판단 번호');
+  expect(text).toContain('`fodh reclaim --task {{taskId}} --judgment <A번호>`');
+  expect(text).toContain('--blocks {{taskId}} --reclaim` 한 번으로 등록·회수');
+  expect(text).toContain('`state transition RECLAIM` 은 쓰지 않는다');
+  expect(text).toContain('RECLAIM 에서는 기다리지 않는다');
+});
