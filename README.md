@@ -21,8 +21,22 @@ Pi가 잠금을 보유한 동안 `fodh doctor`는 즉시 오류를 반환합니�
 
 ## 모델 배치와 교체
 
-기본 두뇌는 Claude Code **fable**(`claude-fable-5-1`)입니다. `brain.allowPlugins=false`(기본값)이면 `--setting-sources project,local`로 사용자 전역 설정(플러그인·enabledPlugins 포함)을 제외하고 `--strict-mcp-config` + 빈 `--mcp-config`로 MCP를 제한한다. 하네스 스킬·훅은 프로젝트 `.claude/settings.json`과 `--settings`로 들어온다. 사용자 전역 스킬(`~/.claude/skills`)도 함께 제외된다. true이면 위 세 옵션을 생략하며 위임 훅은 유지된다. doctor는 비builtin plugin source 또는 codex: 접두 agent·command·skill이 남으면 `pluginsLeaked`와 경고를 반환한다.
-프로바이더 모델 목록은 `fable`, `opus`, `sonnet`, `haiku` 순서이며 doctor는 항상 `haiku`를 사용합니다.
+두뇌는 `brain.allowedModels` 허용 목록 안에서만 고릅니다. 기본 목록은 Opus 5.5(`claude-opus-5-5`)·Fable 5.1(`claude-fable-5-1`)이고, 기본 두뇌는 **Fable 5.1**입니다. `brain.allowPlugins=false`(기본값)이면 `--setting-sources project,local`로 사용자 전역 설정(플러그인·enabledPlugins 포함)을 제외하고 `--strict-mcp-config` + 빈 `--mcp-config`로 MCP를 제한한다. 하네스 스킬·훅은 프로젝트 `.claude/settings.json`과 `--settings`로 들어온다. 사용자 전역 스킬(`~/.claude/skills`)도 함께 제외된다. true이면 위 세 옵션을 생략하며 위임 훅은 유지된다. doctor는 비builtin plugin source 또는 codex: 접두 agent·command·skill이 남으면 `pluginsLeaked`와 경고를 반환한다.
+doctor 는 훅 시험용 haiku 로 돌며 두뇌 규칙과 무관합니다. 결과에 `brainModel`과 `allowedModels`를 함께 표시합니다.
+
+새 모델이 나오면 사용자 터미널에서 추가 → 전환 → (선택) 제거 순서로 바꿉니다.
+
+```sh
+fodh config set brain.allowedModels '["claude-opus-5-5","claude-fable-5-1","claude-opus-6"]' --approve
+fodh config set brain.model claude-opus-6
+# 선택: 이전 모델 제거
+fodh config set brain.allowedModels '["claude-opus-6","claude-fable-5-1"]' --approve
+```
+
+이후 Pi 를 다시 시작합니다. Pi `/model` 목록은 시작할 때 만들어집니다.
+Pi 가 저장한 예전 기본 모델(`claude-code/fable` 등)이 목록에 없으면 Pi `/model` 에서 `claude-code/claude-fable-5-1` 을 한 번 고른다.
+
+토이·시험에서 haiku 를 쓰려면 허용 목록에 `"haiku"`를 넣습니다. `fable`·`opus` 별칭은 해당 전체 ID가 허용 목록에 있을 때 읽기 결과에서 해석하며 설정 파일은 다시 쓰지 않습니다.
 
 두뇌 모델은 다음 세 가지 방법으로 바꿀 수 있습니다.
 
@@ -95,7 +109,7 @@ P5 인터뷰·문서·스킬:
 
 `/project-start`는 은행·판단대기 사전 검증 실패 시 error와 실패 원장을 남기고 IDLE을 유지한다. 검증 후 인터뷰를 시작하며, 두 시작 명령은 스킬 설치·CLAUDE.md 생성을 수행한다(이 준비 실패는 warning). doctor의 `skillsMissing`·`claudeMdLoaded`는 훅 성공 여부와 별도로 알린다. 프로젝트 스킬 로드는 [Fable 1차 실기](docs/검수/2026-09-24-P5-Fable-실기.md)에서 관측됐다. 2차 doctor 표식 프로토콜은 별도 실기 확인이 필요하다.
 
-P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. P6부터 두뇌의 config set은 `delegate.*`·`verify.*`를 포함한 모든 키를 거부하고 판단대기로 안내한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI는 아래 승인 전용 네 키에 `--approve`가 필요하다.
+P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. P6부터 두뇌의 config set은 `delegate.*`·`verify.*`를 포함한 모든 키를 거부하고 판단대기로 안내한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI는 아래 승인 전용 키에 `--approve`가 필요하다.
 
 doctor는 memory_paths를 CLAUDE.md 목록으로 해석하지 않는다. 배열·객체 원형은 원장에 안전하게 보존하고, 결과는 문자열 배열로 정규화한다. 관리 블록의 `FODH-DOC-<해시8자>`에 대해 두뇌가 `문서 확인 <표식>`으로 답하면 claudeMdLoaded=true, 다른 해시면 claudeMdStale=true다. 기대값은 claudeMdMarker로 반환하며, 스킬 누락·문서 확인 실패·낡은 표식은 경고만 낸다. 다른 해시도 문서 로드는 true이며 낡음(재생성 필요)으로 구분한다. 해시는 실제 표시하는 설정으로만 계산하고, develop-start에서 문서가 바뀌면 “커밋 필요”를 알린다.
 
@@ -120,7 +134,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 | 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
 | 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 존재하는 비디렉터리라고 확인될 때만 비재귀로 본다. 조회 실패(ENOENT·EACCES)나 같은 체인의 cd는 재귀로 간주한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
 
-`fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
+`fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`, `brain.allowedModels`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
 
 `fodh memory reset`은 사용자 터미널 전용이다. 두뇌 env·부모 체인 판정과 훅에서 거부하며 두뇌용 CLAUDE.md 명령 목록에서도 제외한다. 이 명령은 메모리 경보·5분 타이머와 이전 미처리 pressure/critical 이벤트를 해제하고 `memory:reset` 원장을 남긴다. paused(memory) 또는 WAIT_RESOURCE(lastPaused=memory)이면 memory-recovered 인박스를 통해 기존 PICK 회복 경로를 탄다. 실제 스왑을 줄이는 명령은 아니며 초과 표본이 계속되면 다시 5분 뒤 중단된다.
 
@@ -152,7 +166,7 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 100개 이상 삭제 | 훅은 삭제 개수를 세지 않는다. 대량 삭제 판정은 사후 검수 몫이며 자동 100개 임계 감사는 구현하지 않는다 |
 | 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다 |
 | 부모 프로세스 확인 | 살아 있는 Pi 잠금 중 ps 조회가 막히면 사용자 CLI의 설정 변경·memory reset도 거부될 수 있다. 이중 fork로 부모 체인에서 벗어난 자식은 이 판정만으로 막지 못한다. 실제 부모 체인 실기는 별도 확인이 필요하다 |
-| Pi 종료와 고아 두뇌 | Pi가 SIGHUP·SIGTERM으로 죽으면 두뇌 그룹을 동기 TERM→KILL로 회수하고 orphan 파일을 다음 session_start 원장으로 옮긴다. SIGINT는 Pi 기존 처리에 맡긴다. SIGKILL로 죽은 Pi의 두뇌는 다음 session_start가 회수하며, 그 사이 FODH_BRAIN=1인 두뇌의 fodh 쓰기는 잠금 소유자 부재·사망·읽기 실패로 코드 2 거부된다. 읽기 조회는 허용한다. 다음 세션 전까지 프로세스 자체가 남는 지연은 있다 |
+| Pi 종료와 고아 두뇌 | Pi가 SIGHUP·SIGTERM으로 죽으면 두뇌 그룹을 동기 TERM→KILL로 회수하고 orphan 파일을 다음 session_start 원장으로 옮긴다. SIGINT 도 같은 방식으로 회수한다(Pi 가 Ctrl+Z 로 멈춘 동안은 제외). session_start에서 처리기를 재설치하고 두뇌 턴 직전에 순서를 자가 교정해 Pi의 즉시 종료 처리기보다 먼저 회수한다. SIGKILL로 죽은 Pi의 두뇌는 다음 session_start가 회수하며, 그 사이 FODH_BRAIN=1인 두뇌의 fodh 쓰기는 잠금 소유자 부재·사망·읽기 실패로 코드 2 거부된다. 읽기 조회는 허용한다. 다음 세션 전까지 프로세스 자체가 남는 지연은 있다 |
 | 위임 감독 신호 | 취소 표지 없는 `kill <감독 pid>`(SIGTERM)는 무시된다 — `fodh codex cancel <runId>`를 쓴다. SIGKILL은 막을 수 없다. 감독은 CLI→런처→감독의 2단 분리로 시작한다 |
 | Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다 |
 

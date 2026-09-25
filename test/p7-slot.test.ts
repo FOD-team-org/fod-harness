@@ -1,3 +1,4 @@
+import { setConfig } from '../src/core/config.ts';
 import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -24,6 +25,7 @@ async function project(stage = 'INTERVIEW') {
 }
 it.each([false, true])('F16 턴 종료 슬롯 대기: 활성 위임=%s', async delegated => {
   const root = await project('IMPLEMENT');
+  await setConfig(root, 'brain.allowedModels', JSON.stringify(['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet']));
   await updateState(root, { taskId: 'T01', awaitingSlot: waiting, awaitingUser: true,
     ...(delegated ? { delegation: { runId: 'real', kind: 'task', taskId: 'T01', startedAt: 'now' } } : {}) });
   await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');

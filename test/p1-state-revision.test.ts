@@ -96,7 +96,7 @@ it.each([24, 0.5])('L3: doctor TTL %s시간은 CLI와 core가 동일하게 적�
   if (ttl === 24) expect(result.value.state).toBe('IMPLEMENT');
   else { expect(result.value.error).toContain('doctor'); await expect(transitionState(root, 'IMPLEMENT', task.id)).rejects.toThrow('doctor'); }
 });
-it('F1/F3: add 검증은 항목 생성 전, 단독 add는 task만 차단하고 제목+task 중복을 제거한다', async () => {
+it('F1/F3: add 검증은 항목 생성 전, 단독 add는 task만 차단하고 중복 제목은 distinct로 구분한다', async () => {
   const { root, task } = await setup(); const other = await addTask(root, { title: '다른 작업', category: 'docs' });
   const args = ['judgment', 'add', '--title', '범위 선택', '--background', '설명', '--options', '1|2', '--recommend', '1'];
   expect((await cli(root, ...args, '--blocks', 'T99', '--reclaim')).code).toBe(1);
@@ -104,7 +104,11 @@ it('F1/F3: add 검증은 항목 생성 전, 단독 add는 task만 차단하고 �
   expect((await readJudgment(root)).items).toEqual([]);
   const a = await cli(root, ...args, '--blocks', task.id);
   expect((await cli(root, ...args, '--blocks', task.id)).value.item.id).toBe(a.value.item.id);
-  expect((await cli(root, ...args, '--blocks', other.id)).value.item.id).not.toBe(a.value.item.id);
+  const duplicate = await cli(root, ...args, '--blocks', other.id);
+  expect(duplicate).toMatchObject({ code: 1, value: { error: expect.stringContaining('비슷한 열린 판단') } });
+  const distinct = await cli(root, ...args, '--blocks', other.id, '--distinct');
+  expect(distinct.code).toBe(0);
+  expect(distinct.value.item.id).not.toBe(a.value.item.id);
   expect((await readJudgment(root)).items).toHaveLength(2);
   expect((await getTask(root, task.id)).status).toBe(`blocked(${a.value.item.id})`);
   expect((await readState(root)).state).toBe('IMPLEMENT');

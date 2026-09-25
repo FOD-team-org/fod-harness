@@ -215,7 +215,41 @@ function requireItem(text: string, id: string): JudgmentItem {
   return item;
 }
 
-export async function addJudgment(root: string, input: JudgmentInput): Promise<{ item: JudgmentItem; expectedHash: string }> {
+export function similarJudgmentTitle(left: string, right: string): boolean {
+  const tokens = (title: string) => new Set(title.toLowerCase().split(/[^\p{L}\p{N}]+/u)
+    .filter(token => [...token].length > 1 && !/^[ta]\d+$/u.test(token)));
+  const a = tokens(left), b = tokens(right);
+  return a.size >= 2 && b.size >= 2 && [...a].filter(token => b.has(token)).length / Math.min(a.size, b.size) >= 0.6;
+}
+// CLI policy is opt-in; internal safeguards/reasks keep their existing dedupe behavior.
+export function addCliJudgment(root: string, input: JudgmentInput, distinct = false) {
+  return addJudgment(root, input, { distinct });
+}
+export async function attachJudgmentTask(root: string, id: string, taskId: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
+  if (!/^T\d+$/u.test(taskId)) throw new Error('--same-as는 --blocks 단일 task가 필요합니다');
+  const path = await location(root);
+  return retryJudgment(() => withFileLock(path, async () => {
+    const task = (await listBacklog(root)).find(task => task.id === taskId);
+    if (!task) throw new Error('task를 찾을 수 없습니다');
+    if (task.status === 'done') throw new Error('완료 task는 새 작업으로 등록해야 합니다');
+    const original = await readText(path);
+    let text = await reconcileEdits(root, path, original || initial);
+    const item = requireItem(text, id);
+    if (item.answer.trim()) throw new Error('답이 있는 판단에는 task를 붙일 수 없습니다');
+    const blocked = /^blocked\((A\d+(?:-\d+)?)\)$/u.exec(task.status);
+    if (blocked && blocked[1] !== id) throw new Error(`task ${taskId} 는 이미 ${blocked[1]} 에 묶여 있습니다`);
+    if (!item.blocks.split(/[,\s]+/u).includes(taskId)) {
+      const blocks = [item.blocks === '-' ? '' : item.blocks, taskId].filter(Boolean).join(', ');
+      const line = /^- 막힌 작업:[^\r\n]*$/mu;
+      const raw = line.test(item.raw) ? item.raw.replace(line, () => `- 막힌 작업: ${blocks}`)
+        : item.raw.trimEnd() + `\n- 막힌 작업: ${blocks}\n\n`;
+      text = text.slice(0, item.start) + raw + text.slice(item.end);
+    }
+    return { item: requireItem(text, id), expectedHash: await save(root, path, text, original) };
+  }));
+}
+
+export async function addJudgment(root: string, input: JudgmentInput, cliPolicy?: { distinct: boolean }): Promise<{ item: JudgmentItem; expectedHash: string; deduped?: 'same-key' | 'same-task' }> {
   const path = await location(root);
   return retryJudgment(() => withFileLock(path, async () => {
     const original = await readText(path);
@@ -223,7 +257,17 @@ export async function addJudgment(root: string, input: JudgmentInput): Promise<{
     const document = parseJudgment(text);
     const dedupeKey = input.dedupeKey ? hash(input.dedupeKey) : undefined;
     const found = dedupeKey && document.items.find(item => item.dedupeKey === dedupeKey);
-    if (found) return { item: found, expectedHash: await save(root, path, text, original) };
+    if (found) return { item: found, expectedHash: await save(root, path, text, original), ...(cliPolicy ? { deduped: 'same-key' as const } : {}) };
+    if (cliPolicy) {
+      const unanswered = document.items.filter(item => !item.answer.trim());
+      const taskId = typeof input.blocks === 'string' && /^T\d+$/u.test(input.blocks) ? input.blocks : undefined;
+      const sameTask = taskId && unanswered.find(item => item.blocks.split(/[,\s]+/u).includes(taskId));
+      if (sameTask) return { item: sameTask, expectedHash: await save(root, path, text, original), deduped: 'same-task' };
+      const similar = !cliPolicy.distinct && unanswered.find(item => similarJudgmentTitle(input.title, item.title));
+      if (similar) throw new Error(`비슷한 열린 판단 ${similar.id}(${similar.title})이 있습니다. ${taskId
+        ? `같은 원인이면 --same-as ${similar.id} 로 이 task 를 붙이고, 다른 원인이면 --distinct 를 붙여 다시 등록하라`
+        : '같은 원인이면 새로 등록하지 말고 그 판단을 기다려라. 다른 원인이면 --distinct 를 붙여 다시 등록하라'}`);
+    }
     if (!input.title.trim()) throw new Error('판단 제목이 필요합니다');
     const numbers = [...text.matchAll(/\bA(\d+)(?:-\d+)?\b/gu)].map(match => Number(match[1]));
     const id = `A${Math.max(0, ...numbers) + 1}`;

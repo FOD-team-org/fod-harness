@@ -40,7 +40,7 @@ function emulate(events: Record<string, unknown>[], terminal: Partial<ProcessRes
 async function project() {
   const root = await mkdtemp('/private/tmp/fodh-provider-revision-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: {
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
     command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')],
   } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));

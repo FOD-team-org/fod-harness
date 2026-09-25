@@ -21,7 +21,7 @@ import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
 import { readState, updateState, transitionState, doctorFresh, TransitionError, userOnlyTransitions } from '../core/state.ts';
 import { assertNotBrain, assertHarnessAlive, HarnessNotAliveError } from '../core/brain-guard.ts';
-import { readJudgment, addJudgment, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
+import { readJudgment, addCliJudgment, attachJudgmentTask, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
 import { tick, watcherStatus } from '../core/watcher.ts';
 import { listProcs } from '../core/procs.ts';
@@ -46,7 +46,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       'merge-commit': { type: 'string' },
       'spec-rev': { type: 'string' }, 'requires-approval': { type: 'boolean' }, evidence: { type: 'string' },
       task: { type: 'string' }, answered: { type: 'boolean' }, title: { type: 'string' }, background: { type: 'string' },
-      options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
+      'same-as': { type: 'string' }, distinct: { type: 'boolean' }, options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
     if (!commandTable.some(c => c.group === group && c.action === action)) {
@@ -169,26 +169,33 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'judgment' && action === 'read') { exact(0); result = await readJudgment(root, { answered: values.answered }); }
     else if (group === 'judgment' && action === 'add') {
       exact(0);
-      for (const key of ['title', 'background', 'options', 'recommend', 'blocks'] as const) {
+      for (const key of (values['same-as'] ? ['blocks'] : ['title', 'background', 'options', 'recommend', 'blocks']) as ('title' | 'background' | 'options' | 'recommend' | 'blocks')[]) {
         if (values[key] === undefined) throw new Error(`--${key} 인자가 필요합니다.`);
       }
-      let choices: string[];
-      try { choices = JSON.parse(values.options!); if (!Array.isArray(choices)) throw new Error(); }
-      catch { choices = values.options!.split('|').map(value => value.trim()); }
+      let choices: string[] = [];
+      if (!values['same-as']) {
+        try { choices = JSON.parse(values.options!); if (!Array.isArray(choices)) throw new Error(); }
+        catch { choices = values.options!.split('|').map(value => value.trim()); }
+      }
+      if (values['same-as'] && !/^T\d+$/u.test(values.blocks!)) throw new Error('--same-as는 --blocks 단일 task가 필요합니다');
       if (values.reclaim && !/^T\d+$/u.test(values.blocks!)) throw new Error('--reclaim은 단일 task가 필요합니다');
       if (/^T\d+$/u.test(values.blocks!)) {
         const task = await getTask(root, values.blocks!);
         if (task.status === 'done') throw new Error('완료 task는 새 작업으로 등록해야 합니다');
         if (values.reclaim && (await readState(root)).taskId !== task.id) throw new Error('현재 task만 회수할 수 있습니다');
       }
-      const added = await addJudgment(root, {
+      const added = values['same-as'] ? await attachJudgmentTask(root, values['same-as'], values.blocks!) : await addCliJudgment(root, {
         title: values.title!, background: values.background!, options: choices,
         recommend: values.recommend!, blocks: values.blocks!, requiresApproval: values['requires-approval'],
         dedupeKey: JSON.stringify([values.title, values.blocks]),
-      });
+      }, values.distinct);
       createdJudgment = added.item.id;
+      if ('deduped' in added && added.deduped) await appendLedger(root, { runId: randomUUID(), action: 'judgment:dedupe', status: 'ok',
+        evidence: { taskId: values.blocks, existing: added.item.id, title: values.title } });
+      if (values['same-as']) await appendLedger(root, { runId: randomUUID(), action: 'judgment:attach', status: 'ok',
+        evidence: { taskId: values.blocks, judgment: added.item.id } });
       if (values.reclaim) {
-        result = await reclaimTask(root, values.blocks!, added.item.id);
+        result = { ...added, ...await reclaimTask(root, values.blocks!, added.item.id) };
         if (!(result as { reclaimed: boolean }).reclaimed) process.exitCode = 1;
       } else {
         if (/^T\d+$/u.test(values.blocks!)) await setTask(root, values.blocks!, { status: `blocked(${added.item.id})`, judgment: added.item.id });

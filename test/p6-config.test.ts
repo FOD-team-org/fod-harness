@@ -6,9 +6,9 @@ import { project, cli } from './p5-helpers.ts';
 import { approvalConfigKeys, setConfig } from '../src/core/config.ts';
 import * as processes from '../src/core/process-time.ts';
 
-it('P6 승인 전용 네 키는 사용자 CLI --approve 필요, 상위 객체도 우회 불가', async () => {
+it('P6 승인 전용 키는 사용자 CLI --approve 필요, 상위 객체도 우회 불가', async () => {
   const root = await project();
-  const values = ['"fake-codex"', '"fake-claude"', '["fake-switch"]', '"read-only"'];
+  const values = [JSON.stringify(['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet']), '"fake-codex"', '"fake-claude"', '["fake-switch"]', '"read-only"'];
   for (const [i, key] of approvalConfigKeys.entries()) {
     const before = await readFile(join(root, '.pi/harness.json'));
     expect(await cli(root, ['config', 'set', key, values[i]])).toMatchObject({ code: 1, value: { error: `승인 전용 키입니다: ${key}. --approve 를 붙여 사용자 터미널에서 실행하세요` } });
@@ -35,6 +35,7 @@ it('P6 env 없는 부모 체인의 잠금 소유자도 거부하고 무관한 �
   expect(chain).toHaveBeenCalledWith(process.ppid, process.ppid);
   expect(await readFile(join(root, '.pi/harness.json'))).toEqual(before);
   chain.mockResolvedValue(false);
+  await setConfig(root, 'brain.allowedModels', JSON.stringify(['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet']));
   await expect(setConfig(root, 'brain.model', 'haiku')).resolves.toBe('haiku');
   chain.mockResolvedValue(undefined);
   await expect(setConfig(root, 'brain.model', 'fable')).rejects.toThrow('두뇌 세션');

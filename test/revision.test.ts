@@ -22,7 +22,7 @@ const roots: string[] = [];
 async function project() {
   const root = await mkdtemp('/private/tmp/fodh-revision-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: {
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
     command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')],
     model: 'haiku', maxTurnMinutes: 0.015,
   } }));

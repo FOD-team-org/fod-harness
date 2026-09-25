@@ -23,7 +23,7 @@ const model: Model<'claude-code'> = { id: 'haiku', name: '시험', api: 'claude-
 async function project(maxTurnMinutes = 0.2) {
   const root = await mkdtemp('/private/tmp/fodh-provider-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { command: fake, switchCommand: [fakeSwitch], model: 'haiku', maxTurnMinutes } }));
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'], command: fake, switchCommand: [fakeSwitch], model: 'haiku', maxTurnMinutes } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
   await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state: 'IDLE', autoTurns: 0 }));
   return root;

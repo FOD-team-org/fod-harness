@@ -121,14 +121,14 @@ it.each(['1','2'])('M4: 연속 2회 실패는 paused(cleanup), 사용자 선택 
     expect((await getTask(root,task.id)).status).toBe(`blocked(${item.id})`);
   }
 });
-it('L4: add 이후 회수 실패 JSON은 생성된 판단 번호를 유지한다',async()=>{
-  const {root,task}=await setup();vi.mocked(reclaimCodexTree).mockResolvedValue(false);
+it('L4: same-task dedupe 이후 회수 실패 JSON은 기존 판단 번호를 유지한다',async()=>{
+  const {root,task,item}=await setup();vi.mocked(reclaimCodexTree).mockResolvedValue(false);
   const {main}=await import('../src/cli/index.ts');
   const output=vi.spyOn(process.stdout,'write').mockImplementation(()=>true);
   try {
     await main(['judgment','add','--title','실패 판단','--background','','--options','유지|변경','--recommend','1','--blocks',task.id,'--reclaim'],root);
     const value=JSON.parse(String(output.mock.calls.at(-1)?.[0]));
-    expect(value).toMatchObject({error:'프로세스 회수 실패',judgment:'A2',reclaimed:false,next:'CLEANUP_FAILED'});
+    expect(value).toMatchObject({error:'프로세스 회수 실패',judgment:item.id,reclaimed:false,next:'CLEANUP_FAILED'});
     expect(process.exitCode).toBe(1);
   } finally {output.mockRestore();process.exitCode=0;}
 });
@@ -154,4 +154,29 @@ it('F30-4 잠금 소유자가 없으면 일치하는 brain도 보고에서 보�
   const report=await cleanupReport(root);
   expect(report).toMatchObject({ok:true,remaining:0,protected:[],residual:[],stale:[brain],removed:[brain]});
   expect(await listProcs(root)).toEqual([]);expect(reclaimCodexTree).not.toHaveBeenCalled();
+});
+
+it('P8-c L4: 새 task의 판단 생성 뒤 회수 실패도 새 판단 번호와 재시도 상태를 보존한다', async () => {
+  const { root, item, record } = await setup();
+  const task = await addTask(root, { title: '새 작업', category: 'docs' });
+  await setTask(root, task.id, { status: 'doing' });
+  await updateState(root, { state: 'IMPLEMENT', taskId: task.id });
+  await registerProc(root, { ...record, taskId: task.id });
+  vi.mocked(reclaimCodexTree).mockResolvedValue(false);
+  const { main } = await import('../src/cli/index.ts');
+  const { readJudgment } = await import('../src/core/judgment.ts');
+  const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  try {
+    await main(['judgment', 'add', '--title', '검증 실패 판단', '--background', '', '--options', '유지|변경', '--recommend', '1', '--blocks', task.id, '--reclaim'], root);
+    const value = JSON.parse(String(output.mock.calls.at(-1)?.[0]));
+    const items = (await readJudgment(root)).items;
+    expect(items).toHaveLength(2);
+    const created = items.find(judgment => judgment.id !== item.id)!;
+    expect(created).toMatchObject({ title: '검증 실패 판단', blocks: task.id });
+    expect(value).toMatchObject({ error: '프로세스 회수 실패', judgment: created.id, reclaimed: false, next: 'CLEANUP_FAILED' });
+    expect(value.deduped).toBeUndefined(); expect(process.exitCode).toBe(1);
+    expect(await readState(root)).toMatchObject({ state: 'CLEANUP_FAILED', pendingReclaim: { taskId: task.id, judgmentId: created.id } });
+    expect((await getTask(root, task.id)).status).toBe('doing');
+    expect(await listProcs(root)).toEqual([{ ...record, taskId: task.id }]);
+  } finally { output.mockRestore(); process.exitCode = 0; }
 });

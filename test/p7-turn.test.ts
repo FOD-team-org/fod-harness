@@ -3,7 +3,7 @@ import * as judgments from '../src/core/judgment.ts';
 import { expect, it, vi } from 'vitest';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { project } from './p5-helpers.ts';
+import { project as baseProject } from './p5-helpers.ts';
 import * as runner from '../src/provider/runner.ts';
 import { runTurn, isTurnInProgress } from '../src/provider/turn.ts';
 import { readState, updateState } from '../src/core/state.ts';
@@ -13,6 +13,12 @@ import { setConfig } from '../src/core/config.ts';
 import { setNotifyContext } from '../src/core/notify.ts';
 import * as notifications from '../src/core/notify.ts';
 import * as ledger from '../src/core/ledger.ts';
+
+async function project(state?: string) {
+  const root = await baseProject(state);
+  await setConfig(root, 'brain.allowedModels', JSON.stringify(['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet']));
+  return root;
+}
 
 it.each([
   ['assistant', '변경: 문서\n대기: 없음\n상태: PICK\n', true],

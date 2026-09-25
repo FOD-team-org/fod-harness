@@ -67,7 +67,12 @@ it('M4/F3/L7/L11 운영 지시·필수 플래그·scaffold path 회귀',async()=
     // F28's required advisory names the command; executable examples still require every flag.
     const examples = (await readFile(file, 'utf8')).replace(/^(?:`대기: 사용자` 는 쓰지 않는다|task REVIEW 에서는 `대기: 사용자` 를 쓰지 않는다)\. 사용자 결정은 `fodh judgment add … --blocks \{\{taskId\}\} --reclaim`$/mu, '').replaceAll('`fodh judgment add … --blocks {{taskId}} --reclaim`', '');
     for (const command of examples.matchAll(/`(fodh judgment add[^`]*)`/gu)) {
-      for (const flag of ['--title', '--background', '--options', '--recommend', '--blocks']) expect(command[1], file).toContain(flag);
+      if (command[1].includes('--same-as')) {
+        expect(command[1], file).toContain('--same-as A<n>');
+        expect(command[1], file).toContain('--blocks');
+      } else {
+        for (const flag of ['--title', '--background', '--options', '--recommend', '--blocks']) expect(command[1], file).toContain(flag);
+      }
     }
   }
   const interview=await readFile('templates/prompts/INTERVIEW.md','utf8');expect(interview).toContain('`next`가 이미 판단대기로 넘겼다');expect(interview).toContain('결과 `deferred`');expect(interview).toContain('질문을 그대로 다시 보여 주고');expect(interview).toContain('`repeated:true`');expect(interview).toContain('같은 라운드');expect(interview).toContain('skipDue');expect(interview).toContain('은행 파일·템플릿을 바꾸지 않는다');
@@ -114,6 +119,7 @@ it('F12/F15 자기 보고 플래그 대신 하네스 증거를 안내한다', as
   expect(verify.indexOf('fodh worktree commit')).toBeLessThan(verify.indexOf('fodh verify run'));
   expect(verify.indexOf('fodh verify run')).toBeLessThan(verify.indexOf('fodh state transition REVIEW'));
   expect(verify).toContain('커밋할 변경이 없습니다');
+  expect(verify).toContain('`fodh judgment add --same-as A<n> --blocks {{taskId}}` 으로 붙인다(repair 초과로 회수할 때만 `--reclaim`)');
 });
 
 it('F16 위임 템플릿은 공식 슬롯 대기만 안내한다', async () => {

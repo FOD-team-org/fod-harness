@@ -18,7 +18,7 @@ const roots: string[] = [];
 async function project() {
   const root = await mkdtemp('/private/tmp/fodh-policy-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: {
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
     command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')],
   } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
@@ -110,7 +110,7 @@ it('정책: 기본 fable과 config 변경을 다음 턴에 읽고 동일 세션�
   emulate([{ ...init, model: 'claude-fable-5-1' }, done]);
   expect(await runTurn('기본', { root, env: environment(root) })).toMatchObject({ reason: 'stop' });
   const first = vi.mocked(runProcess).mock.calls.at(-1)![0];
-  expect(first.args).toContain('fable');
+  expect(first.args).toContain('claude-fable-5-1');
   const sid = (await readState(root)).sessionId;
   await setConfig(root, 'brain.model', 'haiku');
   emulate([init, done]);
@@ -126,7 +126,7 @@ it('정책: 기본 fable과 config 변경을 다음 턴에 읽고 동일 세션�
   await writeFile(path, JSON.stringify({ ...raw, brain: { ...raw.brain, model: 'fable' } }));
   emulate([{ ...init, model: 'claude-fable-5-1' }, done]);
   expect(await runTurn('직접 편집', { root, env: environment(root) })).toMatchObject({ reason: 'stop' });
-  expect(vi.mocked(runProcess).mock.calls.at(-1)![0].args).toContain('fable');
+  expect(vi.mocked(runProcess).mock.calls.at(-1)![0].args).toContain('claude-fable-5-1');
   expect((await readState(root)).sessionId).toBe(sid);
 });
 const markerResult = { ...done, permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } }] };
@@ -211,4 +211,38 @@ it('F29 Agent 훅과 Task 결과 별칭은 경계 분류 1건으로 합친다', 
   expect(await runTurn('별칭', { root, model: 'haiku', env: environment(root) })).toMatchObject({ reason: 'stop' });
   const { readLedger } = await import('../src/core/ledger.ts'); const entries = await readLedger(root);
   expect(entries.filter(e => e.action.startsWith('hook:'))).toEqual([expect.objectContaining({ action: 'hook:boundary:0:alias', evidence: expect.objectContaining({ kind: 'boundary' }) })]);
+});
+
+it.each([
+  ['haiku', 'haiku', ['claude-opus-5-5', 'claude-fable-5-1']],
+  ['claude-fable-5-1', 'claude-opus-5-5', ['claude-opus-5-5', 'claude-fable-5-1']],
+])('P8 init 요청/허용 목록 불일치 %s → %s는 configError와 거부 원장', async (requested, actual, allowed) => {
+  const root = await project(); await setConfig(root, 'brain.allowedModels', JSON.stringify(allowed));
+  emulate([{ ...init, model: actual }, done]);
+  expect(await runTurn('거부', { root, model: requested, env: environment(root) })).toMatchObject({ classification: 'configError' });
+  expect(await readLedger(root)).toContainEqual(expect.objectContaining({ action: 'brain:model-rejected', status: 'fail',
+    evidence: { requested, actual, allowed } }));
+});
+it('P8 doctor haiku는 기본 허용 목록 밖이어도 훅 시험을 완료하고 모델 정보를 반환한다', async () => {
+  const root = await project();
+  const allowed = ['claude-opus-5-5', 'claude-fable-5-1'];
+  await setConfig(root, 'brain.allowedModels', JSON.stringify(allowed));
+  emulate([init, { ...done, permission_denials: [
+    { tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } },
+    { tool_name: 'Write', tool_input: { file_path: 'src/FODH_DOCTOR_MARKER.ts' } },
+  ] }]);
+  expect(await doctor(root, { env: environment(root) })).toMatchObject({ ok: true, brainModel: 'claude-fable-5-1', allowedModels: allowed });
+  expect((await readState(root)).brain).toMatchObject({ model: 'claude-fable-5-1' });
+  expect((await readLedger(root)).some(entry => entry.action === 'brain:model-rejected')).toBe(false);
+});
+
+it.each(['claude-opus-5-5[1m]', 'claude-opus-5-5'])('P8-c [1m] 목록·요청은 actual %s init을 허용하고 모델 인자를 보존한다', async actual => {
+  const root = await project(), model = 'claude-opus-5-5[1m]';
+  await setConfig(root, 'brain', JSON.stringify({ model, allowedModels: [model],
+    command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')] }));
+  emulate([{ ...init, model: actual }, done]);
+  expect(await runTurn('1m 모델', { root, env: environment(root) })).toMatchObject({ reason: 'stop' });
+  const args = vi.mocked(runProcess).mock.calls.at(-1)![0].args!;
+  expect(args[args.indexOf('--model') + 1]).toBe(model);
+  expect((await readLedger(root)).some(entry => entry.action === 'brain:model-rejected')).toBe(false);
 });

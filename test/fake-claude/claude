@@ -41,11 +41,13 @@ if (args.includes('--hang-orphan-child')) {
       skills: scenario !== 'p5-skills-missing' ? ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'] : [],
       memory_paths: scenario === 'p5-skills-missing' ? [] : { auto: process.cwd() + '/auto-memory' },
     };
-    if (get('--model') === 'fable') {
-      if (event.subtype === 'init') event = { ...event, model: 'claude-fable-5-1' };
+    if (['fable', 'opus'].includes(get('--model')) || get('--model')?.startsWith('claude-')) {
+      const requested = get('--model');
+      const model = requested === 'fable' ? 'claude-fable-5-1' : requested === 'opus' ? 'claude-opus-5-5' : requested;
+      if (event.subtype === 'init') event = { ...event, model };
       if (event.type === 'result') {
         const usage = Object.values(event.modelUsage ?? {}).at(-1) ?? event.usage ?? {};
-        event = { ...event, modelUsage: { 'claude-fable-5-1': usage } };
+        event = { ...event, modelUsage: { [model]: usage } };
       }
     }
     if (scenario === 'api-key' && event.subtype === 'init') event = { ...event, apiKeySource: 'ANTHROPIC_API_KEY' };

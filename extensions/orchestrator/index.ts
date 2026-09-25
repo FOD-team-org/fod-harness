@@ -25,6 +25,17 @@ import { autoResume, resumeContext, send } from './resume.ts';
 import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
 export { instruction } from './resume.ts';
 
+export const developStartStates = ['IDLE', 'PROJECT_READY', 'DONE_ALL', 'PLANNING', 'PICK', 'WAIT_RETRY', 'WAIT_RESOURCE', 'recovering'] as const;
+export function canDevelopStart(state: string): boolean {
+  return (developStartStates as readonly string[]).includes(state) || state.startsWith('paused(');
+}
+export function resumeHint(state: string, openJudgments: { answer: string }[]): string {
+  const hint = state === 'recovering'
+    ? '복구 상태입니다 — /develop-start 또는 아무 입력(예: 진행해)으로 복구 턴을 시작합니다'
+    : canDevelopStart(state) ? '/develop-start 또는 입력으로 이어갑니다' : '입력(예: 진행해)으로 이어갑니다';
+  return hint + (openJudgments.some(item => item.answer.trim()) ? ', 답한 판단은 /judged <번호> 로 적용합니다' : '');
+}
+
 async function exists(path: string): Promise<boolean> {
   try { await access(path); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
@@ -122,12 +133,15 @@ export default function orchestrator(pi: ExtensionAPI): void {
     description: '백로그 계획 또는 작업 선택 시작',
     handler: async (_args, ctx) => {
       let state = await readState(ctx.cwd);
-      if (!['IDLE', 'PROJECT_READY', 'DONE_ALL', 'PLANNING', 'PICK', 'WAIT_RETRY', 'WAIT_RESOURCE'].includes(state.state)
-        && !state.state.startsWith('paused(')) throw new Error('현재 상태에서 develop-start를 시작할 수 없습니다');
+      if (!canDevelopStart(state.state)) throw new Error('현재 상태에서 develop-start를 시작할 수 없습니다');
       if (state.state === 'WAIT_RETRY' && state.retry?.nextAt && Date.parse(state.retry.nextAt) > Date.now()) {
         ctx.ui.notify(`${Math.ceil((Date.parse(state.retry.nextAt) - Date.now()) / 60000)}분 뒤 재시도 예정`, 'info'); return;
       }
       await prepareProject(ctx.cwd, ctx, true);
+      if (state.state === 'recovering') {
+        state = await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
+        await send(pi, ctx.cwd, state); return;
+      }
       const missingBacklog = !await exists(join(ctx.cwd, 'docs/backlog.md'));
       const tasks = await listBacklog(ctx.cwd);
       if (missingBacklog) await initialize(ctx.cwd);
@@ -398,7 +412,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
       } else if (kind === 'stalled') {
         const state = await readState(root);
         if (state.state === 'recovering' || state.userAborted) {
-          context.notify(`사용자 중단 상태: ${state.state} — 사용자 입력 또는 명령으로 이어갑니다`, 'info');
+          context.notify(`사용자 중단 상태: ${state.state} — ${resumeHint(state.state, (await readJudgment(root)).items)}`, 'info');
           resolve = true;
         } else {
           const result = await autoResume(pi, root, context, kind);
@@ -415,7 +429,7 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
           && doctorFresh(state, (await loadConfig(root)).brain.doctorTtlHours)) {
           resumed = (await autoResume(pi, root, context, kind)).resumed === true; handled = resumed;
         } else {
-          context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — /develop-start 또는 /judged 로 이어갑니다`, 'info');
+          context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — ${resumeHint(state.state, (await readJudgment(root)).items)}`, 'info');
         }
         resolve = true;
       }

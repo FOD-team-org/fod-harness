@@ -1,17 +1,29 @@
-import { installShutdownReclaim } from '../../src/provider/shutdown.ts';
+import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { appendLedger } from '../../src/core/ledger.ts';
+import { installShutdownReclaim, ensureShutdownReclaimFirst } from '../../src/provider/shutdown.ts';
 import { getCurrentBrainGroup } from '../../src/provider/runner.ts';
 import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { setNotifyContext } from '../../src/core/notify.ts';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@mariozechner/pi-ai';
 import { readState, doctorFresh, updateState } from '../../src/core/state.ts';
-import { loadConfig, setConfig } from '../../src/core/config.ts';
+import { loadConfig, setConfig, brainModels, defaultAllowedModels } from '../../src/core/config.ts';
 import { join } from 'node:path';
 import { acquireLock } from '../../src/core/lock.ts';
 import { streamClaude } from './stream.ts';
 import { doctor } from '../../src/cli/doctor.ts';
+const reorderKey = Symbol.for('fodh.shutdownReorderedSignals');
+const shared = globalThis as typeof globalThis & { [reorderKey]?: Set<string> };
+const reorderedSignals = shared[reorderKey] ??= new Set<string>();
 export default function provider(pi: ExtensionAPI) {
   let root = process.cwd();
+  let models: string[], modelWarning: string | undefined;
+  try { models = brainModels(JSON.parse(readFileSync(join(root, '.pi/harness.json'), 'utf8'))).allowedModels; }
+  catch (error) {
+    models = [...defaultAllowedModels];
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') modelWarning = '두뇌 모델 설정을 읽거나 검증하지 못했습니다. 기본 모델 목록을 사용합니다. .pi/harness.json을 확인하세요';
+  }
   let uninstallShutdownReclaim: (() => void) | undefined = installShutdownReclaim(getCurrentBrainGroup, () => root);
   let restoreTools: string[] | undefined;
   let release: (() => Promise<void>) | undefined;
@@ -29,7 +41,7 @@ export default function provider(pi: ExtensionAPI) {
   };
   pi.registerProvider('claude-code', {
     name: 'Claude Code 구독', baseUrl: 'local://claude-code', api: 'claude-code', apiKey: 'local-cli-no-credential',
-    models: ['fable', 'opus', 'sonnet', 'haiku'].map(id => ({ id, name: `Claude Code ${id}`, reasoning: false, input: ['text'],
+    models: models.map(id => ({ id, name: `Claude Code ${id}`, reasoning: false, input: ['text'],
       contextWindow: 1000000, maxTokens: 32000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })),
     streamSimple: (model, context, options) => {
       if (!ready || !release || pending) {
@@ -46,6 +58,12 @@ export default function provider(pi: ExtensionAPI) {
         return stream;
       }
       const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+      const signals = ensureShutdownReclaimFirst().filter(signal => !reorderedSignals.has(signal));
+      if (signals.length) {
+        for (const signal of signals) reorderedSignals.add(signal);
+        void appendLedger(root, { runId: randomUUID(), action: 'shutdown:reorder', status: 'ok', evidence: { signals } })
+          .catch(() => notify?.('종료 신호 처리기 순서 복구 원장을 기록하지 못했습니다.'));
+      }
       const stream = streamClaude(model, context, { ...options, signal }, { root, lockHeld: true, notify, useConfiguredModel: true });
       pending = stream.result().finally(() => { pending = undefined; });
       return stream;
@@ -66,6 +84,7 @@ export default function provider(pi: ExtensionAPI) {
     controller = new AbortController(); ready = false;
     setNotifyContext(root, { hasUI: ctx.hasUI, notify: (body, level) => ctx.ui.notify(body, level) });
     notify = message => ctx.ui.notify(message, 'warning');
+    if (modelWarning) { notify(modelWarning); modelWarning = undefined; }
     notify('Pi 자동 컴팩션을 꺼 주세요: .pi/settings.json 또는 ~/.pi/agent/settings.json의 compaction.enabled=false');
     release = await acquireLock(join(root, '.pi/harness.lock'));
     await recoverOrphanBrain(root, true);
@@ -74,13 +93,16 @@ export default function provider(pi: ExtensionAPI) {
       await ensureDoctor();
     }
   });
-  pi.on('model_select', async event => {
+  pi.on('model_select', async (event, ctx) => {
     const active = event.model.provider === 'claude-code';
     selectTools(active);
     if (active) {
-      await setConfig(root, 'brain.model', event.model.id);
+      ready = false;
+      try { await setConfig(root, 'brain.model', event.model.id); }
+      catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error'); return; }
+      const model = (await loadConfig(root)).brain.model;
       await updateState(root, current => ({ brain: {
-        ...(current.brain as Record<string, unknown> | undefined), model: event.model.id,
+        ...(current.brain as Record<string, unknown> | undefined), model,
       } }));
       await ensureDoctor();
     }

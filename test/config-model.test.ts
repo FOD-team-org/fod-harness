@@ -26,7 +26,7 @@ async function cli(root: string, args: string[]) {
 it('설정 기본값은 fable, 회전 끔, Opus 수행자, astra/sol xhigh 및 자식 1이다', async () => {
   const root = await project();
   expect(await getConfig(root)).toMatchObject({
-    brain: { model: 'fable', rotateAtTokens: 0, doctorTtlHours: 12 },
+    brain: { model: 'claude-fable-5-1', allowedModels: ['claude-opus-5-5', 'claude-fable-5-1'], rotateAtTokens: 0, doctorTtlHours: 12 },
     delegate: { claude: { subagentModel: 'opus' }, codex: {
       brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', maxChildAgents: 1,
     } },
@@ -37,14 +37,14 @@ it('CLI config get/set은 점 키와 JSON 값, 기본값 및 기존 알 수 없�
   const root = await project(); await mkdir(join(root, '.pi'));
   await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ project: { name: '시험' }, brain: { custom: '유지' } }));
   expect(await cli(root, ['config', 'set', 'brain.model', 'opus'])).toEqual({ code: 0, value: 'opus' });
-  expect(await cli(root, ['config', 'get', 'brain.model'])).toEqual({ code: 0, value: 'opus' });
+  expect(await cli(root, ['config', 'get', 'brain.model'])).toEqual({ code: 0, value: 'claude-opus-5-5' });
   expect(await cli(root, ['config', 'set', 'brain.rotateAtTokens', '250000'])).toEqual({ code: 0, value: 250000 });
   expect(await cli(root, ['config', 'set', 'brain.skipPermissions', 'false'])).toEqual({ code: 0, value: false });
   expect(await cli(root, ['config', 'set', 'custom', '{"items":[1,2],"empty":null}']))
     .toEqual({ code: 0, value: { items: [1, 2], empty: null } });
   expect(await cli(root, ['config', 'get', 'custom.empty'])).toEqual({ code: 0, value: null });
   const config = (await cli(root, ['config', 'get'])).value;
-  expect(config).toMatchObject({ project: { name: '시험' }, brain: { custom: '유지', model: 'opus' },
+  expect(config).toMatchObject({ project: { name: '시험' }, brain: { custom: '유지', model: 'claude-opus-5-5' },
     delegate: { codex: { workerEffort: 'xhigh' } } });
   expect(JSON.parse(await readFile(join(root, '.pi/harness.json'), 'utf8'))).not.toHaveProperty('delegate');
 });
@@ -56,8 +56,9 @@ it.each([
   ['delegate.codex.waitMinutes', '3'], ['delegate.codex.workerEffort', 'medium'], ['delegate.codex.maxChildAgents', '0'],
 ])('설정 변경 및 재로드: %s=%s', async (key, value) => {
   const root = await project();
+  if (key === 'brain.model') await setConfig(root, 'brain.allowedModels', JSON.stringify(['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet']));
   const written = await setConfig(root, key, value);
-  expect(await getConfig(root, key)).toEqual(written);
+  expect(await getConfig(root, key)).toEqual(key === 'brain.model' && value === 'fable' ? 'claude-fable-5-1' : written);
   expect(await loadConfig(root)).toBeTruthy();
 });
 it.each([
@@ -86,7 +87,7 @@ it('CLI 오류는 JSON/exit 1이며 설정 파일을 생성하지 않는다', as
 it('서로 다른 키의 동시 config set은 갱신을 유실하지 않는다', async () => {
   const root = await project();
   await Promise.all([setConfig(root, 'brain.model', 'opus'), setConfig(root, 'delegate.codex.maxChildAgents', '2')]);
-  expect(await loadConfig(root)).toMatchObject({ brain: { model: 'opus' }, delegate: { codex: { maxChildAgents: 2 } } });
+  expect(await loadConfig(root)).toMatchObject({ brain: { model: 'claude-opus-5-5' }, delegate: { codex: { maxChildAgents: 2 } } });
 });
 it('fable 모델 ID 대응과 기존 별칭 검증을 유지한다', () => {
   expect(matchesModel('fable', 'claude-fable-5-1')).toBe(true);
@@ -234,4 +235,77 @@ it('F27 brain.allowPlugins는 기본 false이고 boolean만 받는다', async ()
   await setConfig(root, 'brain.allowPlugins', 'true');
   expect((await loadConfig(root)).brain.allowPlugins).toBe(true);
   await expect(setConfig(root, 'brain.allowPlugins', 'yes')).rejects.toThrow('불리언');
+});
+
+it.each([[], [''], ['haiku', 'haiku'], ['has space'], ['has\ttab'], [1], null, 'haiku'])('P8 잘못된 허용 목록 %j는 파일 불변', async allowed => {
+  const root = await project(); await setConfig(root, 'brain.model', 'fable');
+  const path = join(root, '.pi/harness.json'), before = await readFile(path);
+  await expect(setConfig(root, 'brain.allowedModels', JSON.stringify(allowed))).rejects.toThrow('brain.allowedModels');
+  expect(await readFile(path)).toEqual(before);
+});
+it('P8 별칭 읽기는 파일 불변, haiku는 목록에 있을 때만 허용, CLI 목록 승인은 필수', async () => {
+  const root = await project();
+  for (const [alias, id] of [['fable', 'claude-fable-5-1'], ['opus', 'claude-opus-5-5']]) {
+    await setConfig(root, 'brain.model', alias);
+    const before = await readFile(join(root, '.pi/harness.json'));
+    expect((await loadConfig(root)).brain.model).toBe(id);
+    expect(await readFile(join(root, '.pi/harness.json'))).toEqual(before);
+  }
+  await expect(setConfig(root, 'brain.model', 'haiku')).rejects.toThrow(`brain.model(haiku)이 brain.allowedModels(claude-opus-5-5, claude-fable-5-1)에 없습니다. 먼저 사용자 터미널에서 fodh config set brain.allowedModels '[…,"haiku"]' --approve 로 목록에 넣으세요`);
+  const allowed = '["claude-opus-5-5","claude-fable-5-1","haiku"]';
+  expect((await cli(root, ['config', 'set', 'brain.allowedModels', allowed])).code).toBe(1);
+  expect((await cli(root, ['config', 'set', 'brain.allowedModels', allowed, '--approve'])).code).toBe(0);
+  await setConfig(root, 'brain.model', 'haiku');
+  expect((await loadConfig(root)).brain.model).toBe('haiku');
+  await expect(loadConfig(root, { brain: { allowedModels: ['haiku'], model: 'opus' } })).rejects.toThrow('brain.model');
+});
+it.each([
+  ['claude-opus-5-5', 'claude-opus-5-5[1m]', true],
+  ['claude-opus-5-5', 'claude-opus-5-5-20260925[1m]', true],
+  ['claude-opus-5-5', 'claude-opus-5-50', false],
+  ['claude-opus-5-5', 'claude-opus-5-5-preview', false],
+  ['opus', 'claude-opus-5-5[1m]', true],
+  ['claude-opus-5', 'claude-opus-5-5', false],
+  ['claude-opus-5-5', 'claude-opus-5-5-20260901', true],
+  ['claude-opus-5-5', 'claude-opus-5-5-2026090', false],
+  ['claude-opus-5-5', 'claude-opus-5-5-202609011', false],
+  ['claude-opus-5-5[1m]', 'claude-opus-5-5[1m]', true],
+  ['claude-opus-5-5[1m]', 'claude-opus-5-5', true],
+  ['opus[1m]', 'claude-opus-5-5', true],
+])('P8 matchesModel %s / %s = %s', (entry, actual, expected) => {
+  expect(matchesModel(entry, actual)).toBe(expected);
+});
+it('P8 fake claude는 전체 모델 ID 요청도 init/modelUsage에 그대로 반환한다', async () => {
+  const root = await project(), model = 'claude-opus-6';
+  const pending = execute(resolve('test/fake-claude/claude'), ['--verbose', '--model', model, '--session-id', 'p8'],
+    { cwd: root, env: { ...childEnv(), HOME: root, FAKE_CLAUDE_SCENARIO: 'first' }, timeout: 5000 });
+  pending.child.stdin?.end('fixture');
+  const events = (await pending).stdout.trim().split('\n').map(line => JSON.parse(line));
+  expect(events.find(event => event.subtype === 'init').model).toBe(model);
+  expect(Object.keys(events.find(event => event.type === 'result').modelUsage)).toEqual([model]);
+});
+
+it('P8-c README의 추가→전환→선택 제거 세 명령은 기존 Opus에서 모두 성공한다', async () => {
+  const root = await project(); await setConfig(root, 'brain.model', 'claude-opus-5-5');
+  const readme = await readFile('README.md', 'utf8');
+  const section = readme.split('## 모델 배치와 교체')[1].split('```sh')[1].split('```')[0];
+  const commands = section.split('\n').filter(line => line.startsWith('fodh config set '));
+  expect(commands).toHaveLength(3);
+  for (const command of commands) {
+    const args = command.match(/'[^']*'|\S+/gu)!.slice(1).map(arg => arg.startsWith("'") ? arg.slice(1, -1) : arg);
+    expect((await cli(root, args)).code, command).toBe(0);
+  }
+  expect((await loadConfig(root)).brain).toMatchObject({ model: 'claude-opus-6', allowedModels: ['claude-opus-6', 'claude-fable-5-1'] });
+});
+it.each(['claude-opus-5-5', 'opus'])('P8-c 목록만 교체해 현재 모델 %s를 제외하면 복구 가능한 안내와 파일 불변', async model => {
+  const root = await project(); await setConfig(root, 'brain.model', model);
+  const path = join(root, '.pi/harness.json'), before = await readFile(path);
+  expect(await cli(root, ['config', 'set', 'brain.allowedModels', '["claude-opus-6","claude-fable-5-1"]', '--approve']))
+    .toEqual({ code: 1, value: { error: `새 목록에 현재 brain.model(${model})이 없습니다. 먼저 fodh config set brain.model <새 목록 안의 모델> 로 옮기거나, 목록에 현재 모델을 남기세요` } });
+  expect(await readFile(path)).toEqual(before);
+});
+it('P8-c loadConfig의 이미 어긋난 파일 오류는 기존 문구를 유지한다', async () => {
+  const root = await project(); await mkdir(join(root, '.pi'));
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { model: 'haiku' } }));
+  await expect(loadConfig(root)).rejects.toThrow("brain.model(haiku)이 brain.allowedModels(claude-opus-5-5, claude-fable-5-1)에 없습니다. 사용자 터미널에서 fodh config set brain.allowedModels '[…]' --approve 로 목록을 바꾸세요");
 });

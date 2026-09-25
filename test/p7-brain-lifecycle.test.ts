@@ -1,5 +1,7 @@
+import { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
 import provider from '../extensions/provider/index.ts';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, expect, it, vi } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -18,11 +20,20 @@ import { processStartedAt } from '../src/core/process-time.ts';
 import { groupAlive, runProcess, getCurrentBrainGroup } from '../src/provider/runner.ts';
 import { runCleanup } from '../src/core/cleanup.ts';
 const children: ChildProcess[] = [], groups: number[] = [];
+const testedGroups = new Set<number>();
+afterAll(() => {
+  const remaining = [...testedGroups].filter(groupAlive);
+  expect(remaining).toEqual([]);
+  console.log(`P8 sleep groups: tested=${testedGroups.size}, remaining=${remaining.length}`);
+});
 afterEach(async () => {
-  for (const pgid of groups.splice(0)) { try { process.kill(-pgid, 'SIGKILL'); } catch {} }
+  const cleanupGroups = groups.splice(0);
+  for (const pgid of cleanupGroups) testedGroups.add(pgid);
+  for (const pgid of cleanupGroups) { try { process.kill(-pgid, 'SIGKILL'); } catch {} }
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) { const closed = once(child, 'close'); child.kill('SIGKILL'); await closed; }
   }
+  for (const pgid of cleanupGroups) await waitForGroupDeath(pgid);
 });
 async function deadHarness(root: string) {
   const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
@@ -129,4 +140,168 @@ it('F30 provider는 재시작마다 일회성 신호 가드를 다시 설치하�
       expect(process.listenerCount('SIGHUP')).toBe(count);
     }
   } finally { await handlers.get('session_shutdown')!({},ctx); }
+});
+
+it('P8 K2 Pi init 뒤 session_start 재설치는 SIGHUP·SIGTERM 첫 처리기를 복구한다', async () => {
+  const { shutdownReclaimMarker } = await import('../src/provider/shutdown.ts');
+  const root = await project(), handlers = new Map<string, Function>();
+  const ctx = { cwd: root, hasUI: true, ui: { notify: vi.fn() } }, piHandler = () => {};
+  const signals = ['SIGHUP', 'SIGTERM', 'SIGINT'] as const;
+  const before = signals.map(signal => process.rawListeners(signal));
+  provider({ on: (name: string, fn: Function) => handlers.set(name, fn), registerProvider: vi.fn(),
+    getActiveTools: () => [], setActiveTools: vi.fn() } as unknown as ExtensionAPI);
+  try {
+    for (const signal of ['SIGHUP', 'SIGTERM'] as const) process.prependListener(signal, piHandler);
+    await handlers.get('session_start')!({}, ctx);
+    for (const signal of signals) expect((process.rawListeners(signal)[0] as any)[shutdownReclaimMarker]).toBe(true);
+  } finally {
+    await handlers.get('session_shutdown')!({}, ctx);
+    for (const signal of signals) process.off(signal, piHandler);
+  }
+  signals.forEach((signal, i) => expect(process.rawListeners(signal)).toEqual(before[i]));
+});
+
+async function signalStub(root: string, body: string) {
+  const module = pathToFileURL(resolve('src/provider/shutdown.ts')).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { spawn } from 'node:child_process';
+    import { installShutdownReclaim } from ${JSON.stringify(module)};
+    ${body}
+  `], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.push(child);
+  const closed = once(child, 'close');
+  const line = await new Promise<string>((ok, fail) => {
+    let text = '';
+    child.stdout!.on('data', chunk => { text += chunk; if (text.includes('\n')) ok(text.split('\n')[0]); });
+    child.once('error', fail); child.once('close', () => fail(new Error('stub exited before ready')));
+  });
+  const { pgid } = JSON.parse(line);
+  if (pgid) groups.push(pgid);
+  return { child, pgid: pgid as number | undefined, closed };
+}
+async function waitForGroupDeath(pgid: number) {
+  for (let i = 0; i < 100 && groupAlive(pgid); i++) await delay(20);
+  expect(groupAlive(pgid)).toBe(false);
+}
+it.each([true, false])('P8 K2 실제 설치→Pi prepend→재설치=%s 대조', async reinstall => {
+  const root = await project();
+  const { child, pgid, closed } = await signalStub(root, `
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => {
+      const uninstall = installShutdownReclaim(() => brain.pid);
+      process.prependListener('SIGHUP', () => process.exit(129));
+      ${reinstall ? 'uninstall(); installShutdownReclaim(() => brain.pid);' : ''}
+      console.log(JSON.stringify({ pgid: brain.pid }));
+    });
+  `);
+  try {
+    child.kill('SIGHUP'); await closed;
+    expect(child.exitCode).toBe(129);
+    if (reinstall) {
+      await waitForGroupDeath(pgid!);
+      expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8'))).toMatchObject({ pgid, signal: 'SIGHUP' });
+    } else {
+      expect(groupAlive(pgid!)).toBe(true);
+      await expect(readFile(join(root, '.pi/harness-brain-orphan.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  } finally {
+    try { process.kill(-pgid!, 'SIGKILL'); } catch {}
+    await waitForGroupDeath(pgid!);
+  }
+});
+it.each([true, false])('P8 SIGINT 다른 처리기 없음, 두뇌=%s도 기본 SIGINT 종료 유지', async hasBrain => {
+  const root = await project();
+  const { child, pgid, closed } = await signalStub(root, hasBrain ? `
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
+  ` : `installShutdownReclaim(() => undefined); setInterval(() => {}, 1000); console.log('{}');`);
+  child.kill('SIGINT'); await closed;
+  expect(child.signalCode).toBe('SIGINT');
+  if (hasBrain) {
+    await waitForGroupDeath(pgid!);
+    expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8'))).toMatchObject({ pgid, signal: 'SIGINT', at: expect.any(String) });
+  } else await expect(readFile(join(root, '.pi/harness-brain-orphan.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+it('P8 Pi 멈춤 모사 SIGINT 무시 뒤 SIGTERM은 두뇌를 회수한다', async () => {
+  const root = await project();
+  const { child, pgid, closed } = await signalStub(root, `
+    process.on('SIGINT', () => {});
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
+  `);
+  child.kill('SIGINT'); await delay(300);
+  expect(child.exitCode).toBeNull(); expect(child.signalCode).toBeNull(); expect(groupAlive(pgid!)).toBe(true);
+  await expect(readFile(join(root, '.pi/harness-brain-orphan.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  child.kill('SIGTERM'); await closed;
+  expect(child.signalCode).toBe('SIGTERM'); await waitForGroupDeath(pgid!);
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8'))).toMatchObject({ pgid, signal: 'SIGTERM' });
+});
+
+function signalExitV3Module(): { path: string; source: string } {
+  try {
+    // Resolve the installed package link without Pi execution, package export restrictions or Vite import.meta.resolve.
+    const piRequire = createRequire(realpathSync(resolve('node_modules/@mariozechner/pi-coding-agent/package.json')));
+    const lockRequire = createRequire(piRequire.resolve('proper-lockfile'));
+    const version = lockRequire('signal-exit/package.json').version;
+    if (version !== '3.0.7') throw new Error(`signal-exit version ${version}, expected 3.0.7`);
+    return { path: lockRequire.resolve('signal-exit'), source: `Pi proper-lockfile dependency: signal-exit ${version}` };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`P8-b real signal-exit unavailable: ${reason}; using v3 contract fixture (no test skipped)`);
+    return { path: resolve('test/fixtures/signal-exit-v3.cjs'), source: 'signal-exit 3.0.7 contract fixture' };
+  }
+}
+it.each([false, true])('P8-b signal-exit 선등록 + Pi 멈춤=%s의 실제 SIGINT 회수·양보', async suspended => {
+  const root = await project(), signalExit = signalExitV3Module();
+  console.log(`P8-b SIGINT suspended=${suspended}: ${signalExit.source}`);
+  const { child, pgid, closed } = await signalStub(root, `
+    import { createRequire } from 'node:module';
+    const require = createRequire(${JSON.stringify(signalExit.path)});
+    require(${JSON.stringify(signalExit.path)})(() => {});
+    if (process.__signal_exit_emitter__?.count !== 1 || process.listenerCount('SIGINT') !== 1) {
+      throw new Error('signal-exit listener was not installed');
+    }
+    ${suspended ? `
+      const ignore = () => {};
+      process.on('SIGINT', ignore);
+      process.once('SIGCONT', () => process.off('SIGINT', ignore));
+    ` : ''}
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
+  `);
+  child.kill('SIGINT');
+  if (suspended) {
+    await delay(300);
+    expect(child.exitCode).toBeNull(); expect(child.signalCode).toBeNull(); expect(groupAlive(pgid!)).toBe(true);
+    await expect(readFile(join(root, '.pi/harness-brain-orphan.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    child.kill('SIGTERM');
+  }
+  await closed;
+  expect(child.signalCode).toBe(suspended ? 'SIGTERM' : 'SIGINT');
+  await waitForGroupDeath(pgid!);
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8')))
+    .toMatchObject({ pgid, signal: suspended ? 'SIGTERM' : 'SIGINT', at: expect.any(String) });
+});
+
+it('P8-c signal-exit v3·v4가 공존하면 count 합으로 SIGINT를 회수한다', async () => {
+  const root = await project();
+  const { child, pgid, closed } = await signalStub(root, `
+    process.__signal_exit_emitter__ = { count: 1 };
+    process[Symbol.for('signal-exit emitter')] = { count: 1 };
+    const v3 = () => {};
+    const v4 = () => {
+      const count = process.__signal_exit_emitter__.count + process[Symbol.for('signal-exit emitter')].count;
+      if (process.listenerCount('SIGINT') !== count) return;
+      process.off('SIGINT', v3); process.off('SIGINT', v4);
+      process.__signal_exit_emitter__.count = 0;
+      process[Symbol.for('signal-exit emitter')].count = 0;
+      process.kill(process.pid, 'SIGINT');
+    };
+    process.on('SIGINT', v3); process.on('SIGINT', v4);
+    const brain = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' });
+    brain.once('spawn', () => { installShutdownReclaim(() => brain.pid); console.log(JSON.stringify({ pgid: brain.pid })); });
+  `);
+  child.kill('SIGINT'); await closed;
+  expect(child.signalCode).toBe('SIGINT'); await waitForGroupDeath(pgid!);
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-brain-orphan.json'), 'utf8'))).toMatchObject({ pgid, signal: 'SIGINT' });
 });

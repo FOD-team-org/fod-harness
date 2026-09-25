@@ -154,8 +154,13 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
               await appendLedger(root, { runId, action: `system.init:${attempt}`, status: 'ok', evidence });
               if (event.apiKeySource !== 'none') return 'billing';
               const requestedModel = model;
-              if (event.permissionMode !== 'bypassPermissions' || event.session_id !== sessionId || typeof event.model !== 'string' ||
-                !matchesModel(requestedModel, event.model)) return 'configError';
+              if (typeof event.model !== 'string' || !matchesModel(requestedModel, event.model)
+                || !options.doctor && !config.brain.allowedModels.some(entry => matchesModel(entry, event.model))) {
+                await appendLedger(root, { runId, action: 'brain:model-rejected', status: 'fail',
+                  evidence: { requested: requestedModel, actual: event.model, allowed: config.brain.allowedModels } });
+                return 'configError';
+              }
+              if (event.permissionMode !== 'bypassPermissions' || event.session_id !== sessionId) return 'configError';
               initialized = true;
               if (!options.doctor) await patchState(current => ({
                 sessionId, actualModel: event.model, brain: {
@@ -390,6 +395,10 @@ export function lastCallUsage(result: Record<string, any>): { usage: Record<stri
 }
 
 export function matchesModel(alias: string, actual: string): boolean {
+  alias = alias.replace(/\[[^\]]*\]$/u, '');
+  actual = actual.replace(/\[[^\]]*\]$/u, '');
+  if (alias.startsWith('claude-')) return actual === alias
+    || actual.startsWith(`${alias}-`) && /^\d{8}$/u.test(actual.slice(alias.length + 1));
   if (alias === 'fable') return actual === 'claude-fable-5-1' || actual.includes('-fable-');
   return actual === alias || actual.includes(`-${alias}-`);
 }

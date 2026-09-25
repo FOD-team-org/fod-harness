@@ -9,7 +9,7 @@ import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { mkdtemp, readFile, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import orchestrator, { instruction, decideInbox, clearDecisionTimers } from '../extensions/orchestrator/index.ts';
+import orchestrator, { instruction, decideInbox, clearDecisionTimers, resumeHint } from '../extensions/orchestrator/index.ts';
 import { addTask, getTask, setTask } from '../src/core/backlog.ts';
 import { readState, updateState, transitionState } from '../src/core/state.ts';
 import { addJudgment, answerJudgment, readJudgment, applyJudgments, beginJudgmentSnapshot, finishJudgmentSnapshot, writeJudgmentStatus } from '../src/core/judgment.ts';
@@ -383,7 +383,7 @@ it.each([
   await updateState(t.root, { state: String(state), taskId: 'T01', awaitingUser: Boolean(awaitingUser),
     doctor: { ok: true, checkedAt: new Date(Date.now() - (fresh ? 0 : 13 * 3600000)).toISOString() } });
   await t.decide(['recover']); expect(t.sendMessage).toHaveBeenCalledTimes(resumes ? 1 : 0);
-  if (!resumes) expect(t.ctx.ui.notify).toHaveBeenCalledWith(`이전 세션 상태: ${state} /T01 — /develop-start 또는 /judged 로 이어갑니다`, 'info');
+  if (!resumes) expect(t.ctx.ui.notify).toHaveBeenCalledWith(`이전 세션 상태: ${state} /T01 — ${resumeHint(String(state), [])}`, 'info');
 });
 it('P2: /status는 아직 tick하지 않은 워처도 안정된 요약 필드를 표시', async () => {
   const t = await setup(); await t.command('status');
@@ -941,4 +941,31 @@ it('참고 무인자 /judged 검사 직후 held가 생겨도 해제하지 않는
   expect((await readJudgment(t.root)).completed).toEqual([]);
   await t.command('judged',item.id);
   expect((await readJudgment(t.root)).completed[0].id).toBe(item.id);
+});
+
+it.each([true, false])('P8 recovering 수동 develop-start는 자동 재개 한도=%s와 무관하게 복구 턴만 시작', async recoveryAutoResumed => {
+  const t = await setup();
+  await updateState(t.root, { state: 'recovering', userAborted: true, awaitingUser: true, autoTurns: 3, recoveryAutoResumed });
+  await updateState(t.root, { recoveryAutoResumed });
+  const beforeLedger = await readLedger(t.root);
+  await appendLedger(t.root, { runId: 'unfinished', action: 'fixture', status: 'unknown' });
+  await t.command('develop-start');
+  expect(await readState(t.root)).toMatchObject({ state: 'recovering', userAborted: false, awaitingUser: false, autoTurns: 0, recoveryAutoResumed });
+  expect(t.sendMessage).toHaveBeenCalledTimes(1);
+  expect(t.sendMessage.mock.calls[0][0].content).toContain('# recovering');
+  expect((await readLedger(t.root)).filter(entry => entry.action.startsWith('state:'))).toEqual(beforeLedger.filter(entry => entry.action.startsWith('state:')));
+});
+it.each(['recover', 'stalled'])('P8 %s 안내는 상태와 답 존재에 맞는 명령만 표시', async kind => {
+  for (const state of ['recovering', 'IMPLEMENT', 'IDLE']) for (const answered of [false, true]) {
+    const t = await setup();
+    await updateState(t.root, { state, awaitingUser: true, userAborted: true });
+    const { item } = await addJudgment(t.root, { title: '결정', background: '', options: ['진행'], recommend: '', blocks: '-' });
+    if (answered) await answerJudgment(t.root, item.id, '1');
+    t.ctx.ui.notify.mockClear(); await t.decide([kind]);
+    const message = t.ctx.ui.notify.mock.calls.map(([message]) => message).join('\n');
+    expect(message.includes('/develop-start')).toBe(state !== 'IMPLEMENT');
+    expect(message.includes('복구 턴')).toBe(state === 'recovering');
+    expect(message.includes('/judged <번호>')).toBe(answered);
+    expect(t.sendMessage).not.toHaveBeenCalled();
+  }
 });

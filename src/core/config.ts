@@ -14,7 +14,7 @@ export interface HarnessConfig {
   skills: { target: string; install: string[] };
   claudeMd: { targets: ('CLAUDE.md' | 'AGENTS.md')[] };
   brain: {
-    command: string | string[]; switchCommand: string | string[]; model: string;
+    command: string | string[]; switchCommand: string | string[]; model: string; allowedModels: string[];
     skipPermissions: boolean; allowPlugins: boolean; maxTurnMinutes: number; doctorTtlHours: number; rotateAtTokens: number;
   };
   delegate: {
@@ -51,6 +51,25 @@ function command(value: unknown, fallback: string | string[], label: string): st
   throw new Error(`${label} 명령이 올바르지 않습니다`);
 }
 
+export const defaultAllowedModels = ['claude-opus-5-5', 'claude-fable-5-1'];
+// Shared by asynchronous config loading and synchronous Pi model registration.
+export function brainModels(candidate: unknown, changedKey?: string): { model: string; allowedModels: string[] } {
+  const raw = object(candidate, '하네스'), brain = object(defaultValue(raw.brain, {}), 'brain');
+  const allowed = defaultValue(brain.allowedModels, defaultAllowedModels);
+  if (!Array.isArray(allowed) || !allowed.length || allowed.some(value => typeof value !== 'string' || !value || /\s/u.test(value))
+    || new Set(allowed).size !== allowed.length) throw new Error('brain.allowedModels는 공백 없는 문자열의 중복 없는 비어 있지 않은 배열이어야 합니다');
+  const allowedModels = [...allowed] as string[];
+  const requested = defaultValue(brain.model, 'claude-fable-5-1');
+  const alias = requested === 'fable' ? 'claude-fable-5-1' : requested === 'opus' ? 'claude-opus-5-5' : undefined;
+  const model = alias && allowedModels.includes(alias) ? alias : requested;
+  if (typeof model !== 'string' || !allowedModels.includes(model)) {
+    if (changedKey === 'brain.allowedModels') throw new Error(`새 목록에 현재 brain.model(${String(requested)})이 없습니다. 먼저 fodh config set brain.model <새 목록 안의 모델> 로 옮기거나, 목록에 현재 모델을 남기세요`);
+    if (changedKey === 'brain.model') throw new Error(`brain.model(${String(requested)})이 brain.allowedModels(${allowedModels.join(', ')})에 없습니다. 먼저 사용자 터미널에서 fodh config set brain.allowedModels '[…,"${String(requested)}"]' --approve 로 목록에 넣으세요`);
+    throw new Error(`brain.model(${String(requested)})이 brain.allowedModels(${allowedModels.join(', ')})에 없습니다. 사용자 터미널에서 fodh config set brain.allowedModels '[…]' --approve 로 목록을 바꾸세요`);
+  }
+  return { model, allowedModels };
+}
+
 const warnedKeysHash = new Map<string, string>();
 export async function loadConfig(root: string, candidate?: unknown, options: { dryRun?: boolean } = {}): Promise<HarnessConfig> {
   const raw = object(candidate === undefined ? await readJson<unknown>(harnessPath(root, 'harness.json'), {}) : candidate, '하네스');
@@ -65,14 +84,11 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     stableSeconds: positive(defaultValue(watch.stableSeconds, 10), 'watch.stableSeconds'),
     tickSeconds: positive(defaultValue(watch.tickSeconds, 30), 'watch.tickSeconds'),
   };
-  const model = defaultValue(brain.model, 'fable');
+  const { model, allowedModels } = brainModels(raw);
   const skipPermissions = defaultValue(brain.skipPermissions, true);
   const allowPlugins = defaultValue(brain.allowPlugins, false);
   if (typeof allowPlugins !== 'boolean') throw new Error('brain.allowPlugins는 불리언이어야 합니다');
   const maxTurnMinutes = defaultValue(brain.maxTurnMinutes, 45);
-  if (typeof model !== 'string' || !['fable', 'opus', 'sonnet', 'haiku'].includes(model)) {
-    throw new Error('brain.model은 fable, opus, sonnet, haiku 중 하나여야 합니다');
-  }
   if (typeof skipPermissions !== 'boolean') throw new Error('brain.skipPermissions는 불리언이어야 합니다');
   if (typeof maxTurnMinutes !== 'number' || !Number.isFinite(maxTurnMinutes) || maxTurnMinutes <= 0) {
     throw new Error('brain.maxTurnMinutes는 양수여야 합니다');
@@ -183,7 +199,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     brain: {
       command: command(brain.command, 'claude', 'brain.command'),
       switchCommand: command(brain.switchCommand, ['cswap', 'switch'], 'brain.switchCommand'),
-      model, skipPermissions, allowPlugins, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
+      model, allowedModels, skipPermissions, allowPlugins, maxTurnMinutes, doctorTtlHours, rotateAtTokens,
     },
     cleanup: { rebuildablePaths: strings(cleanup.rebuildablePaths, [], 'cleanup.rebuildablePaths'), keepPaths: strings(cleanup.keepPaths, [], 'cleanup.keepPaths'),
       sharedCaches: { enabled, paths: strings(caches.paths, [], 'cleanup.sharedCaches.paths') }, codexRunsKeep: nonnegativeInteger(defaultValue(cleanup.codexRunsKeep, 20), 'cleanup.codexRunsKeep'),
@@ -272,7 +288,7 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
   }
   return value;
 }
-export const approvalConfigKeys = ['delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
+export const approvalConfigKeys = ['brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
 export async function setConfig(root: string, key: string, text: string,
   options: { fromCli?: boolean; approve?: boolean } = {}): Promise<unknown> {
   await assertNotBrain(root, `config set ${key}`);
@@ -290,6 +306,7 @@ export async function setConfig(root: string, key: string, text: string,
       parent = object(parent[part], parts.join('.'));
     }
     parent[parts.at(-1)!] = value;
+    brainModels(raw, key);
     await loadConfig(root, raw, { dryRun: true });
     await atomicWrite(path, JSON.stringify(raw, null, 2) + '\n');
     return value;

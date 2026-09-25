@@ -15,3 +15,5 @@
 정리는 `fodh cleanup run`, 검증은 `fodh verify run`을 사용한다. 전체 테스트·전체 빌드는 VERIFY의 `fodh verify run --heavy`만 허용한다. 메모리 중단 중에는 새 위임을 시작하지 않는다. 로컬 알림은 `fodh notify send --title … --body …`로 보낸다.
 
 하네스 스킬(fodh-workflow 등)이 있으면 막힐 때 먼저 읽는다.
+
+`fodh` 출력은 파이프(`| jq`, `| head`, `2>/dev/null` 등)로 가공하지 말고 그대로 읽는다. JSON 에 `error` 키가 있으면 그 문구가 원인이며, 원인을 추측해 판단을 만들지 않는다.
