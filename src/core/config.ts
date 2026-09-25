@@ -1,3 +1,4 @@
+import { approvalRules, type ApprovalRule } from '../../hooks/approval-rules.mjs';
 import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
@@ -30,10 +31,11 @@ export interface HarnessConfig {
   verify: { commands: string[]; heavy: string[]; timeoutMinutes: number };
   notify: { channels: ('tui' | 'macos' | 'slack' | 'ledger')[] };
   budget: { dailyTurns: number; dailyHours: number };
-  worktrees: { root: string; prefix: string };
+  worktrees: { root: string; prefix: string; links: string[] };
   watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
   judgment: { file: string };
   requiresApproval: string[];
+  approvalRules: ApprovalRule[];
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -191,6 +193,16 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
   for (const name of install) if (!/^[a-z0-9]+(-[a-z0-9]+)*$/u.test(name) || !existsSync(new URL(`../../skills/${name}/SKILL.md`, import.meta.url))) throw new Error(`skills.install 에 없는 스킬: ${name}`);
   const targets = strings(claudeMd.targets, ['CLAUDE.md'], 'claudeMd.targets');
   if (!targets.length || new Set(targets).size !== targets.length || targets.some(t => !['CLAUDE.md', 'AGENTS.md'].includes(t))) throw new Error('claudeMd.targets는 CLAUDE.md·AGENTS.md의 중복 없는 비어 있지 않은 배열이어야 합니다');
+  const links = strings(wt.links, [], 'worktrees.links');
+  const linkKeys = links.map(path => docsPathKey(resolve(root, path)));
+  if (new Set(linkKeys).size !== links.length || links.some(path => {
+    const target = docsPathKey(resolve(root, path)), judgmentPath = docsPathKey(resolve(root, file));
+    return isAbsolute(path) || path.split('/').some(part => part === '..' || !part || part === '.')
+      || /[\\*?\[\]#!]/u.test(path) || path.startsWith('-') || path !== path.trim()
+      || path.split('/').some(part => ['.git', '.pi', '.claude'].includes(docsPathKey(part)))
+      || /^(?:\.env(?:\..*)?|\.envrc|\.dev\.vars(?:\..*)?|\.npmrc|\.netrc|\.pypirc|neon_api\.json|key\.properties)$|\.(?:pem|key|p8|p12|keystore|jks)$/i.test(path.split('/').at(-1)!)
+      || target === judgmentPath || target.startsWith(judgmentPath + '/') || judgmentPath.startsWith(target + '/');
+  })) throw new Error('worktrees.links는 보호 경로를 제외한 중복 없는 root 상대 경로여야 합니다');
   const config: HarnessConfig = {
     interview: { enforce, roundSize: bounded(interview.roundSize, 6, 5, 8, 'interview.roundSize'), maxAsks: bounded(interview.maxAsks, 2, 1, 5, 'interview.maxAsks'), extraBankFile: protectedInternal(interview.extraBankFile, '.pi/interview-bank.md', 'interview.extraBankFile') },
     docs: { root: docsRoot, overrideDir: protectedInternal(docs.overrideDir, '.pi/templates/docs', 'docs.overrideDir') },
@@ -209,7 +221,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes') },
     notify: { channels: channels as HarnessConfig['notify']['channels'] },
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
-    delegate: delegation, worktrees: { root: wtRoot, prefix }, watch: watching, judgment: { file }, requiresApproval,
+    delegate: delegation, worktrees: { root: wtRoot, prefix, links }, watch: watching, judgment: { file }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
   };
   const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
   for (const [prefix, values, known] of [
@@ -288,7 +300,7 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
   }
   return value;
 }
-export const approvalConfigKeys = ['brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
+export const approvalConfigKeys = ['approvalRules', 'worktrees.links', 'requiresApproval', 'brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
 export async function setConfig(root: string, key: string, text: string,
   options: { fromCli?: boolean; approve?: boolean } = {}): Promise<unknown> {
   await assertNotBrain(root, `config set ${key}`);

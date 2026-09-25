@@ -1,7 +1,7 @@
 import { isUtf8 } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { access, realpath, readFile, lstat, readlink } from 'node:fs/promises';
+import { access, realpath, readFile, lstat, readlink, mkdir, symlink, appendFile } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getTask, setTask } from './backlog.ts';
@@ -152,6 +152,47 @@ export async function commitWorktree(root: string, taskId: string, message: stri
     }
   });
 }
+// lstat keeps dangling links and existing checkout files intact; parents must stay in this checkout.
+async function linkDependencies(root: string, path: string, taskId: string, links: string[], runId: string) {
+  if (!links.length) return;
+  const linked: string[] = [], skipped: string[] = [];
+  for (const item of links) {
+    const source = resolve(root, item), target = resolve(path, item);
+    if (!await exists(source)) { skipped.push(item); continue; }
+    let present = false;
+    try {
+      const stat = await lstat(target); present = true;
+      skipped.push(item);
+      if (!stat.isSymbolicLink() || resolve(dirname(target), await readlink(target)) !== source) continue;
+    }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    let parent = path;
+    for (const component of item.split('/').slice(0, -1)) {
+      parent = resolve(parent, component);
+      try { await mkdir(parent); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      const stat = await lstat(parent);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('worktrees.links 부모는 워크트리 내부 디렉터리여야 합니다');
+    }
+    if (!present) { await symlink(source, target); linked.push(item); }
+    let ignored = false;
+    try { await execute('git', ['-C', path, 'check-ignore', '-q', '--', item]); ignored = true; }
+    catch (error) { if ((error as { code?: number }).code !== 1) throw error; }
+    if (!ignored) {
+      const common = resolve(path, (await git(path, ['rev-parse', '--git-common-dir'])).trim());
+      const exclude = resolve(common, 'info/exclude'), line = '/' + item;
+      let text = '';
+      try { text = await readFile(exclude, 'utf8'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (!text.split(/\r?\n/u).includes(line)) {
+        await mkdir(dirname(exclude), { recursive: true });
+        await appendFile(exclude, (text && !text.endsWith('\n') ? '\n' : '') + line + '\n');
+        await appendLedger(root, { runId, taskId, action: 'worktree:link-excluded', status: 'ok', evidence: { path: item } });
+      }
+    }
+  }
+  await appendLedger(root, { runId, taskId, action: 'worktree:link', status: 'ok', evidence: { taskId, linked, skipped } });
+}
 export async function createWorktree(root: string, taskId: string, base = 'HEAD') {
   if (!/^T\d+$/u.test(taskId)) throw new Error('task ID가 올바르지 않습니다');
   if (!base || base.startsWith('-') || /[\r\n\0]/u.test(base)) throw new Error('--base가 올바르지 않습니다');
@@ -166,7 +207,10 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
     catch { throw new CodexError('git 저장소가 아닙니다', { worktree: null }); }
     const baseBranch = (await git(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
     if (baseBranch === 'HEAD') throw new Error('루트가 브랜치 위에 있어야 합니다');
-    if (registered && await exists(registered.path)) return { ...registered, base: await registeredBase(root, registered), worktree: registered.path, created: false };
+    if (registered && await exists(registered.path)) {
+      await linkDependencies(root, registered.path, taskId, config.worktrees.links, randomUUID());
+      return { ...registered, base: await registeredBase(root, registered), worktree: registered.path, created: false };
+    }
     const runId = randomUUID();
     await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'pre', evidence: { path, branch, base } });
     try {
@@ -178,6 +222,7 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
       const record = { taskId, path, branch, base: baseCommit, baseBranch: registered?.baseBranch ?? baseBranch, createdAt: new Date().toISOString() };
       await setTask(root, taskId, { worktree: path });
       await updateState(root, current => ({ worktrees: [...(current.worktrees ?? []).filter(item => item.taskId !== taskId), record] }));
+      await linkDependencies(root, path, taskId, config.worktrees.links, runId);
       await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'ok', evidence: record });
       return { ...record, worktree: path, created: true };
     } catch (error) {

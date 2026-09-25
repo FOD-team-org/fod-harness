@@ -78,6 +78,8 @@ Codex 수행자 기본값 `gpt-6-sol`은 판단 A11 로 확정되었습니다.
 
 번호·승인 토큰 답은 기본 10초 안정화 후 자동 적용하고, 자유 서술 답은 `watch.freeTextStableSeconds`(기본 60초) 이상 안정된 뒤 적용합니다. 대기 중 문서를 다시 편집하면 안정화 시간을 다시 셉니다. `/judged`는 수동 즉시 적용 경로입니다. 두뇌·doctor 턴 시작 직전의 `id → raw 답 줄` 스냅숏과 종료 시 내용을 비교하여 바뀌거나 새로 생긴 비어 있지 않은 답은 held로 보류합니다. 진행 중 인박스는 적용을 지연하며, 재시작·recovering 때 잔존 스냅숏도 처리합니다. held가 있으면 인자 없는 `/judged`는 목록만 표시하고, `/judged A5`처럼 번호를 명시해야 그 답을 해제·적용합니다.
 
+두뇌가 판단을 등록한 바로 그 턴 안에 답을 쓰면 안전을 위해 held 가 된다. 알림을 보고 /judged A<n> 로 확인하면 적용된다.
+
 - `fodh codex task|review|research --spec <파일> [--task T01] [--resume last] [--wait]`: 비동기 위임. `status [runId]`, `result <runId>`, `cancel <runId>`로 조회·회수한다. 완료는 `codex-done` 인박스로 전달된다.
 - `fodh worktree create <T> [--base <ref>]`, `remove <T> [--force]`, `list`: 하네스 등록 워크트리를 관리한다.
 - `fodh slots status`: 머신 전역 Codex 슬롯과 생존 여부를 확인한다.
@@ -91,7 +93,19 @@ P3 위임 복구: 감독이 죽어도 그룹 구성원 중 기록된 Codex 자�
 
 | 설정 | 기본값 | 의미 |
 |---|---:|---|
+| `approvalRules` | `[]` | 프로젝트 승인 규칙. 아래 예시처럼 목록에 넣으면 항상 적용 |
+| `worktrees.links` | `[]` | root 의 의존성을 워크트리에 링크. 예: `["node_modules"]`. 무시되지 않는 링크는 공통 Git info/exclude 에 추가 |
 | `delegate.codex.waitMinutes` | 8 | CLI 대기 상한(양의 정수, 분) |
+
+사용자 승인 규칙은 `^` 로 명령 시작을 앵커한다. 앵커가 없으면 `git log --grep=db:migrate` 같은 읽기 명령도 걸린다. 패턴은 200자 이하만 허용하며 역참조와 중첩 수량자는 거부한다. 정적 검사가 모든 정규식의 실행 비용을 보장하지는 않으므로 복잡한 패턴을 피한다.
+
+`approvalRules` 항목 예시:
+
+```json
+{"id":"db-migrate","pattern":"^npm run db:(?:migrate|push)\\b|^drizzle-kit (?:migrate|push)\\b"}
+```
+
+npm 별칭·옵션 형태(`npm run-script db:migrate`, `npm --prefix . run db:migrate`, `npm run db:migrate --`)도 막으려면 `^npm\b.*\brun(?:-script)?\s+db:migrate\b`처럼 규칙을 넓게 쓴다.
 
 두뇌 Bash timeout 기본·최대는 각각 600000ms로 주입하며 사용자가 준 환경값은 유지한다. `--wait`가 어떤 이유로든 결과 없이 끝나면 stderr runId 또는 `fodh codex status`의 delegation.runId로 위임 대기를 표시하고, `--wait`를 다시 호출하지 않는다.
 
@@ -147,6 +161,8 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 | 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
 | 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 존재하는 비디렉터리라고 확인될 때만 비재귀로 본다. 조회 실패(ENOENT·EACCES)나 같은 체인의 cd는 재귀로 간주한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
 
+`approvalRules`, `worktrees.links`, `requiresApproval`도 사용자 CLI에서 `--approve`가 필요한 승인 전용 키다.
+
 `fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`, `brain.allowedModels`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
 
 `fodh memory reset`은 사용자 터미널 전용이다. 두뇌 env·부모 체인 판정과 훅에서 거부하며 두뇌용 CLAUDE.md 명령 목록에서도 제외한다. 이 명령은 메모리 경보·5분 타이머와 이전 미처리 pressure/critical 이벤트를 해제하고 `memory:reset` 원장을 남긴다. paused(memory) 또는 WAIT_RESOURCE(lastPaused=memory)이면 memory-recovered 인박스를 통해 기존 PICK 회복 경로를 탄다. 실제 스왑을 줄이는 명령은 아니며 초과 표본이 계속되면 다시 5분 뒤 중단된다.
@@ -156,6 +172,11 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 턴 종료 시 tool_use의 Write 경로와 Bash의 쓰기 문맥만 사후 검사한다. 누락 의심은 경로별 `audit:path-boundary warn` 원장과 턴당 TUI 알림 1건(최대 3경로)으로 남긴다. 같은 root·경로는 프로세스 수명 동안 한 번만 알리고 원장은 계속 남긴다. 이미 거부된 도구는 제외하고, 감사만으로 판단대기를 생성하거나 실행을 되돌리지는 않는다. doctor는 Bash 표식과 `src/FODH_DOCTOR_MARKER.ts` Write의 서로 다른 차단 증거 2건을 요구한다. doctor의 --max-turns는 3이며 표식 파일이 실제 생성되면 삭제하고 실패한다. 실패하면 기존 IMPLEMENT·MERGE 게이트가 계속 차단한다.
 
 ## 알려진 한계
+
+이 훅은 협조적인 두뇌의 실수를 막는 가드레일이며, 적대적 우회를 막는 샌드박스가 아니다. 두뇌에게는 인식하지 못한 셸 구조를 거부한다. 스크립트 파일 내부·문자 코드 조립·셸 밖 경로(별칭 파일 등)는 한계로 남는다. OS 수준 샌드박스는 후속 후보다.
+
+검수 수렴 기준: 높음·중간은 협조적인 두뇌가 평소 작업에서 쓸 법한 형태로 보호 대상이 깨지거나, 흔한 문법을 파서가 잘못 읽는 경우에 매긴다. 일부러 만든 난해한 변형은 낮음·참고로 분류해 아래 한계 표에 남기며 APPROVE를 막지 않는다.
+
 
 프로젝트 REVIEW→PROJECT_READY는 `.pi/codex/*/meta.json`의 `kind: review`, `status: ok`, `startedAt >= reviewSince` 증거를 요구한다. 업그레이드 전 상태에 `reviewSince`가 없으면 `enteredAt`을 사용하며 둘 다 없으면 검수 시각 증거를 인정하지 않는다. task의 REVIEW→MERGE도 같은 taskId의 검수 증거가 필요하지만, 그 taskId의 `kind: task`, `status: ok` 구현 meta가 있으면 면제한다. delegate 표기는 판정에 쓰지 않는다. 이 면제 경로의 Claude Agent 검수 증거는 여전히 수집하지 못한다. `reviewSince`는 새 REVIEW 진입 때 설정하고, REVIEW를 떠날 때 지운다. 판단 대기·일시 중단 시에는 `resumeReviewSince`에 보관해 WAIT_JUDGMENT 복귀 또는 PICK의 resume 경로에서 복원한다.
 
@@ -170,18 +191,28 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | 커밋 비밀값 검사(P5) | 1 MB 초과·바이너리 untracked 파일은 내용의 비밀값 검사 없이 커밋되며 이름만 원장에 남는다 |
 | 검증 산출물(P6) | 검증 뒤 새로 더러워진 경로는 result.json·state.verify.dirtyAfter에 남는다. 검수 커밋의 clean 검사에서 거부되면 검증 산출물인지 확인하고 프로젝트 .gitignore 추가를 위임한다 |
 | git 프로젝트 판정(L5) | F8은 프로젝트 루트의 `.git`만 확인한다. git 저장소의 하위 디렉터리를 프로젝트 루트로 쓰면 비-git으로 판정되어 루트 폴백이 적용된다 |
-| 서브셸·명령 치환·셸 문자열 | `( … )`·`$( … )`·백틱 안의 명령, heredoc으로 셸에 넘긴 문자열·스크립트 파일 실행의 내부 명령은 규칙 검사에서 빠진다(비밀값·`FODH_`·doctor 표식 문자열 검사만 남는다). `sh -c`·eval 문자열은 재파싱한다. 부모 체인·brain-guard·사후 감사가 뒤를 받친다 |
-| 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다 |
+| 서브셸·명령 치환·셸 문자열 | 묶음·제어문 앞뒤를 벗기고 `sh -c`·eval 문자열을 재파싱한다. `$()`·백틱 안은 깊이 3까지 검사하며 짝/깊이나 남은 구조를 해석하지 못하면 두뇌에게 경계 거부한다. 함수·case·coproc·프로세스 치환도 두뇌 검사에 포함한다. 두뇌의 표준입력 셸(파이프·heredoc·here-string 포함)은 거부하며 `bash -c`를 사용한다. 표준입력 인터프리터는 원문 전체의 보호·판단 파일 언급을 검사한다. 별도 스크립트 파일 내부는 전부 해석하지 못한다 |
+| 스크립트 내부 쓰기 | 훅은 명령 토큰 기반이다. 사후 감사가 인라인 코드·heredoc의 리터럴 경로를 추가 탐지하지만, 별도 스크립트·patch 내용과 동적으로 만든 경로는 모두 해석하지 못한다. 인라인 보호 경로를 문자 코드로 조립하는 형태는 탐지하지 못한다. 의심 경고는 실제 파일 변경의 증명이 아니며 오탐도 가능하다. 사후 감사에서 괄호에 붙은 fd(`)2>&1`) 앞 경로가 `unresolved` 목록에 잡음으로 남을 수 있다(판정에는 영향 없음) |
 | MCP 도구 쓰기 | 기본 MCP 제한 옵션과 Codex MCP 도구 차단이 있지만 그 외 MCP 고유 입력 형식은 경로 가드와 감사의 일반 Write/Bash 판정 밖이다. brain.allowPlugins=true도 위임 훅을 해제하지 않는다. 변수 경유(`P=codex; $P …`)·`$(which codex)`·python subprocess 호출은 리터럴 명령 검사로 차단하지 못한다 |
 | 판단 답 보류 | mtime을 사용하지 않는다. 사용자가 두뇌 턴 중 쓴 답도 held가 되므로 /judged <번호>로 확인한다. 턴 종료 후 분리된 자식이 늦게 쓴 답은 종료 스냅숏 비교로 잡지 못한다. 비정상 종료 뒤 잔존 스냅숏은 다음 begin/recover에서 먼저 정산된다. finish 실패는 진행 표지를 지우고 recover를 한 번 재시도하며, 재실패해도 brainTurn.endedAt을 기록해 활성 턴을 끝낸다. 복구는 pid와 processStartedAt 시작 시각을 대조하므로 재사용 pid는 종료된 것으로 보고, EPERM은 생존으로 취급한다. 살아 있는 다른 Pi 인스턴스의 스냅숏은 건드리지 않는다. 턴 중 무인자 적용은 스냅숏과 달라진 답을 미적용으로 남기며 번호 명시 적용은 유지한다 |
-| 변수·인용·경로 확장 | 토큰을 cwd 기준으로 resolve하며 셸 변수·glob·치환·cd 효과는 실행/추적하지 않는다. 훅은 기존 조상과 symlink를 realpath로 확인하지만 사후 감사는 리터럴 경로 기준이다. 인용된 인라인 코드는 일부만 감사한다 |
+| 임시 변수 삭제 | 임시 변수 치환 경로와 빈 변수 해석이 모두 기존 가드를 통과해야 한다. 임시 변수 아래 개별 파일 삭제 대신 `rm -rf "$T"` 를 사용한다. 대입 실패·미실행을 안전한 임시 경로로 가정하지 않는다. 복사·추출과 삭제는 명령을 나눠 쓴다. 같은 호출에서 대입한 변수에 임시 예외를 줄 수 없으면 전용 안내를 낸다. HOME·PWD·OLDPWD·TMPDIR과 대입하지 않은 이름은 기존 경계 안내를 낸다. 삭제는 다음 호출에서 mktemp가 출력한 리터럴 경로로 한다(셸 변수는 호출 사이에 남지 않는다) |
+| 추출·재귀 복사 | 두뇌는 보호 디렉터리의 상위 목적지와 cwd를 알 수 없는 추출·재귀 복사를 거부한다. `.pi/scratch`, 확인한 임시 디렉터리, 보호 경로를 제외한 워크트리에 추출할 수 있다. 사용자 세션의 상위 디렉터리 추출은 검사하지 않는다. |
+| 셸 밖 실행 환경 | 별칭 파일·별도 스크립트가 명령 해석이나 경로를 바꾸는 효과는 전부 추적하지 못한다. 원문에 보이는 alias·PATH 변경은 임시 경로 예외를 끈다. |
+| 한 명령에서 만든 링크 | ln·mv·git 또는 여러 복사·추출이 섞이면 임시 목적지 예외를 주지 않는다. 확인한 단일 복사·추출의 목적지에만 예외를 주며 다른 쓰기에는 이어주지 않는다. `ln -s "$PWD" /tmp/l && echo x > /tmp/l/src/a.ts` 같은 새 링크 경유 쓰기는 훅 시점 realpath만으로 확인할 수 없는 기존 한계다 |
+| 의존성 링크 | 자격 증명이 든 파일은 링크하지 않는다. 필요하면 판단으로 요청한다. `.env`·`.env.*`·`.envrc`·`.dev.vars`·`.dev.vars.*`·`.npmrc`·`.netrc`·`.pypirc`·`neon_api.json`·`key.properties`와 인증서·키 확장자는 링크에서 거부한다. 의존성 추가·변경은 루트 `node_modules` 를 바꾸므로 워크트리 task 로 하지 않고 판단을 거친다. Codex 샌드박스는 링크 너머에 쓰지 못한다 |
+| 셸 시작 파일 | 두뇌는 HOME·ZDOTDIR의 셸 시작 파일과 CLAUDE_ENV_FILE을 변경할 수 없다. |
+| 변수·인용·경로 확장 | 토큰을 cwd 기준으로 resolve하며 셸 변수·glob·치환·cd 효과는 실행/추적하지 않는다. 훅은 기존 조상과 symlink를 realpath로 확인하지만 사후 감사는 리터럴 경로 기준이다. 인용된 인라인 코드는 일부만 감사한다. 패턴은 `*?[`만 보고, 사용자는 보호 경로와만 대조하며 두뇌는 판단·시작 파일도 대조한다. 두뇌의 쓰기 목적지 zsh 한정자는 거부하고 사용자 세션의 zsh 한정자 쓰기는 검사하지 않는다. 임시 변수로 치환되지 않은 쓰기 목적지의 동적 조각은 각각 한 경로 조각 와일드카드 `[^/]*`로 바꾼다. 붙은 확장의 연속 와일드카드는 하나로 합친다. 마지막 조각에서 와일드카드 바로 뒤의 끝 확장자와 와일드카드를 뺀 뒤 글자·숫자가 남거나, 전용 디렉터리 `.pi`·`.claude` 또는 루트 기준 가드 경로 전체가 정적 조각으로 연속해서 적혔을 때만 같은 보호 대상들과 대조한다. 루트 밖 가드 디렉터리는 이름 단서로 쓰지 않는다. 두뇌의 시작 파일은 해당 파일의 비-HOME·비-ZDOTDIR 전용 디렉터리만 단서로 쓰고 루트와 그 조상은 제외한다. 모든 조각이 동적인 목적지는 대조하지 않는다. 조건을 만족하지 않거나 일치하지 않으면 기존 경계 판정을 따른다. zsh 글롭 플래그(`(#i)` 등, extended_glob)는 검사하지 않는다. 확인된 임시 변수 뒤에 동적 조각이 붙은 목적지(`"$T/$f"`)는 임시 경로로 치환하지 않으며 두뇌는 거부한다 |
+| 동적 복사·절대 경로 변수 | 사용자도 `"$X/.pi"`·`"$X/.claude"` 복사 목적지는 `$X`가 `.`일 수 있어 거부한다. 백업은 리터럴 경로나 mktemp로 한다. 앞머리 변수가 절대 경로(`$PWD`·`$ROOT`·`$(git rev-parse --show-toplevel)`)이면 사용자 세션은 보호 대상과 대조하지 못한다. 두뇌는 거부한다. 마지막 조각이 가드 디렉터리 이름과 같은 일반 이름(`"$D/templates"`, `.pi/templates` 가 있을 때)이면 사용자도 거부될 수 있다. 두뇌가 상대 경로(`../../.config/fish/$F`)로 쓰는 시작 파일 디렉터리는 대조하지 못한다(`~`·절대 경로 형태는 거부한다) |
+| 셸 주석 | 공백 없이 `)` 뒤에 붙은 `#`(`(npm test)# …`)는 주석으로 보지 않는다 |
 | Codex 자식 | Codex는 Claude 훅 밖이다. FODH_CODEX_CHILD=1의 훅 거부는 보조이며 실제 방어는 CLI 진입 거부다 |
 | 100개 이상 삭제 | 훅은 삭제 개수를 세지 않는다. 대량 삭제 판정은 사후 검수 몫이며 자동 100개 임계 감사는 구현하지 않는다 |
-| 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다 |
+| 사용자 대화형 세션 | FODH_BRAIN이 없으면 규칙 2·4와 두뇌 전용 git 제한을 적용하지 않는다. 비밀·승인·기존 상태 가드·자기수정 보호는 유지한다. 프로세스 치환 본문은 검사하지 않는다(두뇌는 검사한다) |
 | 부모 프로세스 확인 | 살아 있는 Pi 잠금 중 ps 조회가 막히면 사용자 CLI의 설정 변경·memory reset도 거부될 수 있다. 이중 fork로 부모 체인에서 벗어난 자식은 이 판정만으로 막지 못한다. 실제 부모 체인 실기는 별도 확인이 필요하다 |
 | Pi 종료와 고아 두뇌 | Pi가 SIGHUP·SIGTERM으로 죽으면 두뇌 그룹을 동기 TERM→KILL로 회수하고 orphan 파일을 다음 session_start 원장으로 옮긴다. SIGINT 도 같은 방식으로 회수한다(Pi 가 Ctrl+Z 로 멈춘 동안은 제외). session_start에서 처리기를 재설치하고 두뇌 턴 직전에 순서를 자가 교정해 Pi의 즉시 종료 처리기보다 먼저 회수한다. SIGKILL로 죽은 Pi의 두뇌는 다음 session_start가 회수하며, 그 사이 FODH_BRAIN=1인 두뇌의 fodh 쓰기는 잠금 소유자 부재·사망·읽기 실패로 코드 2 거부된다. 읽기 조회는 허용한다. 다음 세션 전까지 프로세스 자체가 남는 지연은 있다 |
 | 위임 감독 신호 | 취소 표지 없는 `kill <감독 pid>`(SIGTERM)는 무시된다 — `fodh codex cancel <runId>`를 쓴다. SIGKILL은 막을 수 없다. 감독은 CLI→런처→감독의 2단 분리로 시작한다 |
-| Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다 |
+| 복사·이동 잔여 문법 | GNU 묶음 `-t`(`cp -vt DIR x`, `install -Dt DIR x`)는 마지막 인자를 목적지로 본다. macOS cp에는 `-t`가 없다. 디렉터리째 원본 삭제(`rsync -a --remove-source-files DIR/ …`)와 사용자 세션의 보호 디렉터리 이름 바꾸기(`mv .claude .claude.bak`)는 검사하지 않는다. |
+| 아카이브 생성 | `tar -cf`·`zip`의 출력 파일은 쓰기 경로로 보지 않는다. |
+| Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다. 예: `(cd wt && cp x ../.pi/harness.json)`의 복사 목적지는 바뀐 cwd로 추적하지 않는다 |
 
 
 ### task 완료 증거 흐름

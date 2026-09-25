@@ -217,3 +217,40 @@ it('참고 jiti 모듈 재평가도 global Symbol의 진행 턴을 공유한다'
   await runTurn('fixture', { root, env: { HOME: root } });
   expect(other.isTurnInProgress(root)).toBe(false);
 });
+
+it.each([{ reported: 'IMPLEMENT', slot: true, warnings: 0 }, { reported: 'VERIFY', slot: false, warnings: 1 }])(
+  'H3 두뇌 종료 상태 대조 $reported / slot=$slot', async ({ reported, slot, warnings }) => {
+    const root = await project('IMPLEMENT');
+    await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+    if (slot) await updateState(root, { awaitingSlot: { kind: 'codex', since: new Date().toISOString(), owner: { root, runId: 'fixture-slot', pid: process.pid, startedAt: 'fixture', acquiredAt: new Date().toISOString() } } });
+    vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
+      const args = options.args!, sid = args[args.indexOf('--session-id') + 1];
+      await options.onEvent?.({ type: 'system', subtype: 'init', session_id: sid, apiKeySource: 'none', permissionMode: 'bypassPermissions', model: 'haiku' });
+      await options.onEvent?.({ type: 'result', is_error: false, result: `대기: 슬롯\n상태: ${reported}` });
+      return { code: 0, cleaned: true, stderr: '' };
+    });
+    expect((await runTurn('fixture', { root, model: 'haiku', env: { HOME: root } })).reason).toBe('stop');
+    expect((await readState(root)).state).toBe(slot ? 'paused(slot)' : 'IMPLEMENT');
+    expect((await readLedger(root)).filter(e => e.action === 'report:state-mismatch')).toHaveLength(warnings);
+  },
+);
+it('H4 턴당 unresolved 경로별 info 1건·알림 없음', async () => {
+  const root = await project('IMPLEMENT');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
+  vi.spyOn(runner, 'runProcess').mockImplementation(async options => {
+    const args = options.args!, sid = args[args.indexOf('--session-id') + 1];
+    await options.onEvent?.({ type: 'system', subtype: 'init', session_id: sid, apiKeySource: 'none', permissionMode: 'bypassPermissions', model: 'haiku' });
+    for (const id of ['one', 'two']) {
+      await options.onEvent?.({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'echo > $f' } }] } });
+      await options.onEvent?.({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+    }
+    await options.onEvent?.({ type: 'result', is_error: false, result: '상태: IMPLEMENT' });
+    return { code: 0, cleaned: true, stderr: '' };
+  });
+  const notify = vi.fn();
+  await runTurn('fixture', { root, model: 'haiku', env: { HOME: root }, notify });
+  const entries = await readLedger(root);
+  expect(entries.filter(e => e.action === 'audit:path-unresolved')).toEqual([expect.objectContaining({ status: 'info', evidence: { path: '$f' } })]);
+  expect(entries.filter(e => e.action === 'audit:path-boundary')).toHaveLength(0);
+  expect(notify).not.toHaveBeenCalled();
+});

@@ -1,56 +1,8 @@
-import { it, expect, afterEach } from 'vitest';
-import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
+import { it, expect } from 'vitest';
+import { mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 
-const roots: string[] = [];
-interface HookOptions {
-  env?: NodeJS.ProcessEnv;
-  projectEnv?: 'FODH_PROJECT_ROOT' | 'CLAUDE_PROJECT_DIR';
-  cwdRelative?: string;
-  approval?: string[];
-  setup?: (root: string) => Promise<void>;
-  worktrees?: boolean; stateFile?: 'missing' | 'invalid'; configFile?: 'invalid' | 'missing';
-}
-async function invoke(tool_name: string, tool_input: unknown, state = 'IMPLEMENT', options: HookOptions = {}) {
-  const root = await mkdtemp('/private/tmp/fodh-hook-');
-  roots.push(root);
-  await mkdir(join(root, '.pi'));
-  await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state, worktrees: options.worktrees ? [{ path: join(root, 'wt') }, { path: root + '-wt' }] : [] }));
-  await writeFile(join(root, '.pi/harness.json'), '{}');
-  if (options.stateFile === 'missing') await rm(join(root, '.pi/harness-state.json'));
-  if (options.stateFile === 'invalid') await writeFile(join(root, '.pi/harness-state.json'), '{');
-  if (options.configFile === 'invalid') await writeFile(join(root, '.pi/harness.json'), '{');
-  if (options.configFile === 'missing') await rm(join(root, '.pi/harness.json'));
-  if (options.approval) {
-    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ requiresApproval: options.approval }));
-  }
-  await options.setup?.(root);
-  const cwd = options.cwdRelative ? join(root, options.cwdRelative) : options.projectEnv ? join(root, 'worktree') : root;
-  if (options.projectEnv || options.cwdRelative) await mkdir(cwd, { recursive: true });
-  const env = { ...process.env };
-  delete env.FODH_PROJECT_ROOT;
-  delete env.CLAUDE_PROJECT_DIR;
-  delete env.FODH_TEST_MARKERS;
-  delete env.FODH_BRAIN; delete env.FODH_DOCS_ROOT; delete env.FODH_CODEX_CHILD;
-  if (options.projectEnv) env[options.projectEnv] = root;
-  if (options.cwdRelative) env.FODH_PROJECT_ROOT = root;
-  Object.assign(env, options.env);
-  const input = JSON.parse(JSON.stringify(tool_input)
-    .replaceAll('@root@', root).replaceAll('@pkg@', resolve('.')));
-  return new Promise<{ code: number | null; stderr: string; stdout: string }>((resolveResult, reject) => {
-    const child = spawn(resolve('hooks/pretooluse.sh'), [], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '', stdout = '';
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.once('error', reject);
-    child.once('close', code => resolveResult({ code, stderr, stdout }));
-    child.stdin.end(JSON.stringify({ cwd, tool_name, tool_input: input }));
-  });
-}
-afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
-});
+import { invoke, roots, type HookOptions } from './hook-helpers.ts';
 
 it.each([
   ['grep -q foo <<< "$v"\nrm -rf .git', '[경계]'],
@@ -279,7 +231,7 @@ it.each(['echo ok > docs/a.md', 'echo ok >>docs/a.md', 'sed -i x docs/a.md', "se
   'rm -rf @root@/wt/build', 'rm -rf @root@-wt/build', 'git -C wt clean -fdx'])('P6 문서·워크트리 쓰기 허용: %s', async command => {
   expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
 });
-it.each(['rm -rf /tmp/x', 'rm -rf .', 'rm -rf .git', 'rm -rf .pi', 'find docs -delete', 'git clean -fdx'])('P6 삭제 경계: %s', async command => {
+it.each(['rm -rf /outside/x', 'rm -rf .', 'rm -rf .git', 'rm -rf .pi', 'find docs -delete', 'git clean -fdx'])('P6 삭제 경계: %s', async command => {
   expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
 });
 it('P6 직접 worktree 변경은 두뇌만 거부하고 fodh 경로를 안내한다', async () => {
@@ -378,7 +330,7 @@ it.each([
   const env = { FODH_BRAIN: '1', ...(command === 'rm -rf notes' ? { FODH_DOCS_ROOT: 'notes' } : {}) };
   expect((await invoke('Bash', { command }, 'IDLE', { env })).code).toBe(code);
 });
-it.each(['rm -rf .pi', 'rm -rf /tmp/example', 'find docs -delete', 'git clean -fdx'])('L11 미초기화에도 삭제 규칙 적용: %s', async command => {
+it.each(['rm -rf .pi', 'rm -rf /outside/example', 'find docs -delete', 'git clean -fdx'])('L11 미초기화에도 삭제 규칙 적용: %s', async command => {
   expect(await invoke('Bash', { command }, 'IDLE', { ...brain, stateFile: 'missing' })).toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
 });
 
@@ -424,8 +376,13 @@ it('F24 설정 판단 경로·기본 fallback·판단 저널을 보호한다', a
   const configured: HookOptions = { ...brain, setup: root => writeFile(join(root, '.pi/harness.json'), JSON.stringify({ judgment: { file: 'docs/결정.md' } })) };
   expect((await invoke('Edit', { file_path: 'docs/결정.md' }, 'IMPLEMENT', configured)).code).toBe(2);
   expect((await invoke('Bash', { command: 'tee docs/결정.md' }, 'IMPLEMENT', configured)).code).toBe(2);
-  for (const path of ['docs/판단대기.md', '.pi/harness-judgment-apply.json']) expect(await invoke('Write', { file_path: path }, 'IDLE', { ...brain, stateFile: 'missing', configFile: 'missing' }))
-    .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+  for (const path of ['docs/판단대기.md', '.pi/harness-judgment-apply.json']) {
+    expect(await invoke('Write', { file_path: path }, 'IDLE', { ...brain, stateFile: 'missing' }))
+      .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+    // H9: missing configuration now fails closed before path classification.
+    expect(await invoke('Write', { file_path: path }, 'IDLE', { ...brain, stateFile: 'missing', configFile: 'missing' }))
+      .toMatchObject({ code: 2, stderr: '하네스 가드[보호]: 하네스 설정을 읽을 수 없습니다.\n' });
+  }
 });
 
 it.each([
@@ -456,7 +413,7 @@ it.each([`bash -c 'fodh codex task --wait --spec docs/task.md'`,
 });
 
 it.each(['cp README.md docs/', 'mv docs/x docs/', 'rsync README.md docs/', 'tar -cf docs/archive.tar -C docs README.md',
-  'tar -xf archive.tar', 'unzip archive.zip'])('S5 일반 복사·이동·아카이브 오탐 허용: %s', async command => {
+  'tar -xf archive.tar -C .pi/scratch', 'unzip archive.zip -d .pi/scratch'])('S5 일반 복사·이동·아카이브 오탐 허용: %s', async command => {
   expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } })).code).toBe(0);
 });
 it.each(['nohup cp docs/판단대기.md docs/', 'timeout -k 5 10 cp /tmp/판단대기.md docs/',
@@ -520,12 +477,20 @@ it.each(['cp --recursive @root@/docs/x docs/', 'rsync --archive @root@/docs/x do
   expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => mkdir(join(root, 'docs/x'), { recursive: true }).then(() => {}) }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('판단') });
 });
-it.each(['tar xf a.tar -C .pi', 'bsdtar -xf a.tar --directory .pi/scratch', 'gtar xzf a.tar -C.pi', 'unzip a.zip -d .pi/scratch'])('N5 .pi 목적지 추출 거부: %s', async command => {
+// P5 now permits scratch extraction while continuing to deny the protected .pi root.
+it.each(['tar xf a.tar -C .pi', 'gtar xzf a.tar -C.pi'])('N5 .pi 목적지 추출 거부: %s', async command => {
   expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' } }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('.pi 아래에는 아카이브를 풀 수 없습니다') });
 });
+it.each(['bsdtar -xf a.tar --directory .pi/scratch', 'unzip a.zip -d .pi/scratch'])('P5 명시적 scratch 추출 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each(['tar xf a.tar', 'bsdtar -xf a.tar', 'unzip a.zip'])('P5 scratch cwd 추출 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, cwdRelative: '.pi/scratch' })).code).toBe(0);
+});
+
 it.each(['tar xf a.tar', 'bsdtar -xf a.tar', 'unzip a.zip'])('N5 .pi cwd 추출 거부: %s', async command => {
-  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, cwdRelative: '.pi/scratch' }))
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, cwdRelative: '.pi' }))
     .toMatchObject({ code: 2, stderr: expect.stringContaining('.pi 아래에는 아카이브를 풀 수 없습니다') });
 });
 
@@ -550,4 +515,203 @@ it.each(['cp --recursive /var/tmp/없는경로 docs/', 'cd /var/tmp && cp -a REA
 });
 it('L1 존재하는 비디렉터리 cp -a는 허용', async () => {
   expect((await invoke('Bash', { command: 'cp -a README.md docs/' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: root => writeFile(join(root, 'README.md'), 'existing') })).code).toBe(0);
+});
+
+const a14TempCommands = [
+  'node bin/expense.js --help && T=$(mktemp -d) && EXPENSE_DATA_DIR=$T node bin/expense.js add --help; rm -rf "$T"',
+  'node bin/expense.js --help >/tmp/t11rev-run.txt 2>&1; rm -f /tmp/t11rev-run.txt',
+  'D=$(mktemp -d "${TMPDIR:-/tmp}/t03rev.XXXX"); export EXPENSE_DATA_DIR=$D; ls -A $D; rm -rf $D',
+  'r(){ out=$(node bin/expense.js "$@" 2>/tmp/_e_$$); echo "$out"; }; r add --help; rm -f /tmp/_e_$$',
+  'T=$(mktemp -d); echo x > $T/out',
+  'bash -c \'T=$(mktemp -d); rm -rf "$T"\'',
+  'export T=$(mktemp -d); rm -rf ${T}',
+  'local T=`mktemp -d`; rm -rf "$T"',
+  'readonly T=$(mktemp -t a14b); rm -f "$T"',
+  'declare T=/tmp/a14b-literal; rm -rf "$T"',
+];
+it.each([false, true].flatMap(nonTempRoot => ['', '/private/tmp'].map(TMPDIR => [nonTempRoot, TMPDIR] as const)))('H2 임시 root 여부=%s TMPDIR=%s: A14 네 명령·변수 쓰기·중첩 허용', async (nonTempRoot, TMPDIR) => {
+  for (const command of a14TempCommands) expect(await invoke('Bash', { command }, 'IMPLEMENT', {
+    env: { FODH_BRAIN: '1', TMPDIR }, nonTempRoot,
+  }), command).toMatchObject({ code: 0 });
+});
+it.each([
+  'rm -rf /tmp', 'rm -rf "$TMPDIR"', 'rm -rf @root@/..', 'rm -rf @root@/wt',
+  'T=$(mktemp -d); T+=/../../src; rm -rf $T',
+  "cat <<EOF\nT=$(mktemp -d)\nEOF\nrm -rf $T",
+  "f(){\nT=$(mktemp -d);\n}; rm -rf $T",
+  'T=$(mktemp -d); printf -v T src; rm -rf $T',
+  'T=src; rm -rf $T', 'T=$(mktemp -d); T=src; rm -rf $T',
+  'T=$(mktemp -d tmp.XXXX); rm -rf $T', 'T=$(mktemp -d -p .); rm -rf $T',
+  'T=$(mktemp --tmpdir=.); rm -rf $T', 'rm -rf $UNKNOWN',
+  'T=$(mktemp -d); rm -rf $T/../src', 'T=$(mktemp -d); rm -rf $T/$UNKNOWN',
+  'T=@root@; rm -rf $T', 'T=@root@/..; rm -rf $T',
+  'echo \'T=$(mktemp -d)\'; rm -rf $T', 'rm -rf $T; T=$(mktemp -d)',
+  'T=$(mktemp -d); read T; rm -rf $T',
+  'T=$(mktemp -d) node -e "0"; rm -rf $T',
+  'TMPDIR=@root@; T=$(mktemp -d); rm -rf $T',
+  "T=$(mktemp -d); echo x > '$T/out'",
+  'T=$(mktemp -d); echo x > \\$T/out',
+])('H2 확정 못 하는 변수·보호 트리 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, worktrees: true }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('[경계]') });
+});
+it('H2 임시 경로의 프로젝트 symlink는 따라가서 보호한다', async () => {
+  const result = await invoke('Bash', { command: 'T=@root@-alias; rm -rf $T' }, 'IMPLEMENT', {
+    env: { FODH_BRAIN: '1' }, setup: async root => { await symlink(root, root + '-alias'); roots.push(root + '-alias'); },
+  });
+  expect(result.code).toBe(2);
+});
+it.each(['IMPLEMENT', 'MERGE', 'DOCS'])('H5 %s main revert/cherry-pick/am 거부·등록 워크트리 허용', async state => {
+  for (const action of ['revert --no-commit abc', 'cherry-pick abc', 'am change.patch']) {
+    expect(await invoke('Bash', { command: `git ${action}` }, state, { env: { FODH_BRAIN: '1' }, worktrees: true }))
+      .toMatchObject({ code: 2, stderr: expect.stringContaining('main 변경은 task 워크트리 위임으로만 한다') });
+    expect((await invoke('Bash', { command: `git -C @root@/wt ${action}` }, state, { env: { FODH_BRAIN: '1' }, worktrees: true })).code).toBe(0);
+  }
+});
+const projectApproval = { id: 'db-migrate', pattern: '^npm run db:(?:migrate|push)\\b|^drizzle-kit (?:migrate|push)\\b' };
+it.each(['npm run db:migrate', 'DATABASE_URL=x npm run db:migrate', 'npx drizzle-kit migrate', 'bash -c "npm run db:migrate"'])('H9 프로젝트 승인: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ requiresApproval: [], approvalRules: [projectApproval] }));
+  } })).toMatchObject({ code: 2, stderr: expect.stringContaining('[승인]: 승인 필수 동작(db-migrate)') });
+});
+it('H9 다른 명령 허용·잘못된 규칙은 두뇌 fail closed, 사용자 규칙 생략', async () => {
+  const setup = async (root: string) => { await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [projectApproval] })); };
+  expect((await invoke('Bash', { command: 'npm run db:generate' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup })).code).toBe(0);
+  const invalid = async (root: string) => { await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [{ ...projectApproval, pattern: '[' }] })); };
+  expect(await invoke('Bash', { command: 'npm run db:migrate' }, 'IMPLEMENT', { env: { FODH_BRAIN: '1' }, setup: invalid }))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('하네스 설정을 읽을 수 없습니다.') });
+  expect((await invoke('Bash', { command: 'npm run db:migrate' }, 'IMPLEMENT', { setup: invalid })).code).toBe(0);
+});
+
+// Review inputs are passed to the hook as JSON only. Never execute these shell strings.
+it.each([
+  'rm -rf /tmp/*', 'rm -rf /tmp/.[!.]* /tmp/*', 'rm -rf /tmp/{a,..}/Users',
+  'X=..@root@; rm -rf /tmp/$X/src', 'rm -rf /tmp/$(printf ..@root@)/.git',
+  'rm -rf /tmp/claude-501(:h:h)', 'rm -rf /tmp/a{b,c}', 'rm -rf /tmp/x?y',
+  'T=$(mktemp -d); rm -rf ${T}/{a,..}', 'T=$(mktemp -d); rm -rf $T/x(:h:h)',
+])('R1 검수1 확장 대상에는 임시 삭제 예외 없음: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  'TMPDIR=$PWD bash -c \'rm -rf "$TMPDIR/src"\'',
+  'export TMPDIR=$PWD; bash -c \'rm -rf $TMPDIR/src\'',
+  'TMPDIR=$PWD; eval \'rm -rf $TMPDIR/src\'',
+  'TMPDIR=. sh -c \'echo x > $TMPDIR/src/a.ts\'',
+  'T=$PWD; bash -c "T=\\$(mktemp -d); rm -rf $T/src"',
+  'env TMPDIR=$PWD bash -c \'rm -rf $TMPDIR/src\'',
+  'unset TMPDIR; bash -c \'T=$(mktemp -d "${TMPDIR:-/tmp}/x.XXXX"); rm -rf $T\'',
+  'declare TMPDIR; bash -c \'rm -rf $TMPDIR/src\'',
+  'local TMPDIR; bash -c \'rm -rf $TMPDIR/src\'',
+  'readonly TMPDIR; bash -c \'rm -rf $TMPDIR/src\'',
+  'export TMPDIR; bash -c \'rm -rf $TMPDIR/src\'',
+  'T=src; bash -c \'T=$(mktemp -d); rm -rf $T\'',
+  'T=$(mktemp -d); bash -c "rm -rf $T"',
+  'T=$(mktemp -d); read T; bash -c \'rm -rf $T\'',
+  'T=$(mktemp -d); printf -v T src; rm -rf $T',
+  'T=$(mktemp -d); for T in src; do :; done; rm -rf $T',
+  'T=$(mktemp -d); declare -n T=src; rm -rf $T',
+  'T=$(mktemp -d); mapfile T; rm -rf $T',
+  'T=$(mktemp -d); getopts x T; rm -rf $T',
+  'T=$(mktemp -d); unset T; rm -rf $T',
+  'T=$(mktemp -d); eval \'T+=src\'; rm -rf $T',
+])('R2 검수2 최상위 대입·재바인딩·중첩 인용 검사: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  'false && T=$(mktemp -d); rm -rf $T/@relative-root@/src',
+  'T=$(mktemp -d) | cat; rm -rf $T/@relative-root@/.git',
+  'T=$(mktemp -d) & rm -rf $T/@relative-root@/src',
+  'T=$(mktemp -d /tmp/no-such-dir/x.XXXX); rm -rf "$T/@relative-root@/src"',
+  '( T=$(mktemp -d) ); rm -rf $T/@relative-root@/src',
+  'local T=$(mktemp -d); rm -rf $T/@relative-root@/src',
+  'T=$(mktemp -d); rm -f "$T/out"',
+  'export T=$(mktemp -d); rm -rf ${T}/out',
+])('R3 검수3 빈 변수 해석도 기존 가드를 통과해야 한다: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  'ln -s "$PWD" /tmp/fodh-l && rm -rf /tmp/fodh-l/src',
+  'T=$(mktemp -d) && ln -s "$PWD" "$T/l" && rm -rf "$T/l/src"',
+  ...['ln', 'mv', 'cp', 'rsync', 'tar', 'unzip', 'ditto', 'bsdtar', 'git'].map(cmd => `${cmd} --help; rm -rf /tmp/literal`),
+  'bash -c \'ln -s "$PWD" /tmp/fodh-l\'; rm -rf /tmp/fodh-l/src',
+])('R4 검수4 링크를 만들 수 있는 명령과 임시 삭제를 함께 허용하지 않는다: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  'fodh judgment add --title 질문 --background "echo PATH >> ~/.zshrc 필요"',
+  'fodh backlog set T01 --notes "sed 로 .bashrc 수정"',
+  'fodh judgment add --title 질문 --background "npm run db:migrate 필요"',
+  'npx fodh judgment add --background "npm run db:migrate 필요"; echo ok',
+])('R5 검수5 fodh 설명 인자는 승인 정규식에서 제외: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', { ...brain, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [{ id: 'db-migrate', pattern: 'db:migrate' }] }));
+  } })).code).toBe(0);
+});
+it('R5/Q7 실제 셸 설정 쓰기는 보호 거부', async () => {
+  expect(await invoke('Bash', { command: 'echo PATH >> ~/.zshrc' }, 'IMPLEMENT', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+});
+const wrappedMigrations = [
+  '(npm run db:migrate)', '{ npm run db:migrate; }', 'echo "$(npm run db:migrate)"',
+  'x=`npm run db:migrate`', 'if [ -f .env ]; then npm run db:migrate; fi',
+  'for i in 1; do npm run db:migrate; done', '! npm run db:migrate',
+  'FOO=1 npm run db:migrate', 'cd /tmp && npm run db:migrate', 'sh -c "npm run db:migrate"',
+  'bash -lc "npm run db:migrate"', 'env npm run db:migrate', 'env -S "npm run db:migrate"',
+  'timeout 10 npm run db:migrate', 'nohup npm run db:migrate', 'eval "npm run db:migrate"',
+  'npx --yes npm run db:migrate', 'time npm run db:migrate', 'command npm run db:migrate',
+  'xargs npm run db:migrate', '"npm" run db:migrate', 'n\\pm run db:migrate',
+  'echo "$(npm run db:migrate', 'echo "$(echo "$(echo "$(echo "$(npm run db:migrate)")")")")"',
+];
+it.each(wrappedMigrations)('R6 검수6 묶음·제어문·치환·래퍼를 승인 검사: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { ...brain, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [projectApproval] }));
+  } })).toMatchObject({ code: 2, stderr: expect.stringContaining(wrappedMigrations.slice(-2).includes(command) ? '검사할 수 없는 셸 구문' : '[승인]') });
+});
+it.each(['(prisma migrate deploy)', 'echo "$(prisma migrate deploy)"', 'if true; then prisma migrate deploy; fi'])('R6 내장 승인도 검사: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('[승인]') });
+});
+it.each(['echo "$(git status)"', 'if [ -f x ]; then cat x; fi'])('R6 읽기는 허용: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+it.each(['(codex exec task)', 'echo "$(codex exec task)"', 'if true; then echo x > src/a.ts; fi', '(echo x > .pi/harness.json)'])('R6 경계·보호·위임도 공통 분해: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it.each([
+  'node -e "require(\'fs\').writeFileSync(\'.pi/harness.json\',\'{}\')"',
+  'python3 -c "open(\'.pi/harness.json\',\'w\').write(\'{}\')"',
+  'perl -pi -e \'s/approvalRules/disabled/\' .pi/harness.json',
+  'ln -sf /tmp/replacement .pi/harness.json',
+  'sed -i s/x/y/ .claude/settings.json',
+  'node -e "require(\'fs\').writeFileSync(\'@pkg@/hooks/pretooluse.mjs\',\'x\')"',
+])('R10 검수10 가드 인라인 편집·링크 우회는 보호 거부: %s', async command => {
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', brain))
+    .toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]: 가드 설정은 fodh로만 변경할 수 있습니다.') });
+});
+it('R10 가드 읽기는 허용', async () => {
+  expect((await invoke('Bash', { command: 'cat .pi/harness.json' }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+
+it.each(['rm -f done', 'echo x > fi', 'rm -rf /tmp/opaque)'])('R6 정규화가 원래 경로 가드를 약화하지 않는다: %s', async command => {
+  expect((await invoke('Bash', { command }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+it('R9 위험 정규식은 실행 전에 두뇌 설정 거부', async () => {
+  expect(await invoke('Bash', { command: 'x'.repeat(26) }, 'IMPLEMENT', { ...brain, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [{ id: 'slow-rule', pattern: '(x+x+)+y' }] }));
+  } })).toMatchObject({ code: 2, stderr: expect.stringContaining('하네스 설정을 읽을 수 없습니다.') });
+});
+
+it('R5 앵커 없는 사용자 규칙은 fodh 외 읽기 인자도 대조한다', async () => {
+  expect(await invoke('Bash', { command: 'git log --grep=db:migrate' }, 'IMPLEMENT', { ...brain, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [{ id: 'db-migrate', pattern: 'db:migrate' }] }));
+  } })).toMatchObject({ code: 2, stderr: expect.stringContaining('[승인]') });
+});
+it('R2 printf 붙인 -v 변수 지정도 재바인딩이다', async () => {
+  expect((await invoke('Bash', { command: 'T=$(mktemp -d); printf -vT src; rm -rf $T' }, 'IMPLEMENT', brain)).code).toBe(2);
+});
+
+it('R6 heredoc과 같은 문자열의 실제 명령 치환도 검사한다', async () => {
+  const command = 'echo "$(npm run db:migrate)"\ncat <<EOF\nnpm run db:migrate\nEOF';
+  expect(await invoke('Bash', { command }, 'IMPLEMENT', { ...brain, setup: async root => {
+    await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [projectApproval] }));
+  } })).toMatchObject({ code: 2, stderr: expect.stringContaining('[승인]') });
 });

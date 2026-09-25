@@ -1,6 +1,6 @@
 import { commandTable as commands } from './commands.ts';
 import { randomUUID } from 'node:crypto';
-export const commandTable: { group: string; action?: string }[] = commands;
+export const commandTable = commands;
 import { startInterview, nextInterview, recordInterview, deferInterview, skipInterview, addInterview, interviewStatus } from '../core/interview.ts';
 import { scaffoldDoc } from '../core/docs.ts';
 import { generateClaudeMd } from '../core/claude-md.ts';
@@ -15,7 +15,7 @@ import { startCodex, status as codexStatus, result as codexResult, cancel as can
 import { createWorktree, removeWorktree, listWorktrees, commitWorktree, validateTaskCommit } from '../core/worktree.ts';
 import { slotsStatus } from '../core/slots.ts';
 import { getConfig, setConfig, loadConfig } from '../core/config.ts';
-import { addTask, getTask, listBacklog, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
+import { normalizeNotes, addTask, getTask, listBacklog, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
 import { runPick, decidePick } from '../core/pick.ts';
 import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
@@ -32,9 +32,8 @@ import { redact } from '../provider/privacy.ts';
 export async function main(args = process.argv.slice(2), root?: string): Promise<void> {
   let createdJudgment: string | undefined;
   try {
-    if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
-    root ??= await resolveCliRoot();
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, dry: { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
@@ -49,6 +48,15 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       'same-as': { type: 'string' }, distinct: { type: 'boolean' }, options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
+    if (!args.length || group === 'help' || values.help) {
+      const selected = !group || group === 'help' ? commandTable
+        : commandTable.filter(c => c.group === group && (!action || c.action === action));
+      if (!selected.length) throw new Error('지원하지 않는 fodh 명령입니다.');
+      process.stdout.write(JSON.stringify({ help: selected.map(({ usage, summary }) => ({ usage, summary })) }) + '\n');
+      return;
+    }
+    if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();
+    root ??= await resolveCliRoot();
     if (!commandTable.some(c => c.group === group && c.action === action)) {
       const choices = commandTable.filter(c => c.group === group);
       throw new Error('지원하지 않는 fodh 명령입니다. 가능한 명령: '+(choices.length ? choices : commandTable).map(c => `fodh ${c.group}${c.action ? ' '+c.action : ''}`).join(', '));
@@ -146,6 +154,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       for (const key of ['title', 'category', 'status', 'judgment', 'worktree'] as const) {
         if (values[key] !== undefined) patch[key] = values[key];
       }
+      if (values.notes !== undefined) patch.notes = normalizeNotes(values.notes);
       if (values.delegate !== undefined) {
         if (!['codex', 'claude'].includes(values.delegate)) throw new Error('delegate는 codex, claude 중 하나여야 합니다');
         patch.delegate = values.delegate as 'codex' | 'claude';
@@ -217,7 +226,11 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     if (result && typeof result === 'object' && 'ok' in result && result.ok === false) process.exitCode = 1;
     process.stdout.write(JSON.stringify(safeValue(result === undefined ? { ok: true } : result)) + '\n');
   } catch (error) {
-    process.stdout.write(JSON.stringify({ error: redact(error instanceof Error ? error.message : '하네스 명령 실행 실패'),
+    const known = commandTable.find(c => c.group === args[0] && (c.action === undefined || c.action === args[1]));
+    const message = error instanceof Error ? error.message : '하네스 명령 실행 실패';
+    const hint = known && (/Unknown option/.test(message) || message === '명령 인자 수를 확인하세요.')
+      ? ` (사용법: fodh ${known.group}${known.action ? ' ' + known.action : ''} --help)` : '';
+    process.stdout.write(JSON.stringify({ error: redact(message + hint),
       ...(error instanceof CodexError ? safeValue(error.details) : {}),
       ...(createdJudgment ? { judgment: createdJudgment } : {}),
       ...(error instanceof TransitionError && error.action ? { action: error.action } : {}),

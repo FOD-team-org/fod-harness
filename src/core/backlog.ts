@@ -1,3 +1,4 @@
+import { redact } from '../provider/privacy.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { readFile, unlink } from 'node:fs/promises';
@@ -228,6 +229,13 @@ export async function addTask(root: string, input: { title: string; category: st
       status: 'ready', repair: 0, judgment: '', worktree: '', notes: '' };
     tasks.push(task); store.usedIds.push(task.id); return task;
   });
+}
+// CLI input policy; core callers retain Markdown cell newline round-tripping.
+export function normalizeNotes(value: string): string {
+  const notes = value.replace(/[\r\n]+/gu, ' ');
+  if (notes.length > 300) throw new Error('notes는 300자 이하여야 합니다');
+  if (redact(notes) !== notes) throw new Error('notes에 비밀값 패턴을 기록할 수 없습니다');
+  return notes;
 }
 export async function setTask(root: string, id: string, patch: Partial<Omit<Task, 'id'>>): Promise<Task> {
   return mutate(root, tasks => {

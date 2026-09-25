@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { auditPaths } from '../src/core/audit.ts';
+import { auditPaths, auditPathReport } from '../src/core/audit.ts';
 const context = { root: '/project', docsRoot: 'docs', worktrees: [{ path: '/wt' }] };
 const audit = (command: string) => auditPaths('Bash', { command }, context);
 it.each([
@@ -36,4 +36,42 @@ it.each([
 it.each(['git apply .pi/scratch/fix.patch', 'patch -p1 < docs/x.diff'])('M2 패치 파일 대신 대상 트리를 경고한다: %s', command => expect(audit(command)).toEqual(['/project']));
 it('M3 heredoc 문서 내용의 > 인용은 경로 후보가 아니다', () => {
   expect(audit("cat > docs/a.md <<'EOF'\n> 인용\ncodex x\nEOF")).toEqual([]);
+});
+
+it.each(['echo > $f', 'echo > `target`', 'echo > src/*.ts'])('H4 확장 경로는 boundary 대신 unresolved: %s', command => {
+  const result = auditPathReport('Bash', { command }, context);
+  expect(result.boundary).toEqual([]); expect(result.unresolved.length).toBeGreaterThan(0);
+});
+it.each(['T=$(mktemp -d); echo > $T/out', 'bash -c \'T=$(mktemp -d); echo > $T/out\''])('H4 입증된 임시 변수는 원장 후보 없음: %s', command => {
+  expect(auditPathReport('Bash', { command }, context)).toEqual({ boundary: [], unresolved: [] });
+});
+it('H4 리터럴 소스 쓰기는 경고 유지·미확정 경로 중복 제거', () => {
+  expect(auditPathReport('Bash', { command: 'echo x > src/a.ts; echo > $f; echo > $f' }, context))
+    .toEqual({ boundary: ['/project/src/a.ts'], unresolved: ['$f'] });
+});
+it.each(['ls src/*.ts', 'grep foo $HOME/x', 'echo $PATH', 'for f in src/*.ts; do cat $f > /tmp/x; done'])('R7 읽기 피연산자는 unresolved 없음: %s', command => {
+  expect(auditPathReport('Bash', { command }, context)).toEqual({ boundary: [], unresolved: [] });
+});
+it.each(['echo x > $f', 'rm -f $f', 'echo x > /tmp/{a,b}', 'echo x > /tmp/x(:h:h)', 'TMPDIR=/project sh -c "echo x > \\$TMPDIR/src/a.ts"'])('R1/R2/R7 쓰기 확장은 감사 증거 유지: %s', command => {
+  expect(auditPathReport('Bash', { command }, context).unresolved.length).toBeGreaterThan(0);
+});
+it.each([
+  'NAME=$(mktemp -d); NAME[0]=src; echo x > "$NAME"',
+  'NAME=$(mktemp -d); readarray NAME; rm -rf "$NAME"',
+  'NAME=$(mktemp -d); export "$DYNAMIC"=src; echo x > "$NAME"',
+  'source config.sh; bash -c \'echo x > "$TMPDIR/x"\'',
+])('Q3/Q4 감사도 불확실 임시 치환을 하지 않는다: %s', command => {
+  expect(auditPathReport('Bash', { command }, context).unresolved.length).toBeGreaterThan(0);
+});
+it.each([
+  'f() { echo x > src/a.ts; }; f', 'case $x in a) echo x > src/a.ts;; esac',
+  'cat <(echo x > src/a.ts)', 'coproc echo x > src/a.ts',
+])('Q1 감사도 복합 구문의 소스 쓰기를 찾는다: %s', command => {
+  expect(audit(command)).toContain('/project/src/a.ts');
+});
+it.each(['>|', '>>|', '>!', '>>!', '&>|', '>&', '<>', '>>&'])('P6 사후 감사도 리다이렉트 %s의 목적지를 찾는다', operator => {
+  expect(audit(`cmd ${operator} src/a.ts`)).toEqual(['/project/src/a.ts']);
+});
+it.each(['cmd 2>&1', 'cmd >&2', 'cmd 3<&0'])('P6 fd 복제는 쓰기 경로가 아니다: %s', command => {
+  expect(auditPathReport('Bash', { command }, context)).toEqual({ boundary: [], unresolved: [] });
 });

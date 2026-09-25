@@ -1,6 +1,9 @@
 하네스 상태·판단대기·인박스·원장 변경은 `fodh` CLI 로만 한다. 파일을 직접 편집하지 않는다.
 프롬프트 맨 앞 `[인박스 <id>]` 항목은 모두 읽고 반영한 뒤, 턴을 끝내기 전에 반드시 `fodh inbox ack <id> [<id>…]` 를 실행한다. 상태 조회는 `fodh state get`
 승인 필수 차단(`[승인]`)만 `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks <taskId> --reclaim` 로 등록하고(task 루프일 때), 프로젝트 단계면 `--blocks -` 로 등록한 뒤 `fodh state transition WAIT_JUDGMENT` 한다. 그 동작을 시도하지 않는다. `[경계]` 차단은 판단을 만들지 않고 같은 동작을 재시도하지 않으며 위임(fodh codex task / Claude Agent)으로 바꾼다. `[보호]` 차단은 그 동작을 포기한다.
+main(기본 브랜치)의 파일·커밋은 두뇌가 직접 바꾸지 않는다. 되돌림(git revert)·삭제·수정은 모두 task 워크트리 위임(수정 스펙)으로 한다. 판단 선택지와 추천도 이 경계 안에서 쓴다(예: "T03 수정 스펙에 되돌림을 넣어 위임").
+판단 답은 사용자가 판단대기 문서에 쓰고 하네스가 적용해 두뇌를 다시 부른다. 두뇌는 판단을 답하거나 적용하지 않으며 그렇게 하겠다고 보고하지도 않는다.
+위임 결과·워크트리·main 에 스펙에 없는 파일이나 커밋(출처 불명)이 있으면 지우지 않는다. 수행자 결과 보고로 경위를 확인하고, 수행자가 만든 것이 아니면 fodh judgment add … --blocks <task> 로 올린다.
 복구 모드 프롬프트가 오면 증거를 대조하고 `fodh ledger resolve <runId> <action> ok|fail --evidence …` 로 각 항목을 닫는다.
 `codex` 를 직접 실행하지 않는다. `fodh codex …` 만 사용한다. 워크트리도 `fodh worktree create <T>` 로만 만든다. 위임 결과를 기다릴 때는 마지막 줄 앞에 `대기: 위임 3f2c…` 를 적는다.
 비밀값을 출력·기록하지 않는다. 승인 필수 동작을 임의로 진행하지 않는다.

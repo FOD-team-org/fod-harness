@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { auditPaths } from '../core/audit.ts';
+import { auditPathReport } from '../core/audit.ts';
 import { join, resolve } from 'node:path';
 import { access } from 'node:fs/promises';
 import { loadConfig } from '../core/config.ts';
@@ -65,7 +65,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
   let release: (() => Promise<void>) | undefined;
   let unclassifiedLogged = false;
   let reportText = '';
+  let stateAtBrainExit: string | undefined;
   const turnSuspicions = new Set<string>();
+  const turnUnresolved = new Set<string>();
   const pendingDenials: (() => Promise<void>)[] = [];
   const patchState = (patch: Parameters<typeof updateState>[1]) =>
     options.doctor ? Promise.resolve(undefined) : updateState(root, patch);
@@ -87,6 +89,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       FODH_PROTECTED_EXTRA: [config.interview.extraBankFile, config.docs.overrideDir].join(':') };
     for (let attempt = 0; attempt < 2; attempt++) {
       reportText = '';
+      stateAtBrainExit = undefined;
       const action = `brain:${attempt}`;
       const brainTurn = { runId, startedAt: new Date().toISOString() };
       let init: TurnResult['init'];
@@ -233,6 +236,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           },
         });
       } finally {
+        try { stateAtBrainExit = (await readState(root)).state; } catch { /* Fall back to current state at report time. */ }
         try { await finishJudgmentSnapshot(root); }
         catch (error) {
           try { await appendLedger(root, { runId, action: 'judgment:snapshot-finish', status: 'fail',
@@ -253,9 +257,16 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         const worktrees = (await readState(root)).worktrees ?? [];
         for (const tool of toolInputs.values()) {
           if (denials.has(canonical(safeValue({ tool: canonicalTool(tool.tool_name), input: tool.tool_input })))) continue;
-          for (const path of auditPaths(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
+          const audit = auditPathReport(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
             root, docsRoot: config.docs.root, worktrees,
-          })) suspicious.add(redact(path));
+          });
+          for (const path of audit.boundary) suspicious.add(redact(path));
+          for (const raw of audit.unresolved) {
+            const path = redact(raw);
+            if (turnUnresolved.has(path)) continue;
+            turnUnresolved.add(path);
+            await appendLedger(root, { runId, action: 'audit:path-unresolved', status: 'info', evidence: { path } });
+          }
         }
         for (const path of suspicious) {
           if (turnSuspicions.has(path)) continue;
@@ -345,7 +356,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         try {
           const tail = reportText.trim().split(/\r?\n/u).filter(line => line.trim()).slice(-3);
           const reported = tail.map(line => /^상태:\s*([A-Za-z_()]+)\s*$/u.exec(line.replace(/[`*]/gu, '').trim())?.[1]).findLast(Boolean);
-          const actual = (await readState(root)).state;
+          const actual = stateAtBrainExit ?? (await readState(root)).state;
           if (reported && reported !== actual) {
             await appendLedger(root, { runId, action: 'report:state-mismatch', status: 'warn',
               evidence: { reported: redact(reported), actual } });

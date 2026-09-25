@@ -122,7 +122,7 @@ it('P3 delegate/worktrees 기본값은 config get에 모두 노출된다', async
   expect(await getConfig(root, 'delegate')).toEqual({ claude: { subagentModel: 'opus', maxChildAgents: 1 },
     codex: { command: 'codex', brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', sandbox: 'workspace-write', maxChildAgents: 1, timeoutMinutes: 90, waitMinutes: 8 },
     route: { design: 'claude', default: 'codex' } });
-  expect(await getConfig(root, 'worktrees')).toEqual({ root: '..', prefix: 'wt-' });
+  expect(await getConfig(root, 'worktrees')).toEqual({ root: '..', prefix: 'wt-', links: [] });
   expect(await getConfig(root, 'watch.childTimeoutMinutes')).toBe(90);
 });
 it.each([

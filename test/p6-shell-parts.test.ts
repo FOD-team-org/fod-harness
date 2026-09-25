@@ -29,3 +29,12 @@ it('N1 미종료 본문은 훅에서 보존하고 감사에서만 명령으로 �
     heredocs: ['echo x > src/a.ts'], unterminatedHeredoc: true,
   });
 });
+
+it('R2 리다이렉트가 있어도 원문 인용 메타데이터의 단어 위치가 같다', () => {
+  const result = shellParts(`bash > /tmp/out -c 'T=$(mktemp -d); rm -rf "$T"'`, { metadata: true });
+  expect(result.rawGroups?.[0]).toEqual(['bash', '>', '/tmp/out', '-c', `'T=$(mktemp -d); rm -rf "$T"'`]);
+  expect(result.groups[0]).toHaveLength(result.rawGroups![0].length);
+});
+it.each(['>>|', '>|', '>>!', '>!', '&>|', '>&', '<&', '<>', '>>&'])('P6 fd 접두·긴 리다이렉트 연산자 %s 유지', operator => {
+  expect(shellParts(`cmd 2${operator} output; echo ok`).groups).toEqual([['cmd', operator, 'output'], ['echo', 'ok']]);
+});
