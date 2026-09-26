@@ -203,7 +203,7 @@ export function shellCommands(command, { recoverUnterminated = false, extended =
     heredocs.push(...parsed.heredocs); unterminatedHeredoc ||= parsed.unterminatedHeredoc;
     for (let i = 0; i < groups.length; i++) {
       const words = groups[i];
-      if (JSON.stringify(words) !== JSON.stringify(parsed.groups[i])) entries.push({ words: parsed.groups[i], rawWords: parsed.rawGroups[i], source, tempAllowed });
+      if (JSON.stringify(words) !== JSON.stringify(parsed.groups[i])) entries.push({ words: parsed.groups[i], rawWords: parsed.rawGroups[i], normalizedWords: words, source, tempAllowed });
       for (const redirect of inherited[i]) { words.push(...redirect.words); structure.rawGroups[i].push(...redirect.raw); }
       entries.push({ words, rawWords: structure.rawGroups[i], source, tempAllowed });
       const args = commandWords(words), executable = basename(args[0] ?? '');

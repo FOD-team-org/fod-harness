@@ -36,7 +36,7 @@ it('등록 worktree와 그 하위·심링크 진입은 거부하고 명시적 en
 });
 it('bin/fodh도 하위 cwd에서 원래 상태를 읽는다', async () => {
   const { sub } = await setup();
-  const { stdout } = await promisify(execFile)(process.execPath, [resolve('bin/fodh'), 'state', 'get'], { cwd: sub, env: { ...process.env, FODH_PROJECT_ROOT: '' } });
+  const { stdout } = await promisify(execFile)(resolve('bin/fodh'), ['state', 'get'], { cwd: sub, env: { ...process.env, FODH_PROJECT_ROOT: '' } });
   expect(JSON.parse(stdout).state).toBe('RESEARCH');
 });
 it('잘못된 상태명과 허용되지 않는 전이는 현재 상태와 가능한 목록을 보여준다', async () => {

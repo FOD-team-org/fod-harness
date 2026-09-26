@@ -35,3 +35,13 @@
 스킬은 package.json의 pi.skills로 Pi에 노출하고 `fodh skills install`로 프로젝트 .claude/skills에 복사한다. Pi 스킬 목록은 latestMessage만 보내는 Claude 두뇌에 전달되지 않는다. Claude의 실제 로드는 Fable 실기에서 system.init.skills·memory_paths로 확인한다.
 
 인터뷰 next는 처리 전 라운드를 그대로 반환한다. choice는 next 안에서 판단대기로 넘겨 deferred로 반환하며 openRound에는 free만 남긴다. repeated:true면 횟수를 늘리지 않고 질문을 그대로 다시 보여 준 뒤 사용자 답을 기다린다. mustDefer는 필수, skipDue는 선택 한도이며 선택 한도는 skip으로 정리한다. 검수 scaffold는 프로젝트에 --subject, task에 --task를 쓰고, 반환 path를 그대로 사용한다. backlog/worklog는 명령이 채우므로 채울 것 안내문을 넣지 않는다.
+
+## Claude 훅 설치
+
+`claude-settings.json`을 프로젝트 `.claude/settings.json`에 설치한다(다른 사용자 설정은 보존). 기존 프로젝트는 `.claude/settings.json`을 새 템플릿으로 바꿔야 소음이 사라진다. doctor의 `claudeSettingsStale`는 옛 명령 경고다. 새 명령:
+
+```sh
+if [ -n "${FODH_PACKAGE_ROOT:-}" ]; then exec "$FODH_PACKAGE_ROOT/hooks/pretooluse.sh"; elif [ "${FODH_BRAIN:-}" = 1 ]; then echo "하네스 가드[보호]: FODH_PACKAGE_ROOT 없음" >&2; exit 2; else exit 0; fi
+```
+
+패키지 경로가 있으면 stdin을 그대로 훅에 전달한다. 경로 없는 두뇌는 exit 2, 일반 세션은 exit 0이다.

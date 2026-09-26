@@ -20,12 +20,38 @@ Claude Code가 자신의 문맥을 관리하므로 전역 `~/.pi/agent/settings.
 ```
 
 전역 설정 또는 신뢰된 프로젝트 설정의 실효값이 false 이면 경고하지 않습니다. 신뢰된 프로젝트 설정이 전역 설정보다 우선하며, 확인하지 못하면 세션 시작 시 설정을 안내합니다.
-저장소 루트에서 실행하는 예시입니다. `PI_SKIP_VERSION_CHECK=1`은 자동 업데이트 조회를 끕니다.
+PATH에 한 번 등록한 뒤 프로젝트 폴더에서 `fodh` 한 단어로 엽니다. 패키지 경로는 실제 설치 위치로 바꿉니다.
 
 ```sh
-export PI_SKIP_VERSION_CHECK=1
-pi -e ./extensions/provider/index.ts -e ./extensions/orchestrator/index.ts -e ./extensions/watcher/index.ts --model claude-code/claude-fable-5-1
+mkdir -p ~/.local/bin
+ln -s ~/Desktop/fod-harness/bin/fodh ~/.local/bin/fodh
+export PATH="$HOME/.local/bin:$PATH"
+# 이후 프로젝트 폴더에서 실행 (하위 디렉터리도 가능)
+fodh
+# 새 폴더는 fodh가 설치를 묻거나, 직접 설치
+fodh init
+fodh init --brain opus
+fodh init --dry-run
+# 모델 선택 또는 실행 계획만 확인
+fodh start --model opus
+fodh start --dry-run
 ```
+
+인자 없는 `fodh`는 위로 올라가며 `.pi/harness.json`을 찾고 Git 최상위·HOME에서 멈춥니다. HOME 자체의 `.pi`는 프로젝트로 보지 않습니다. 루트가 없으면 실제 설치 대상(Git 최상위 또는 현재 폴더)을 표시해 설치 여부를 묻고, y이면 `fodh init`과 훅 확인 후 엽니다. 비TTY·N·Ctrl-D이면 도움말과 설치 안내만 출력합니다. HOME·`/`에서는 설치 질문 없이 프로젝트 폴더 사용을 안내하며, 그 위치를 cwd나 대상으로 하는 init은 쓰기 전에 거부합니다. 연결 워크트리에서는 시작·init을 거부하고 본 저장소 경로를 안내합니다. `fodh start`는 루트가 없으면 질문 없이 오류를 반환합니다. 도움말은 `fodh help`·`--help`·`-h`입니다.
+
+`fodh init`은 Git 최상위(저장소 밖이면 현재 폴더)에 최소 설정·훅·스킬·CLAUDE.md·빈 판단 파일을 설치합니다. 기존 파일은 보존하고, 기존 Claude 설정에 훅이 없으면 `settingsNeedsHook`과 추가할 JSON을 반환합니다. 설치 후 하네스를 열려는 `fodh`는 이 상태에서 pi를 실행하지 않고 exit 1로 멈춥니다. 직접 `fodh`·`fodh start`로 시작할 때도 같은 훅 검사를 하며, `start --dry-run`은 `allowed: false`·거부 사유·`hookPatch`를 JSON으로 출력합니다. 실행 파일은 `.git/info/exclude`에 중복 없이 추가하며 `.gitignore`는 바꾸지 않습니다. 커밋이 없는 저장소에서만 설정·판단 파일·CLAUDE.md로 첫 커밋을 만들고, Git 신원이나 훅 때문에 실패하면 파일을 보존하고 원인을 안내합니다. 새 프로젝트는 `/project-start`, 기존 코드 저장소는 백로그를 채운 뒤 `/develop-start`로 진행합니다.
+
+시작 모델은 `brain.model`과 provider의 허용 목록을 사용합니다. `CLAUDECODE`·`CLAUDE_CODE_ENTRYPOINT`·`ANTHROPIC_API_KEY`를 제거하고 `PI_SKIP_VERSION_CHECK=1`·`FODH_PACKAGE_ROOT`를 설정합니다. Node는 `FODH_NODE` 또는 PATH에서 찾습니다. 셸이 `exec`로 pi에 교체되므로 별도 Node 런처가 상주하지 않습니다. 같은 루트에 살아 있는 잠금이 있으면 시작을 거부하고, 죽은 잠금은 다음 시작이 인수합니다. 두뇌의 인자 없는 `fodh`는 도움말만 출력하며, `start --dry-run`만 허용하고 `init`은 거부합니다.
+
+터미널 창을 닫으면 SIGHUP으로 두뇌까지 회수되고, 다음 `fodh`가 recovering에서 이어갑니다. tmux는 필요 없습니다. SIGINT·Ctrl+Z의 신호 경로는 pi 직접 실행과 같습니다.
+
+프로젝트 `.claude/settings.json`의 훅은 `templates/claude-settings.json`을 설치합니다. 새 템플릿의 명령은 다음과 같습니다.
+
+```sh
+if [ -n "${FODH_PACKAGE_ROOT:-}" ]; then exec "$FODH_PACKAGE_ROOT/hooks/pretooluse.sh"; elif [ "${FODH_BRAIN:-}" = 1 ]; then echo "하네스 가드[보호]: FODH_PACKAGE_ROOT 없음" >&2; exit 2; else exit 0; fi
+```
+
+기존 프로젝트는 `.claude/settings.json`을 새 템플릿으로 바꿔야 소음이 사라집니다(다른 사용자 설정은 보존). 패키지 경로가 없는 일반 Claude 세션은 exit 0, 두뇌 세션은 보호 오류 exit 2입니다. doctor의 `claudeSettingsStale` 경고는 옛 명령을 알립니다.
 
 `brain.doctorTtlHours`는 `.pi/harness.json`에서 설정하며 기본 12시간입니다.
 `fodh state transition IMPLEMENT|MERGE`는 별도로 최근 12시간 doctor 성공 기록을 요구합니다.
@@ -89,13 +115,22 @@ P3 위임 복구: 감독이 죽어도 그룹 구성원 중 기록된 Codex 자�
 
 `--wait` 상한은 `min(timeoutMinutes + 1, max(1, brain.maxTurnMinutes - 5), delegate.codex.waitMinutes)`분이다. 시작 runId는 stderr에 즉시 출력되며, 상한 오류 뒤에도 감독은 계속 실행된다. 두뇌는 반환된 runId로 `대기: 위임 3f2c…`(예시 대신 실제 runId 전체)를 마지막 비어 있지 않은 3줄 안에 적고 턴을 끝낸다.
 
-`fodh`는 `FODH_PROJECT_ROOT`가 있으면 그 경로, 없으면 cwd에서 가장 가까운 상위 `.pi/harness-state.json` 디렉터리, 없으면 cwd를 루트로 쓴다. 등록 워크트리 안에서는 실행을 거부한다(명시적 `FODH_PROJECT_ROOT`는 우선). 두뇌는 프로젝트 루트를 유지하고 검증만 `(cd <워크트리> && <명령>)`으로 실행한다. 워크트리 생성 전에는 stale 등록을 `git worktree prune`으로 정리한다.
+`fodh state get` 등 일반 CLI 명령은 `FODH_PROJECT_ROOT`가 있으면 그 경로, 없으면 cwd에서 가장 가까운 상위 `.pi/harness-state.json` 디렉터리, 없으면 cwd를 루트로 쓴다. 등록 워크트리 안에서는 실행을 거부한다(명시적 `FODH_PROJECT_ROOT`는 우선). 두뇌는 프로젝트 루트를 유지하고 검증만 `(cd <워크트리> && <명령>)`으로 실행한다. 워크트리 생성 전에는 stale 등록을 `git worktree prune`으로 정리한다.
 
 | 설정 | 기본값 | 의미 |
 |---|---:|---|
 | `approvalRules` | `[]` | 프로젝트 승인 규칙. 아래 예시처럼 목록에 넣으면 항상 적용 |
 | `worktrees.links` | `[]` | root 의 의존성을 워크트리에 링크. 예: `["node_modules"]`. 무시되지 않는 링크는 공통 Git info/exclude 에 추가 |
+| `worktrees.setup` | `[]` | 링크 뒤 순차 실행하는 승인 전용 준비 명령. 실패한 등록 워크트리는 다음 create·Codex 위임 때 준비만 재시도 |
+| `worktrees.setupTimeoutMinutes` | 10 | 명령별 제한 시간(1~60분). 시간 초과 시 자손을 포함한 그룹 종료 |
+| `delegate.codex.externalGuard` | `true` | 슬롯 획득 전 외부 실행 중 Codex 감지. 변경은 사용자 승인 필요 |
+| `secrets.readDeny` / `secrets.readAllow` | 기본 비밀 경로 / 예제·공개키 예외 | 사용자 목록을 기본 목록에 합침. 두 키 모두 승인 필요 |
+| `secrets.defaults` | `true` | false이면 기본 비밀 경로·예외 목록을 빼고 사용자 목록만 사용(승인 필요) |
 | `delegate.codex.waitMinutes` | 8 | CLI 대기 상한(양의 정수, 분) |
+
+Flutter app 준비 예시: 사용자 터미널에서 `fodh config set worktrees.setup '["flutter pub get --enforce-lockfile --offline"]' --approve`. `.dart_tool`은 링크하지 않습니다. 준비 명령은 워크트리를 cwd로, `FODH_WORKTREE`·`FODH_TASK` 환경에서 실행됩니다. 출력은 redact 후 `.pi/worktree-setup/<task>-<runId>.log`에 저장하며, 원장에는 순번·종료 코드·소요 시간·로그 경로가 남습니다. 성공하면 `worktree list`에 `setupOk: true`가 표시됩니다. 메모리 중단 중에는 준비 명령을 실행하지 않습니다.
+
+외부 Codex는 companion task 또는 codex exec 중 하네스 감독·ChatGPT.app·Codex.app 자손 및 현재 프로세스의 조상·자손을 제외한 프로세스입니다. 유휴 app-server는 제외합니다. 슬롯에는 `external: true`와 PID·시작 시각을 기록하며 `codex cancel`의 대상이 아닙니다. 종료 후 기존 slot-free 경로로 자동 재개합니다. ps 조회 실패는 `slot:external-scan fail`만 남기고 기존 슬롯 검사로 진행합니다.
 
 사용자 승인 규칙은 `^` 로 명령 시작을 앵커한다. 앵커가 없으면 `git log --grep=db:migrate` 같은 읽기 명령도 걸린다. 패턴은 200자 이하만 허용하며 역참조와 중첩 수량자는 거부한다. 정적 검사가 모든 정규식의 실행 비용을 보장하지는 않으므로 복잡한 패턴을 피한다.
 
@@ -114,7 +149,7 @@ npm 별칭·옵션 형태(`npm run-script db:migrate`, `npm --prefix . run db:mi
 - `fodh cleanup run [--scope processes|storage|worktrees|all] [--task T] [--dry-run]`: 등록 프로세스·프로젝트 재생성 경로·완료 또는 현재 CLEANUP 작업의 워크트리 정리, `.pi/cleanup-last.json` 보고서. 공유 캐시는 보고만 한다.
 - `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 순차 실행한다. heavy 슬롯과 Codex 슬롯은 상호 배타다.
 - `fodh notify send --title … --body … [--level info|warning|error]`: TUI/macOS/원장 알림. 같은 키 60초 제한, Slack은 skip 기록만 남긴다.
-- `fodh memory status`: 현재 메모리 표본과 60초 워치독 상태. 스왑 초과 5분은 paused(memory), 경고치−2 GB 미만 5분은 자동 재개다.
+- `fodh memory status`: 현재 메모리 표본과 60초 워치독 상태. 스왑 초과 5분은 paused(memory)(DOCS·CLEANUP은 계속하고 다음 PICK에서 WAIT_RESOURCE), 경고치−2 GB 미만 5분은 자동 재개다.
 
 P4: `/cleanup`은 전체 정리, `/cleanup dry`는 삭제 없는 계획을 표시한다. 세션 종료는 자기 세션 레코드만 회수하며 활성 위임과 두뇌는 보호한다. `budget.dailyTurns/dailyHours`는 값만 검증하며 제한을 강제하지 않는다. `BASH_DEFAULT_TIMEOUT_MS`가 waitMinutes보다 짧으면 doctor가 경고하고 실제 대기 상한을 해당 timeout의 90%로 낮춘다.
 
@@ -153,7 +188,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 
 | 규칙 | 동작 |
 |---|---|
-| 1. 비밀값 | Write/Edit/MultiEdit/NotebookEdit 및 Bash 입력의 비밀 패턴 거부 |
+| 1. 비밀값·파일 | Write/Edit/MultiEdit/NotebookEdit 및 Bash 입력의 비밀 패턴 거부. 두뇌의 Read·NotebookRead·Grep 파일/글롭·Bash 정적 경로와 위험한 재귀 검색은 비밀 파일 읽기를 경계 거부 |
 | 2. 삭제 경계 | 두뇌의 루트 밖·루트 자체·문서 트리 자체·.git·.pi 대상 rm -r/-f, find -delete, 등록 워크트리 밖 git clean 거부. 등록 워크트리와 .pi/scratch/** 삭제, git clean dry-run 허용 |
 | 3. 승인 필수 | requiresApproval 패턴을 [승인]으로 거부하고 판단대기 안내. 승인 거부만 판단·작업 회수로 연결 |
 | 4. 쓰기 경계 | 두뇌는 docs.root·.pi(보호 파일 제외)·CLAUDE.md·AGENTS.md·README.md와 등록 워크트리만 쓰기 허용. Write/Edit 루트 밖은 .pi/scratch 안내. .claude/skills는 fodh skills install 전용. Bash는 루트 안 소스 쓰기를 검사하며 디바이스·외부 리다이렉트·인터프리터 실행 인자는 제외. heredoc 본문은 명령으로 해석하지 않음. git apply/patch 실제 적용은 대상 워크트리에서만 허용 |
@@ -161,7 +196,7 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 | 6. 자기수정 | Claude settings·패키지 hooks·.pi/harness*.json/jsonl·은행·템플릿 보호. FODH_ 대입/제거와 sh/bash/zsh -c 및 -lc/-ec/-xc, node -e/--eval, python -c, perl -e, eval/source/. 내부 FODH_ 참조 거부. 경로는 가장 가까운 기존 조상을 realpath로 풀고 darwin 비교는 대소문자 무시 |
 | 7. 판단 답 보호 | 판단 파일 직접 쓰기와 인라인 인터프리터의 판단 파일 참조 쓰기를 거부. cp/mv/rsync의 판단 디렉터리 목적지는 원본 basename 일치 또는 재귀일 때 거부. 재귀는 긴 옵션 `--recursive/--archive`와 -r/-R/-a를 인식하되 원본이 존재하는 비디렉터리라고 확인될 때만 비재귀로 본다. 조회 실패(ENOENT·EACCES)나 같은 체인의 cd는 재귀로 간주한다. tar/bsdtar/gtar(대시 없는 xf 포함)·unzip 추출의 목적지·cwd·판단 파일 basename을 검사하고 .pi 아래 추출을 거부하며 일반 파일 복사·tar 생성은 허용. sh/bash/zsh -c·eval 문자열을 재파싱하고 nohup/timeout/nice/time/xargs/stdbuf/env/exec/builtin/command/script/caffeinate/arch 래퍼를 해제하며 --wait 백그라운드 실행도 거부 |
 
-`approvalRules`, `worktrees.links`, `requiresApproval`도 사용자 CLI에서 `--approve`가 필요한 승인 전용 키다.
+`approvalRules`, `worktrees.links`, `worktrees.setup`, `delegate.codex.externalGuard`, `secrets.readDeny`, `secrets.readAllow`, `secrets.defaults`, `requiresApproval`도 사용자 CLI에서 `--approve`가 필요한 승인 전용 키다.
 
 `fodh config set`의 승인 전용 키는 `delegate.codex.command`, `brain.command`, `brain.switchCommand`, `delegate.codex.sandbox`, `brain.allowedModels`다. 사용자 터미널에서 `fodh config set <키> <값> --approve`로 변경한다. 이 키를 담는 상위 객체 교체에도 승인이 필요하다. 두뇌는 `--approve`로도 어떤 설정을 변경할 수 없다. docs.root는 루트 자체·외부·.pi/.git/.claude의 조상이나 그 자체로 설정할 수 없다. 환경 표지가 없어도 Pi 잠금 소유자의 자손이면 차단하며, 살아 있는 잠금의 부모 체인을 ps로 확인할 수 없으면 보수적으로 거부한다. 잠금 소유 Pi 자체의 모델 선택과 잠금 없는 사용자 설정은 유지한다.
 
@@ -170,6 +205,10 @@ P5 3차: next는 choice를 판단대기로 즉시 등록해 deferred로 반환�
 훅은 `[승인]`·`[경계]`·`[보호]` 접두로 이유를 분류한다. 경계 거부는 판단 없이 위임으로 바꾸고, 보호 거부는 그 동작을 포기한다. 분류 없는 거부는 원장과 `hook:unclassified` 경고만 남긴다. 경계·보호·미분류 때문에 활성 위임을 회수하지 않는다.
 
 턴 종료 시 tool_use의 Write 경로와 Bash의 쓰기 문맥만 사후 검사한다. 누락 의심은 경로별 `audit:path-boundary warn` 원장과 턴당 TUI 알림 1건(최대 3경로)으로 남긴다. 같은 root·경로는 프로세스 수명 동안 한 번만 알리고 원장은 계속 남긴다. 이미 거부된 도구는 제외하고, 감사만으로 판단대기를 생성하거나 실행을 되돌리지는 않는다. doctor는 Bash 표식과 `src/FODH_DOCTOR_MARKER.ts` Write의 서로 다른 차단 증거 2건을 요구한다. doctor의 --max-turns는 3이며 표식 파일이 실제 생성되면 삭제하고 실패한다. 실패하면 기존 IMPLEMENT·MERGE 게이트가 계속 차단한다.
+
+비밀 경로 기본 deny는 `.env`, `.env.*`, `*.pem`, `*.p8`, `*.p12`, `*.key`, `*.jks`, `*.keystore`, `key.properties`, `~/.ssh/*`, `~/.aws/credentials`, `~/.netrc`, `~/.codex/auth.json`, `~/.pi/agent/auth.json`, `~/.claude/.credentials.json`, `~/.config/gh/hosts.yml`입니다. 기본 allow는 `.env.example`, `.env.sample`, `.env.template`, `.env.*.example`, `~/.ssh/*.pub`, `~/.ssh/known_hosts`입니다. 예: `neon_api.json`은 프로젝트의 `secrets.readDeny`에 추가합니다. `/` 없는 항목은 모든 경로의 basename, `~/`는 HOME, 나머지 상대 경로는 프로젝트 root 기준입니다. realpath 정규화 후 allow를 우선하며 비밀 경로의 의존성 링크는 거부합니다. 이름만 조회하는 Glob과 메타데이터 명령은 허용합니다.
+
+Grep 디렉터리 검색은 허용합니다. doctor는 root 아래 깊이 6·20,000개 상한으로 `.git`·`node_modules`를 제외하고 파일 이름만 검사하여 gitignore 밖 비밀 파일을 `secretsNotIgnored`로 경고합니다. Bash 재귀 검색은 깊이 8까지만 검사하며 항목 20,000개 초과만 거부합니다. `.git`은 항상 제외하고, grep/find는 `node_modules`도 제외합니다. rg/ag가 ignore를 따를 때는 무시된 디렉터리를 걷기 전에 가지치기하며 방문한 디렉터리의 비밀 파일은 보수적으로 검사합니다. 파일/디렉터리 제외 글롭과 include가 비밀 파일을 제외하면 허용합니다. 비밀 파일 거부 메시지에는 값이나 전체 경로를 넣지 않습니다.
 
 ## 알려진 한계
 
@@ -186,6 +225,12 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
+| 비밀 파일의 간접 읽기 | `npm run …` 같은 프로젝트 스크립트가 내부에서 `.env`를 읽어 출력하는 경우, `xargs`·`$(…)`로 조립한 경로와 인코딩된 경로는 완전히 추적하지 않는다. 정적 basename 단서가 있는 동적 경로는 검사한다. |
+| Codex 수행자의 비밀 파일 읽기 | Codex는 Claude 훅 범위 밖이며 샌드박스가 읽기를 막지 못한다. 수행자 머리말에 비밀 파일 열기·출력 금지를 명시한다. |
+| Grep 디렉터리·일반 glob | 일반 확장자 glob과 `*`는 허용하고 `.env*`·`*.pem` 등 명시 비밀 glob은 막는다. 로컬 rg는 명시적인 `-g '*.ts'`로 `.env.ts`도 선택한다. 따라서 일반 glob이나 디렉터리 검색으로 gitignore 밖 비밀 파일이 노출될 수 있다. doctor의 `secretsNotIgnored` 경고로 보완한다. |
+| 재귀 읽기 탐색 | 깊이 8 아래는 검사하지 않으며 깊이 도달만으로 거부하지 않는다. 항목 20,000개 초과는 거부한다. `.git`은 항상 제외하고, rg/ag가 ignore를 따를 때 무시된 디렉터리는 깊이별 일괄 Git 조회로 가지치기한다. 방문한 디렉터리의 비밀 파일은 ignore 여부와 별개로 보수적으로 검사한다. `--no-ignore`로 큰 의존성 트리를 훑으면 항목 상한에 걸릴 수 있다. |
+| 외부 Codex 감지 | 획득 직전의 스냅샷이며, 그 뒤 시작한 외부 프로세스를 예약/차단하지 않는다. ps 실패 시 기존 슬롯만 확인한다. root는 명령 인자, lsof의 cwd, 감지한 하네스 root 순으로 사용한다. |
+| 워크트리 준비 | Codex 위임 준비는 슬롯 획득 후 시작한다. 부모 exit·SIGTERM·SIGINT·SIGHUP 시 준비 그룹을 종료하고, 명령 exit 뒤 파이프는 최대 150ms 더 수집한다. SIGKILL과 의도적으로 그룹을 떠난 자손은 회수를 보장하지 않는다. 출력은 redact하며 8 MiB를 넘으면 그룹을 종료한다(exit 125). 임의 형식의 비밀값은 식별하지 못한다. |
 | 작업일지 규약 이행 | 기존 `docs/작업일지.md`는 읽거나 변경·삭제하지 않고 날짜별 새 규약만 사용한다. `fodh claude-md generate` 또는 session_start의 옛 작업일지 문구 감지 시 관리 블록만 재생성하며 사용자 영역은 보존한다. |
 | task 검수 면제(L4) | REVIEW→MERGE는 해당 task의 `kind: task, status: ok` meta 존재만으로 검수를 면제하며 시간 경계가 없다. 사소한 `codex task` 한 번으로도 면제될 수 있다. 라이브 T02에서는 Codex 구현 meta로 면제되어 haiku 두뇌가 직접 쓴 검수도 통과했다. Claude Agent 검수 경로에서는 하네스가 검수 증거를 만들 수 없기 때문이다. 후속 P8 후보는 `fodh review record`(검수 문서 경로·대상 커밋·모델 증거)로 Claude Agent 검수도 증거화하는 것이며 현재 제공되는 명령은 아니다 |
 | 커밋 비밀값 검사(P5) | 1 MB 초과·바이너리 untracked 파일은 내용의 비밀값 검사 없이 커밋되며 이름만 원장에 남는다 |
@@ -229,7 +274,7 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | VERIFY → REVIEW | `fodh verify run`의 마지막 성공, 현재 task 및 VERIFY 진입 이후 시각, 등록 워크트리(없으면 루트)와 일치하는 realpath cwd, git worktree의 검증 당시 clean=true. `.pi/verify/<runId>/result.json`과 상태를 저장하고 task.verify를 기록 |
 | DOCS → CLEANUP | `${docs.root}/작업일지/YYYY-MM-DD.md`의 오늘 또는 어제(KST) 날짜 파일에 taskId 포함, `docs/backlog.md`와 JSON 동기화. task.docs.ok 자동 기록 |
 | `cleanup run --task T` | 현재 CLEANUP 진입 이후 해당 task의 scope all 성공 보고서(processes·storage·worktrees 성공, 잔존 0). task.cleanup.ok 자동 기록(dry-run 제외) |
-| CLEANUP → PICK | `backlog set T --status done`의 DoD 충족 및 현재 task 완료, 마지막 정리 보고서와 프로세스 레지스트리 잔존 없음 |
+| CLEANUP → PICK | `backlog set T --status done` 뒤 변경된 백로그만 `git commit -m "docs(backlog): T 완료" -- docs/backlog.md`로 커밋한다. DoD·정리 검사는 유지하며 백로그 미커밋은 전이를 막지 않고 `docs:backlog-uncommitted warn`을 남긴다 |
 
 `--verify-ok`, `--docs-ok`, `--cleanup-ok` 자기 보고 옵션은 지원하지 않는다. 실패한 검사는 두뇌가 면제할 수 없으며 `fodh judgment add`로 사용자 판단을 받는다.
 
@@ -243,6 +288,8 @@ Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 �
 ## 판단대기 구조
 
 판단 파일은 머리말 → 지금 상태 한 줄 → 한눈에 표 → 열린 판단 → 사용자 절(보류 등) → 최근 결정 순으로 읽는다. 답은 열린 항목의 `- 답:`에만 쓴다. 선택지는 한 줄에 하나씩 표시하며, 한눈에 표와 최근 결정은 하네스가 저장할 때 다시 만든다.
+
+새 승인 항목은 `- 승인 필수: 예`로 표시하며 옛 `true`도 읽습니다. migrate와 판단기록 저장도 `예`를 사용합니다.
 
 완료 항목은 질문·답 원문과 해석·반영·결정일을 함께 `판단기록/YYYY-MM.md`로 옮긴다(KST 결정일). 기본 경로는 판단 파일 디렉터리 아래 `판단기록`, 설정은 `judgment.archive`다. 판단 파일에는 `judgment.recent`개(기본 5, 0~20)의 최근 결정 링크를 표시한다. 0이면 표시하지 않는다. 번호는 판단 파일·판단기록·영속 카운터를 함께 보고 정하므로 기록 파일을 지워도 재사용하지 않는다.
 

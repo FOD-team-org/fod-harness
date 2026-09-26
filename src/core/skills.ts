@@ -5,8 +5,8 @@ import { loadConfig } from './config.ts';
 import { atomicWrite, readJson, readText, withFileLock } from './storage.ts';
 import { projectPath } from './template-values.ts';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
-async function inspectSkills(root: string, write: boolean) {
-  const config = await loadConfig(root), version = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version as string;
+async function inspectSkills(root: string, write: boolean, options: { onlyMissing?: boolean } = {}) {
+  const config = await loadConfig(root, undefined, { dryRun: options.onlyMissing }), version = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version as string;
   const result = { installed: [] as string[], updated: [] as string[], unchanged: [] as string[], conflicts: [] as string[] };
   for (const name of config.skills.install) {
     const target = join(await projectPath(root, config.skills.target), name);
@@ -16,6 +16,7 @@ async function inspectSkills(root: string, write: boolean) {
       let exists = false;
       try { const stat = await lstat(target); exists = true; if (!stat.isDirectory()) { result.conflicts.push(name); return; } }
       catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+      if (exists && options.onlyMissing) { result.unchanged.push(name); return; }
       const marker = await projectPath(root, join(config.skills.target, name, '.fodh-managed'));
       let managed: { package?: string; version?: string; hash?: string } | undefined;
       try { managed = await readJson(marker, undefined); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
@@ -34,5 +35,5 @@ async function inspectSkills(root: string, write: boolean) {
   }
   return result;
 }
-export const installSkills = (root: string) => inspectSkills(root, true);
+export const installSkills = (root: string, options: { onlyMissing?: boolean } = {}) => inspectSkills(root, true, options);
 export const skillsStatus = (root: string) => inspectSkills(root, false);

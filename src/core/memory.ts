@@ -74,7 +74,7 @@ export async function resetMemory(root: string) {
     const runId = randomUUID();
     await appendLedger(root, { runId, action: 'memory:reset', status: 'ok' });
     const state = await readState(root);
-    const recover = state.state === 'paused(memory)' || state.state === 'WAIT_RESOURCE' && state.lastPaused === 'memory';
+    const recover = state.state === 'paused(memory)' || state.lastPaused === 'memory';
     if (recover) {
       const { record } = await addInboxOnce(root, { kind: 'memory-recovered', dedupeKey: `memory:reset:${runId}`, manualReset: true });
       await queueInbox(root, record.id);

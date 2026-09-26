@@ -1,5 +1,7 @@
 // Shared by the CLI and document generator; no CLI runtime imports in core.
 export const commandTable: { group: string; action?: string; summary: string; usage: string }[] = [
+  { group: 'init', summary: '하네스 설치(사용자 전용)', usage: 'fodh init [--brain opus|fable] [--dry-run]' },
+  { group: 'start', summary: '터미널에서 하네스 시작', usage: 'fodh start [--model 별칭|id] [--dry-run]' },
   {"group": "cleanup", "action": "run", "summary": "정리 실행", "usage": "fodh cleanup run [--scope processes|storage|worktrees|all] [--task T번호] [--dry-run]"},
   {"group": "verify", "action": "run", "summary": "검증 실행", "usage": "fodh verify run [--heavy] [--cwd 경로]"},
   {"group": "memory", "action": "status", "summary": "메모리 상태 조회", "usage": "fodh memory status"},

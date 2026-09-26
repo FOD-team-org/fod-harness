@@ -120,9 +120,9 @@ it('Claude autocompact 인자/settings 불간섭과 env 원본 그대로 전달'
 it('P3 delegate/worktrees 기본값은 config get에 모두 노출된다', async () => {
   const root = await project();
   expect(await getConfig(root, 'delegate')).toEqual({ claude: { subagentModel: 'opus', maxChildAgents: 1 },
-    codex: { command: 'codex', brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', sandbox: 'workspace-write', maxChildAgents: 1, timeoutMinutes: 90, waitMinutes: 8 },
+    codex: { externalGuard: true, command: 'codex', brainModel: 'gpt-6-astra', brainEffort: 'xhigh', workerModel: 'gpt-6-sol', workerEffort: 'xhigh', sandbox: 'workspace-write', maxChildAgents: 1, timeoutMinutes: 90, waitMinutes: 8 },
     route: { design: 'claude', default: 'codex' } });
-  expect(await getConfig(root, 'worktrees')).toEqual({ root: '..', prefix: 'wt-', links: [] });
+  expect(await getConfig(root, 'worktrees')).toEqual({ root: '..', prefix: 'wt-', links: [], setup: [], setupTimeoutMinutes: 10 });
   expect(await getConfig(root, 'watch.childTimeoutMinutes')).toBe(90);
 });
 it.each([

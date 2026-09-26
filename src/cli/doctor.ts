@@ -1,3 +1,4 @@
+import { doctorFiles } from '../core/doctor.ts';
 import { warnLegacyJudgment } from '../core/judgment.ts';
 import { unlink } from 'node:fs/promises';
 import { claudeMdMarker as expectedMarker } from '../core/claude-md.ts';
@@ -24,6 +25,9 @@ export async function doctor(root: string, options: {
   try {
     await warnLegacyJudgment(root);
     const config = await loadConfig(root), env = options.env ?? process.env;
+    const files = await doctorFiles(root);
+    if (files.claudeSettingsStale) await notify(root, { key: 'claudeSettingsStale', level: 'warning', title: 'Claude 훅 설정', body: 'claudeSettingsStale: .claude/settings.json 을 새 템플릿으로 바꾸세요' });
+    if (files.secretsNotIgnored.length) await notify(root, { key: 'secretsNotIgnored', level: 'warning', title: '비밀 파일 검색 노출', body: `secretsNotIgnored: ${JSON.stringify(files.secretsNotIgnored)}` });
     if (Number(env.BASH_DEFAULT_TIMEOUT_MS) > 0 && Number(env.BASH_DEFAULT_TIMEOUT_MS) < config.delegate.codex.waitMinutes * 60000) {
       const effective = waitLimitMinutes(config.delegate.codex.timeoutMinutes, config.brain.maxTurnMinutes, config.delegate.codex.waitMinutes, env);
       await notify(root, { key: 'doctor:bash-timeout', level: 'warning', title: 'Bash 대기 제한', body: `BASH_DEFAULT_TIMEOUT_MS가 waitMinutes보다 짧습니다. 위임 대기를 ${effective}분으로 자동 하향합니다` });
@@ -54,7 +58,7 @@ export async function doctor(root: string, options: {
     const claudeMdLoaded = markers.length > 0;
     const claudeMdStale = markers.some(marker => marker !== claudeMdMarker);
     if (skillsMissing.length || !claudeMdLoaded || claudeMdStale) await notify(root, { key: 'doctor:skills-memory', level: 'warning', title: '하네스 문서 로드 확인', body: `누락 스킬: ${skillsMissing.join(', ') || '없음'}, CLAUDE.md 로드: ${claudeMdLoaded}${claudeMdStale ? ', 낡음(재생성 필요)' : ''}` });
-    return { ok: true, brainModel: config.brain.model, allowedModels: config.brain.allowedModels, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, pluginsLeaked, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
+    return { ok: true, ...files, brainModel: config.brain.model, allowedModels: config.brain.allowedModels, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, pluginsLeaked, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
   } catch (error) {
     await updateState(root, { doctor: { ok: false, checkedAt: new Date().toISOString() } });
     await notify(root, { key: 'doctor:fail', level: 'error', title: 'doctor 실패', body: 'doctor 검증에 실패했습니다. 오류를 확인하세요' });

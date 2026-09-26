@@ -1,3 +1,4 @@
+import { secretReadGuard } from './secret-reads.mjs';
 import { globRegex, dynamicPathPattern, specificDynamicPattern } from './path-patterns.mjs';
 import { writePaths, withoutRedirects, copyDestinations } from './write-paths.mjs';
 import { unquoted, withoutExpansions } from './shell-parts.mjs';
@@ -146,12 +147,13 @@ try {
     deny(sourceMessage, 'boundary');
   };
   // An initialized project must not silently ignore an unreadable configuration.
-  let projectRules = [];
+  let projectRules = [], secrets = {};
   {
     try {
       const config = JSON.parse(readFileSync(resolve(root, '.pi/harness.json'), 'utf8'));
       if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('config');
       projectRules = approvalRules(config.approvalRules);
+      secrets = config.secrets;
     } catch (error) { if (brain) deny('하네스 설정을 읽을 수 없습니다.'); }
   }
   let judgmentFile = 'docs/판단대기.md', judgmentArchive;
@@ -243,10 +245,13 @@ try {
     deny('가드 설정은 fodh로만 변경할 수 있습니다.');
   }
   if (brain && editing) boundary(input.file_path ?? input.notebook_path ?? '');
+  const readGuard = brain ? secretReadGuard({ root, cwd, config: secrets, deny }) : undefined;
+  readGuard?.fileTool(name, input);
   if (!bash) process.exit(0);
 
   const parsed = shellCommands(command, { extended: brain });
   const { entries, unterminatedHeredoc } = parsed;
+  readGuard?.bash(entries);
   const groups = entries.map(entry => entry.words);
   const tempEnabled = temporaryCommandsSafe(command, parsed);
   const temporary = tempPolicy({ root, worktrees, hooks, normalize: normalizePath });
@@ -495,7 +500,9 @@ try {
       catch { deny('상태를 확인할 수 없어 git 변경을 거부합니다.'); }
       const allowed = gitAction(words) === 'commit'
         ? ['MERGE', 'DOCS', 'PLANNING', 'INTERVIEW', 'RESEARCH', 'PRD_DRAFT', 'ARCH', 'REVIEW'] : ['MERGE', 'DOCS'];
-      if (!allowed.includes(state)) deny('현재 상태에서는 해당 git 변경을 허용하지 않습니다.', 'boundary');
+      const backlogCommit = state === 'CLEANUP' && words.length === 6 && words[1] === 'commit' && words[2] === '-m'
+        && /^docs\(backlog\): T\d+ 완료$/.test(words[3]) && words[4] === '--' && words[5] === 'docs/backlog.md';
+      if (!allowed.includes(state) && !backlogCommit) deny('현재 상태에서는 해당 git 변경을 허용하지 않습니다.', 'boundary');
     }
   }
   if (brain && parsed.unresolved) deny('검사할 수 없는 셸 구문입니다. 단순한 명령으로 나눠 쓰세요', 'boundary');

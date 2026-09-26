@@ -19,7 +19,7 @@ export interface HarnessState {
   awaitingSlot?: { kind: 'codex'; owner: import('./slots.ts').SlotOwner; since: string };
   delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string; implied?: string };
   awaitingDelegation?: boolean;
-  worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string }[];
+  worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string; setupOk?: boolean; setupAt?: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
   verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string; head?: string | null; clean?: boolean | null; since?: string; dirtyAfter?: string[] };
@@ -173,8 +173,10 @@ export async function transitionState(root: string, to: string, input: Transitio
     let task: Task | undefined;
     let verified: HarnessState['verify'];
     let documented = false;
+    let backlogWarningTask: string | undefined;
     let staleResumeTask: HarnessState['resumeTask'];
     const next = await updateState(root, async current => {
+      backlogWarningTask = undefined;
       const savedTask = options.resume && options.taskId ? await getTask(root, options.taskId) : undefined;
       const taskCheckpoint = savedTask && ['doing', 'verify', 'review', 'fix', 'merge'].includes(savedTask.status)
         && savedTask.resume?.state === to;
@@ -270,6 +272,7 @@ export async function transitionState(root: string, to: string, input: Transitio
         }
         const completed = current.taskId ? await getTask(root, current.taskId) : undefined;
         if (!completed || completed.status !== 'done') throw new BacklogError('task 미완료', completed ? missingDoD(completed) : ['taskId']);
+        backlogWarningTask = current.taskId;
       }
       if (current.state === 'VERIFY' && to === 'REVIEW') verified = current.verify;
       documented = current.state === 'DOCS' && to === 'CLEANUP';
@@ -301,6 +304,7 @@ export async function transitionState(root: string, to: string, input: Transitio
         ...(to === 'PLANNING' || to === 'SPEC' || resume && !!options.taskId ? { phase: 'task' as const } : {}),
       };
     });
+    if (backlogWarningTask) await (await import('./worktree.ts')).warnBacklogUncommitted(root, backlogWarningTask);
     // L7: 상태 저장이 성공한 다음에만 repair와 백로그 단계를 반영한다.
     if (task) {
       const status = ({ SPEC: 'doing', IMPLEMENT: 'doing', VERIFY: 'verify', REVIEW: 'review', FIX: 'fix',

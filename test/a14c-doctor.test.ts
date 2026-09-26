@@ -1,0 +1,61 @@
+import { expect, it, vi } from 'vitest';
+vi.mock('../src/provider/turn.ts', () => ({ runTurn: vi.fn(async () => ({ reason: 'stop', hookDenials: [], init: {} })) }));
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { project } from './p5-helpers.ts';
+import { gitProject } from './p7-git-helpers.ts';
+import { doctor } from '../src/cli/doctor.ts';
+import { doctorFiles } from '../src/core/doctor.ts';
+import { readLedger } from '../src/core/ledger.ts';
+import { setConfig } from '../src/core/config.ts';
+it.each(['package', 'brain', 'user'])('P2 sh -c 템플릿 %s 분기·stdin 그대로 전달', async mode => {
+  const root = await project(); await mkdir(join(root, 'hooks'));
+  await writeFile(join(root, 'hooks/pretooluse.sh'), '#!/bin/sh\ncat\n', { mode: 0o755 });
+  const settings = JSON.parse(await readFile('templates/claude-settings.json', 'utf8'));
+  const command = settings.hooks.PreToolUse[0].hooks[0].command;
+  const env = { ...process.env, FODH_BRAIN: mode === 'user' ? '' : '1', FODH_PACKAGE_ROOT: mode === 'package' ? root : '' };
+  const child = spawn('/bin/sh', ['-c', command], { env }); let stdout = '', stderr = '';
+  child.stdout.on('data', data => stdout += data); child.stderr.on('data', data => stderr += data);
+  child.stdin.end('FAKE_VALUE\n');
+  const code = await new Promise(resolve => child.once('close', resolve));
+  expect(code).toBe(mode === 'brain' ? 2 : 0);
+  expect(stdout).toBe(mode === 'package' ? 'FAKE_VALUE\n' : '');
+  expect(stderr).toBe(mode === 'brain' ? '하네스 가드[보호]: FODH_PACKAGE_ROOT 없음\n' : '');
+});
+it('P2 doctor 옛 훅 경고 한 줄·새 템플릿은 해제', async () => {
+  const root = await project(); await mkdir(join(root, '.claude'));
+  await writeFile(join(root, '.claude/settings.json'), JSON.stringify({ hooks: { command: '"${FODH_PACKAGE_ROOT:?FODH_PACKAGE_ROOT 설정 필요}/hooks/pretooluse.sh"' } }));
+  expect(await doctor(root)).toMatchObject({ ok: true, claudeSettingsStale: true });
+  expect((await readLedger(root)).filter(e => e.action === 'notify:claudeSettingsStale' && e.status === 'ok')).toHaveLength(1);
+  await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
+  expect(await doctorFiles(root)).toMatchObject({ claudeSettingsStale: false });
+});
+it('H11 doctor는 값 없이 ignore 밖 비밀 파일만 경고·readAllow·제외 디렉터리', async () => {
+  const { root } = await gitProject();
+  await setConfig(root, 'secrets.readDeny', '["neon_api.json"]');
+  for (const file of ['.env', '.env.local', 'neon_api.json', '.env.example']) await writeFile(join(root, file), 'FAKE_VALUE', { mode: 0o000 });
+  await writeFile(join(root, '.gitignore'), '.pi/\ndocs/\n.env\n');
+  await mkdir(join(root, 'node_modules')); await writeFile(join(root, 'node_modules/.env'), 'FAKE_VALUE');
+  expect(await doctorFiles(root)).toMatchObject({ secretsNotIgnored: ['.env.local', 'neon_api.json'] });
+  expect(await doctor(root)).toMatchObject({ ok: true, secretsNotIgnored: ['.env.local', 'neon_api.json'] });
+  const ledger = await readLedger(root);
+  expect(ledger).toContainEqual(expect.objectContaining({ action: 'notify:secretsNotIgnored', evidence: expect.objectContaining({ body: 'secretsNotIgnored: [".env.local","neon_api.json"]' }) }));
+  expect(JSON.stringify(ledger)).not.toContain('FAKE_VALUE');
+});
+
+it('R3 ignored 디렉터리는 가지치기, 탐색 루트의 비밀 파일은 보수적으로 검사한다', async () => {
+  const { root } = await gitProject();
+  await writeFile(join(root, '.gitignore'), '.pi/\ndocs/\n.env\n');
+  await writeFile(join(root, '.env'), 'FAKE_VALUE');
+  const { secretReadGuard } = await import('../hooks/secret-reads.mjs');
+  const { shellCommands } = await import('../hooks/shell-commands.mjs');
+  const denied: string[] = [];
+  const guard = secretReadGuard({ root, cwd: root, config: {}, deny: (message: string) => { denied.push(message); } });
+  guard.bash(shellCommands('rg --hidden X .').entries);
+  expect(denied).toHaveLength(1);
+  guard.bash(shellCommands('rg --hidden --no-ignore X .').entries);
+  expect(denied).toHaveLength(2);
+  guard.bash(shellCommands("rg --hidden -g '!.env*' X .").entries);
+  expect(denied).toHaveLength(2); expect(denied[0]).toContain('비밀 파일(.env)');
+});

@@ -9,7 +9,7 @@ import { setConfig } from '../src/core/config.ts';
 import * as storage from '../src/core/storage.ts';
 
 const required = ['.pi/harness.lock', '.pi/*.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
-  '.pi/codex/', '.pi/verify/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
+  '.pi/codex/', '.pi/verify/', '.pi/worktree-setup/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
 it.each(['file', 'directory'] as const)('F11 git %s initialize는 기존 gitignore를 보존하고 누락 줄만 한 번 추가한다', async git => {
   const root = await project('IDLE');
   if (git === 'file') await writeFile(join(root, '.git'), 'gitdir: unused-fixture');

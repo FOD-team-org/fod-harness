@@ -73,3 +73,46 @@ export async function reclaimCodexTree(rootPgid: number, rootPids: readonly numb
   }
   return empty(await remaining());
 }
+
+export interface ProcessSnapshotRow { pid: number; ppid: number; startedAt: string; command: string; root?: string }
+export function parseCommandSnapshot(text: string): ProcessSnapshotRow[] {
+  return text.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/u.exec(line);
+    return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), startedAt: match[3], command: match[4] }] : [];
+  });
+}
+export type SnapshotExec = (file: string, args: string[], options: { timeout: number; maxBuffer?: number; env: NodeJS.ProcessEnv }) => Promise<{ stdout: string }>;
+export async function commandSnapshot(run: SnapshotExec = (file, args, options) => execute(file, args, options)): Promise<ProcessSnapshotRow[]> {
+  const { stdout } = await run('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+    timeout: 1000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+  });
+  const snapshot = parseCommandSnapshot(stdout);
+  const detected = externalCodex(snapshot);
+  if (detected) {
+    // ps has no portable cwd column. lsof reads directory metadata only; failure
+    // keeps detection usable and the observer root is used by acquireSlot.
+    try {
+      const cwd = await run('/usr/sbin/lsof', ['-a', '-p', String(detected.pid), '-d', 'cwd', '-Fn'], {
+        timeout: 1000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+      });
+      detected.root = cwd.stdout.split('\n').find(line => line.startsWith('n/'))?.slice(1);
+    } catch { /* command-line root or observer root remains available */ }
+  }
+  return snapshot;
+}
+export function externalCodex(snapshot: ProcessSnapshotRow[], self = process.pid): ProcessSnapshotRow | undefined {
+  const byPid = new Map(snapshot.map(row => [row.pid, row]));
+  const ancestors = (pid: number) => {
+    const chain: ProcessSnapshotRow[] = [], seen = new Set<number>();
+    for (let depth = 0; depth < 30; depth++) {
+      const row = byPid.get(pid);
+      if (!row || seen.has(row.pid)) break;
+      seen.add(row.pid); chain.push(row); pid = row.ppid;
+    }
+    return chain;
+  };
+  const ours = new Set(ancestors(self).map(row => row.pid));
+  return snapshot.find(row => row.pid > 1 && row.pid !== self && !ours.has(row.pid)
+    && /codex-companion\.mjs\s+task\b|(?:^|\/)codex\s+exec\b/u.test(row.command)
+    && !ancestors(row.pid).some(parent => parent.pid === self || /fodh-codex-supervisor|\/Applications\/(?:ChatGPT|Codex)\.app\//u.test(parent.command)));
+}

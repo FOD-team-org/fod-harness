@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { main } from '../src/cli/index.ts';
 import { doctor } from '../src/cli/doctor.ts';
 import { acquireLock, lockOwnerAlive } from '../src/core/lock.ts';
+import * as processTime from '../src/core/process-time.ts';
 import * as state from '../src/core/state.ts';
 import { appendLedger, readLedger, unknownEntries } from '../src/core/ledger.ts';
 import { addInbox, listInbox } from '../src/core/inbox.ts';
@@ -199,14 +200,12 @@ it.each(['1 모두 적용', '1 전부 처리', '1 제외 조건'])('단일 번�
 it.each(['모두', '전부', '1과 2 제외'])('다중 선택 문맥 %s는 모호 처리한다', answer => {
   expect(classifyAnswer(answer, ['첫째', '둘째']).applicable).toBe(false);
 });
-it('잠금 소유자의 실제 프로세스 시작 시각이 다르면 PID가 살아 있어도 stale이다', async () => {
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const { stdout } = await promisify(execFile)('/bin/ps', ['-p', String(process.pid), '-o', 'lstart='], {
-    env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-  });
-  expect(Number.isFinite(Date.parse(stdout.trim()))).toBe(true);
-  const startedAt = new Date(Date.parse(stdout.trim()));
+it('잠금 소유자의 프로세스 시작 시각이 다르면 PID가 살아 있어도 stale이다', async () => {
+  const startedAt = new Date('2026-09-26T00:00:00.000Z');
+  const started = vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(startedAt.toISOString());
   expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: startedAt.toISOString() })).toBe(true);
   expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: new Date(startedAt.getTime() - 10000).toISOString() })).toBe(false);
+  expect(started).toHaveBeenCalledTimes(2);
+  expect(started).toHaveBeenNthCalledWith(1, process.pid);
+  expect(started).toHaveBeenNthCalledWith(2, process.pid);
 });

@@ -1,3 +1,5 @@
+import { initProject } from './init.ts';
+import { startPlan } from './start.ts';
 import { commandTable as commands } from './commands.ts';
 import { randomUUID } from 'node:crypto';
 export const commandTable = commands;
@@ -33,7 +35,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
   let createdJudgment: string | undefined;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
-      help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
+      brain: { type: 'string' }, model: { type: 'string' }, help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, dry: { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
@@ -53,6 +55,15 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
         : commandTable.filter(c => c.group === group && (!action || c.action === action));
       if (!selected.length) throw new Error('지원하지 않는 fodh 명령입니다.');
       process.stdout.write(JSON.stringify({ help: selected.map(({ usage, summary }) => ({ usage, summary })) }) + '\n');
+      return;
+    }
+    if (group === 'init' && !action) {
+      process.stdout.write(JSON.stringify(await initProject({ cwd: root, brain: values.brain, dryRun: values['dry-run'] })) + '\n');
+      return;
+    }
+    if (group === 'start' && !action) {
+      if (!values['dry-run']) throw new Error('fodh start 는 bin/fodh 셸 런처로 실행하세요');
+      process.stdout.write(JSON.stringify(await startPlan({ cwd: root, model: values.model, dryRun: true })) + '\n');
       return;
     }
     if (process.env.FODH_CODEX_CHILD) await resolveCliRoot();

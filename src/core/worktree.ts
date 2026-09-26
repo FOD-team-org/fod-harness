@@ -1,3 +1,4 @@
+import { setupWorktree, assertSetupMemory } from './worktree-setup.ts';
 import { isUtf8 } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -193,13 +194,14 @@ async function linkDependencies(root: string, path: string, taskId: string, link
   }
   await appendLedger(root, { runId, taskId, action: 'worktree:link', status: 'ok', evidence: { taskId, linked, skipped } });
 }
-export async function createWorktree(root: string, taskId: string, base = 'HEAD') {
+export async function createWorktree(root: string, taskId: string, base = 'HEAD', setupOptions: { timeoutMs?: number } = {}) {
   if (!/^T\d+$/u.test(taskId)) throw new Error('task ID가 올바르지 않습니다');
   if (!base || base.startsWith('-') || /[\r\n\0]/u.test(base)) throw new Error('--base가 올바르지 않습니다');
   return withFileLock(harnessPath(root, 'harness-worktree'), async () => {
     await getTask(root, taskId);
     const state = await readState(root), config = await loadConfig(root);
     const registered = state.worktrees?.find(item => item.taskId === taskId);
+    if (config.worktrees.setup.length && !registered?.setupOk) await assertSetupMemory(root);
     const project = await realpath(root), branch = `${config.worktrees.prefix}${taskId}`;
     const path = await canonical(resolve(root, config.worktrees.root, branch));
     if (inside(project, path) || inside(path, project)) throw new Error('워크트리는 프로젝트 루트 밖의 별도 경로여야 합니다');
@@ -209,7 +211,8 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
     if (baseBranch === 'HEAD') throw new Error('루트가 브랜치 위에 있어야 합니다');
     if (registered && await exists(registered.path)) {
       await linkDependencies(root, registered.path, taskId, config.worktrees.links, randomUUID());
-      return { ...registered, base: await registeredBase(root, registered), worktree: registered.path, created: false };
+      const prepared = await setupWorktree(root, taskId, setupOptions);
+      return { ...prepared, base: await registeredBase(root, registered), worktree: registered.path, created: false };
     }
     const runId = randomUUID();
     await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'pre', evidence: { path, branch, base } });
@@ -224,10 +227,10 @@ export async function createWorktree(root: string, taskId: string, base = 'HEAD'
       await updateState(root, current => ({ worktrees: [...(current.worktrees ?? []).filter(item => item.taskId !== taskId), record] }));
       await linkDependencies(root, path, taskId, config.worktrees.links, runId);
       await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'ok', evidence: record });
-      return { ...record, worktree: path, created: true };
     } catch (error) {
       await appendLedger(root, { runId, taskId, action: 'worktree:create', status: 'fail', evidence: { error: redact((error as Error).message), path } }); throw error;
     }
+    return { ...await setupWorktree(root, taskId, setupOptions), worktree: path, created: true };
   });
 }
 export async function removeWorktree(root: string, taskId: string, force = false) {
@@ -258,6 +261,19 @@ export async function listWorktrees(root: string) {
   let porcelain = '', error: string | undefined;
   try { porcelain = await git(root, ['worktree', 'list', '--porcelain']); } catch (caught) { error = (caught as Error).message; }
   const paths = porcelain.split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9));
-  return { worktrees: await Promise.all((state.worktrees ?? []).map(async item => ({ ...item,
+  return { worktrees: await Promise.all((state.worktrees ?? []).map(async item => ({ ...item, setupOk: item.setupOk === true,
     exists: await exists(item.path), registeredInGit: paths.includes(item.path) }))), porcelain, ...(error ? { error } : {}) };
+}
+
+// Diagnostics only: an unavailable Git status must not block cleanup completion.
+export async function warnBacklogUncommitted(root: string, taskId?: string): Promise<void> {
+  if (!await exists(resolve(root, '.git'))) return;
+  let dirty = false;
+  try { dirty = !!(await git(root, ['status', '--porcelain', '--', 'docs/backlog.md'])).trim(); }
+  catch { return; }
+  if (dirty) await appendLedger(root, { runId: randomUUID(), taskId, action: 'docs:backlog-uncommitted', status: 'warn' });
+}
+
+export async function prepareWorktree(root: string, taskId: string, options: { timeoutMs?: number } = {}) {
+  return withFileLock(harnessPath(root, 'harness-worktree'), () => setupWorktree(root, taskId, options));
 }

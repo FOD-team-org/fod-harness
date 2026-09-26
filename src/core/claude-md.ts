@@ -1,5 +1,6 @@
 import { redact } from '../provider/privacy.ts';
 import { createHash } from 'node:crypto';
+import { lstat } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { commandTable } from '../cli/commands.ts';
 import { loadConfig, type HarnessConfig } from './config.ts';
@@ -31,9 +32,9 @@ export function claudeMdHash(config: HarnessConfig): string {
   return createHash('sha256').update(JSON.stringify(visible)).digest('hex').slice(0, 8);
 }
 export const claudeMdMarker = (config: HarnessConfig): string => `FODH-DOC-${claudeMdHash(config)}`;
-export async function generateClaudeMd(root: string, options: { check?: boolean; legacyWorklogOnly?: boolean } = {}) {
+export async function generateClaudeMd(root: string, options: { check?: boolean; legacyWorklogOnly?: boolean; onlyMissing?: boolean } = {}) {
   const generate = async () => {
-    const config = await loadConfig(root), state = await readState(root), status = await skillsStatus(root);
+    const config = await loadConfig(root, undefined, { dryRun: options.onlyMissing }), state = await readState(root), status = await skillsStatus(root);
     const installed = [...status.updated, ...status.unchanged].sort();
     const digest = claudeMdHash(config);
     const verification = `## 검증\n일반 명령: ${JSON.stringify(config.verify.commands.map(redact))}\nheavy 명령: ${JSON.stringify(config.verify.heavy.map(redact))} — VERIFY의 \`fodh verify run --heavy\` 로만 실행.\n`;
@@ -45,14 +46,16 @@ export async function generateClaudeMd(root: string, options: { check?: boolean;
       '이 블록은 `fodh claude-md generate` 가 관리합니다. 직접 고치지 마세요. 설정 해시: '+digest,
       `## 역할\n두뇌는 소스 파일을 쓰지 않는다. design → Claude Agent(${config.delegate.claude.subagentModel}), 그 외 → \`fodh codex task\`(${config.delegate.codex.workerModel}). 인터뷰 가드: ${config.interview.enforce}.\n| 분류 | 수행자 |\n|---|---|\n${Object.entries(config.delegate.route).map(([k,v]) => `| ${k} | ${v} |`).join('\n')}`,
       '## 하네스 흐름\n| 상태 | 다음 fodh 명령 |\n|---|---|\n| INTERVIEW | fodh interview next |\n| RESEARCH | fodh docs scaffold research-q |\n| PRD_DRAFT | fodh docs scaffold prd |\n| ARCH | fodh docs scaffold arch |\n| PLANNING | fodh docs scaffold backlog-draft |\n| PICK | fodh pick |\n| SPEC | fodh docs scaffold spec |\n| IMPLEMENT·FIX | fodh codex task |\n| VERIFY | fodh verify run |\n| REVIEW | fodh docs scaffold review |\n| MERGE·DOCS | fodh backlog set |\n| CLEANUP | fodh cleanup run |\n| RECLAIM | fodh reclaim |\n| WAIT_JUDGMENT | fodh judgment apply |\n| recovering | fodh ledger list |\n턴 끝: `대기: 사용자`, `대기: 위임 <runId>`(마지막 비어 있지 않은 3줄 안), 마지막 줄 `상태: …`. 멈춤 상태에서는 조건 해소 전 새 작업을 시작하지 않는다.',
-      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset' || c.group === 'judgment' && c.action === 'migrate')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
+      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'init' || c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset' || c.group === 'judgment' && c.action === 'migrate')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
       '## 백로그\n분류: design, non-design, docs, research. 상태: ready, doing, verify, review, fix, merge, done, blocked(A번호).\nDoD 6항: verify.ok, review.high=0, review.commit, merge.commit, docs.ok, cleanup.ok. 상태·증거는 CLI로만 쓴다.',
       verification, restrictions, docs,
       '## 설치된 하네스 스킬\n'+(installed.join(', ') || '없음'),
     ];
     const planned = [];
     for (const name of config.claudeMd.targets) {
-      const path = await projectPath(root, name), old = await readText(path, '\0missing');
+      const path = await projectPath(root, name);
+      if (options.onlyMissing && await lstat(path).then(() => true, () => false)) continue;
+      const old = await readText(path, '\0missing');
       if (options.legacyWorklogOnly && !old.match(/<!-- fodh:managed:begin\b[^>]*-->[\s\S]*?<!-- fodh:managed:end -->/u)?.[0].includes('작업일지.md')) continue;
       const body = name === 'AGENTS.md' ? [verification, restrictions, docs, '`fodh` 를 실행하지 않는다, git 을 쓰지 않는다.'].join('\n') : sections.join('\n\n');
       const block = begin+'\n'+body+'\n'+end;

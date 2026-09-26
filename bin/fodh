@@ -1,3 +1,29 @@
-#!/usr/bin/env node
-import { main } from '../src/cli/index.ts';
-await main();
+#!/bin/sh
+fodh_node=${FODH_NODE:-node}
+if ! command -v "$fodh_node" >/dev/null 2>&1; then
+  echo 'Node 실행 파일을 찾을 수 없습니다. FODH_NODE를 설정하세요.' >&2
+  exit 1
+fi
+# The brain may inherit a PATH containing only Node and this package's bin.
+# Resolve links with Node and use shell builtins, without dirname/readlink on PATH.
+fodh_entry=$0
+if [ -L "$fodh_entry" ]; then
+  fodh_entry=$("$fodh_node" --input-type=commonjs --print 'require("node:fs").realpathSync(process.argv[1])' "$fodh_entry") || exit 1
+fi
+case "$fodh_entry" in */*) fodh_dir=${fodh_entry%/*} ;; *) fodh_dir=. ;; esac
+fodh_bin=$(CDPATH= cd -P "${fodh_dir:-/}" && pwd) || exit 1
+if [ "$#" -eq 0 ] || [ "${1:-}" = start ]; then
+  if [ "$#" -eq 0 ]; then
+    if [ -t 0 ] && [ -t 1 ]; then set -- --implicit --interactive; else set -- --implicit; fi
+  else
+    for fodh_arg in "$@"; do
+      case "$fodh_arg" in --dry-run|--help|-h) exec "$fodh_node" "$fodh_bin/fodh.mjs" "$@" ;; esac
+    done
+    shift
+  fi
+  fodh_exec=$("$fodh_node" "$fodh_bin/fodh-start.mjs" --print "$@") || exit 1
+  # Only the private planner's shell-quoted argv/env is evaluated.
+  eval "$fodh_exec"
+  exit $?
+fi
+exec "$fodh_node" "$fodh_bin/fodh.mjs" "$@"

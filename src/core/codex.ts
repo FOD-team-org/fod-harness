@@ -38,13 +38,17 @@ export async function buildHeader(meta: Pick<CodexMeta, 'kind' | 'runId' | 'task
       : meta.kind === 'research' ? ' research 는 `## 조사 결과` + 출처 목록.' : '' };
   return (await readFile(join(pkg, 'templates/codex-header.md'), 'utf8')).replace(/\{\{(\w+)\}\}/gu, (_, key: string) => values[key] ?? '');
 }
+async function assertCodexMemory(root: string) {
+  const state = await readState(root);
+  const watch = await readJson<{ watch?: { memory?: { critical?: boolean } } }>(harnessPath(root, 'harness-watcher.json'), {});
+  if (watch.watch?.memory?.critical === true) throw new Error('메모리 임계 상태입니다');
+  if (state.state === 'paused(memory)' || state.lastPaused === 'memory') throw new Error('메모리 회복 전에는 위임을 시작할 수 없습니다');
+}
 export async function startCodex(root: string, kind: CodexKind, options: StartOptions, launcher: { bin?: string; timeoutMs?: number } = {}) {
   root = await realpath(root);
   const started = await withFileLock(harnessPath(root, 'harness-delegation'), async () => {
     const state = await readState(root), config = await loadConfig(root), cfg = config.delegate.codex;
-    const watch = await readJson<{ watch?: { memory?: { critical?: boolean } } }>(harnessPath(root, 'harness-watcher.json'), {});
-    if (watch.watch?.memory?.critical === true) throw new Error('메모리 임계 상태입니다');
-    if (state.state === 'paused(memory)' || state.lastPaused === 'memory') throw new Error('메모리 회복 전에는 위임을 시작할 수 없습니다');
+    await assertCodexMemory(root);
     if (kind === 'task' && !options.taskId || options.taskId !== undefined && !/^T\d+$/u.test(options.taskId)) throw new Error('--task T번호가 필요합니다');
     if (kind === 'review' && state.state !== 'REVIEW' || kind === 'research' && !['RESEARCH', 'ARCH', 'PLANNING', 'SPEC', 'REVIEW'].includes(state.state)) throw new Error(`현재 상태에서는 codex ${kind} 를 시작할 수 없습니다`);
     const task = options.taskId ? await getTask(root, options.taskId) : undefined;
@@ -87,6 +91,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
       startedAt, timeoutMinutes: cfg.timeoutMinutes, status: 'running', state: state.state, worktree,
       routeHint: task ? config.delegate.route[task.category] ?? config.delegate.route.default : undefined };
     const prompt = await buildHeader(meta, cfg.maxChildAgents, spec);
+    await assertCodexMemory(root);
     const acquired = await acquireSlot('codex', { root, runId, taskId: task?.id, pid: process.pid,
       startedAt: await processStartedAt(process.pid) ?? `spawn:${startedAt}`, acquiredAt: startedAt });
     if (!acquired.acquired) {
@@ -96,6 +101,8 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
     }
     let pid: number | undefined;
     try {
+      if (kind === 'task' && worktree) await (await import('./worktree.ts')).prepareWorktree(root, task!.id);
+      await assertCodexMemory(root);
       await updateState(root, { awaitingSlot: undefined });
       await atomicWrite(join(dir, 'prompt.md'), prompt);
       for (const name of ['events.jsonl', 'stderr.txt']) await atomicWrite(join(dir, name), '');
@@ -181,6 +188,7 @@ export async function status(root: string, runId?: string) {
   return { delegation: state.delegation ?? null, meta: state.delegation ? await readMeta(root, state.delegation.runId) : null, slots: await slotsStatus() };
 }
 export async function cancel(root: string, runId: string) {
+  if (/^external-\d+$/u.test(runId)) throw new Error('외부 Codex 소유자는 취소 대상이 아닙니다');
   return withFileLock(harnessPath(root, 'harness-delegation'), async () => {
     const meta = await readMeta(root, runId);
     if (!meta) {

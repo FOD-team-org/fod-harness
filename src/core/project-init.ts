@@ -2,8 +2,8 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, harnessPath, readText, withFileLock } from './storage.ts';
 
-const harnessIgnores = ['.pi/harness.lock', '.pi/*.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
-  '.pi/codex/', '.pi/verify/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
+export const harnessIgnores = ['.pi/harness.lock', '.pi/*.lock', '.pi/harness-*.json', '.pi/harness-*.jsonl', '.pi/scratch/',
+  '.pi/codex/', '.pi/verify/', '.pi/worktree-setup/', '.pi/cleanup-last.json', '.pi/harness-config-warned.json'];
 
 export class GitignoreNotRegularError extends Error {
   readonly skipped = 'not-regular-file';

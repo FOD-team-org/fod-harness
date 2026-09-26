@@ -69,7 +69,7 @@ export function parseJudgment(text: string, options: { migrate?: boolean } = {})
     items.push({
       id: heading[1]!, title: heading[2]!, rev: Number(heading[3] ?? 1), background: field(raw, '배경'),
       options: parsedOptions(raw), detail: field(raw, '자세히') || undefined, recommend: field(raw, '추천'), blocks: field(raw, '막힌 작업'),
-      answer: field(raw, '답'), requiresApproval: field(raw, '승인 필수') === 'true',
+      answer: field(raw, '답'), requiresApproval: ['true', '예'].includes(field(raw, '승인 필수')),
       resolution: ['resume', 'cleanup'].includes(field(raw, '적용 정책')) ? field(raw, '적용 정책') as 'resume' | 'cleanup' : undefined,
       reaskOf: field(raw, '재질문 원본') || undefined, followup: field(raw, '후속 질문') || undefined, ...(answerRev ? { answerRev: Number(answerRev) } : {}),
       dedupeKey: raw.match(/<!-- fodh-dedupe: ([a-f0-9]+) -->/u)?.[1], raw, start, end,
@@ -314,7 +314,7 @@ export async function addJudgment(root: string, input: JudgmentInput, cliPolicy?
       `- 막힌 작업: ${oneLine(Array.isArray(input.blocks) ? input.blocks.join(', ') : input.blocks)}\n`,
       `${input.detail ? `- 자세히: ${input.detail}\n` : ''}- 답:\n`,
       `${input.resolution ? `- 적용 정책: ${input.resolution}\n` : ''}`,
-      `${input.requiresApproval ? '- 승인 필수: true\n' : ''}${input.reaskOf ? `- 재질문 원본: ${oneLine(input.reaskOf)}\n` : ''}`,
+      `${input.requiresApproval ? '- 승인 필수: 예\n' : ''}${input.reaskOf ? `- 재질문 원본: ${oneLine(input.reaskOf)}\n` : ''}`,
       `${dedupeKey ? `<!-- fodh-dedupe: ${dedupeKey} -->\n` : ''}\n`,
     ].join('');
     if (!/^## 열린 판단\s*$/mu.test(text)) text += '\n## 열린 판단\n\n';
@@ -720,8 +720,9 @@ async function highestNumber(root: string, text: string, archive?: string): Prom
   }
   return last;
 }
+const koreanApproval = (text: string) => text.replace(/^- 승인 필수:[ \t]*true[ \t]*$/gmu, '- 승인 필수: 예');
 function archiveBlock(item: CompletedJudgment, raw = ''): string {
-  const rest = raw.split('\n').filter(line => !/^### |^- (?:답|답 기준 rev|회신):|^<!-- fodh-dedupe:/u.test(line)).join('\n').trim();
+  const rest = koreanApproval(raw).split('\n').filter(line => !/^### |^- (?:답|답 기준 rev|회신):|^<!-- fodh-dedupe:/u.test(line)).join('\n').trim();
   return `### ${item.id} — ${oneLine(item.title ?? item.id)} (rev ${item.rev ?? 1})\n- 결정일: ${oneLine(item.date)}\n- 답: ${oneLine(item.answer)}\n- 해석: ${oneLine(item.interpretation)}\n- 반영: ${oneLine(item.commit)}\n${rest ? rest + '\n' : ''}`;
 }
 function archiveAppend(text: string, item: CompletedJudgment, sourceFile: string, targetFile: string, raw = ''): string {
@@ -775,7 +776,7 @@ function ambiguousInlineOptions(item: JudgmentItem): boolean {
   });
 }
 function migrateItem(item: JudgmentItem): string {
-  const lines = item.raw.split('\n'), known = /^(?:### |^- (?:배경|선택지|추천|막힌 작업|자세히|답|답 기준 rev|적용 정책|승인 필수|재질문 원본|후속 질문|회신):|<!-- fodh-dedupe:)/u;
+  const lines = koreanApproval(item.raw).split('\n'), known = /^(?:### |^- (?:배경|선택지|추천|막힌 작업|자세히|답|답 기준 rev|적용 정책|승인 필수|재질문 원본|후속 질문|회신):|<!-- fodh-dedupe:)/u;
   let optionContinuation = false;
   const unknown = lines.filter(line => {
     if (/^- 선택지:[ \t]*$/u.test(line)) { optionContinuation = true; return false; }
@@ -857,7 +858,11 @@ export async function migrateJudgment(root: string, options: { dryRun?: boolean 
       if (!text.includes(header)) text = text.replace(/^(#[^\n]*\n)/u, (_, title: string) => `${title}\n${header}\n`);
       const records: CompletedJudgment[] = [];
       const allFiles = new Set([...await archiveFiles(root, config.judgment.archive), ...writes.keys()]);
-      for (const file of [...allFiles].sort()) records.push(...parseArchive(await get(file), relative(dirname(path), file)));
+      for (const file of [...allFiles].sort()) {
+        const original = await get(file), normalized = koreanApproval(original);
+        if (normalized !== original) writes.set(file, normalized);
+        records.push(...parseArchive(normalized, relative(dirname(path), file)));
+      }
       text = renderDerived(text, { recent: config.judgment.recent, completed: records });
       const changedArchives = [...writes].filter(([file, value]) => value !== originals.get(file));
       const last = await highestNumber(root, original, config.judgment.archive);

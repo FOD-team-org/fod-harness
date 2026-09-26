@@ -1,3 +1,4 @@
+import { secretSettings, secretPolicy, type SecretSettings } from '../../hooks/secret-paths.mjs';
 import { approvalRules, type ApprovalRule } from '../../hooks/approval-rules.mjs';
 import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
@@ -10,6 +11,7 @@ import { notify as sendNotification } from './notify.ts';
 
 export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
 export interface HarnessConfig {
+  secrets: SecretSettings;
   interview: { enforce: boolean; roundSize: number; maxAsks: number; extraBankFile: string };
   docs: { root: string; overrideDir: string };
   skills: { target: string; install: string[] };
@@ -22,7 +24,7 @@ export interface HarnessConfig {
     claude: { subagentModel: string; maxChildAgents: number };
     route: Record<string, 'codex' | 'claude'>;
     codex: {
-      command: string | string[]; sandbox: 'workspace-write' | 'read-only'; timeoutMinutes: number; waitMinutes: number;
+      externalGuard: boolean; command: string | string[]; sandbox: 'workspace-write' | 'read-only'; timeoutMinutes: number; waitMinutes: number;
       brainModel: string; brainEffort: string; workerModel: string; workerEffort: string; maxChildAgents: number;
     };
   };
@@ -31,7 +33,7 @@ export interface HarnessConfig {
   verify: { commands: string[]; heavy: string[]; timeoutMinutes: number };
   notify: { channels: ('tui' | 'macos' | 'slack' | 'ledger')[] };
   budget: { dailyTurns: number; dailyHours: number };
-  worktrees: { root: string; prefix: string; links: string[] };
+  worktrees: { root: string; prefix: string; links: string[]; setup: string[]; setupTimeoutMinutes: number };
   watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
   judgment: { file: string; archive: string; recent: number };
   requiresApproval: string[];
@@ -109,6 +111,10 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
       throw new Error('delegate.route는 백로그 분류 또는 default 키와 codex, claude 값이어야 합니다');
     }
   }
+  const externalGuard = defaultValue(codex.externalGuard, true);
+  if (typeof externalGuard !== 'boolean') throw new Error('delegate.codex.externalGuard는 불리언이어야 합니다');
+  const secrets = secretSettings(raw.secrets);
+  const secretPaths = secretPolicy(root, secrets);
   const sandbox = defaultValue(codex.sandbox, 'workspace-write');
   if (sandbox !== 'workspace-write' && sandbox !== 'read-only') throw new Error('delegate.codex.sandbox는 workspace-write, read-only 중 하나여야 합니다');
   const wt = object(defaultValue(raw.worktrees, {}), 'worktrees');
@@ -120,7 +126,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     claude: { subagentModel: modelName(defaultValue(claude.subagentModel, 'opus'), 'delegate.claude.subagentModel'),
       maxChildAgents: nonnegativeInteger(defaultValue(claude.maxChildAgents, 1), 'delegate.claude.maxChildAgents') },
     codex: {
-      command: command(codex.command, 'codex', 'delegate.codex.command'), sandbox,
+      externalGuard, command: command(codex.command, 'codex', 'delegate.codex.command'), sandbox,
       waitMinutes: positive(defaultValue(codex.waitMinutes, 8), 'delegate.codex.waitMinutes', true),
       timeoutMinutes: positive(defaultValue(codex.timeoutMinutes, 90), 'delegate.codex.timeoutMinutes', true),
       brainModel: modelName(defaultValue(codex.brainModel, 'gpt-6-astra'), 'delegate.codex.brainModel'),
@@ -203,7 +209,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
   const linkKeys = links.map(path => docsPathKey(resolve(root, path)));
   if (new Set(linkKeys).size !== links.length || links.some(path => {
     const target = docsPathKey(resolve(root, path)), judgmentPath = docsPathKey(resolve(root, file));
-    return isAbsolute(path) || path.split('/').some(part => part === '..' || !part || part === '.')
+    return secretPaths.secretPath(resolve(root, path)) || isAbsolute(path) || path.split('/').some(part => part === '..' || !part || part === '.')
       || /[\\*?\[\]#!]/u.test(path) || path.startsWith('-') || path !== path.trim()
       || path.split('/').some(part => ['.git', '.pi', '.claude'].includes(docsPathKey(part)))
       || /^(?:\.env(?:\..*)?|\.envrc|\.dev\.vars(?:\..*)?|\.npmrc|\.netrc|\.pypirc|neon_api\.json|key\.properties)$|\.(?:pem|key|p8|p12|keystore|jks)$/i.test(path.split('/').at(-1)!)
@@ -228,7 +234,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes') },
     notify: { channels: channels as HarnessConfig['notify']['channels'] },
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
-    delegate: delegation, worktrees: { root: wtRoot, prefix, links }, watch: watching, judgment: { file, archive, recent }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
+    secrets, delegate: delegation, worktrees: { root: wtRoot, prefix, links, setup: strings(wt.setup, [], 'worktrees.setup'), setupTimeoutMinutes: bounded(wt.setupTimeoutMinutes, 10, 1, 60, 'worktrees.setupTimeoutMinutes') }, watch: watching, judgment: { file, archive, recent }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
   };
   const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
   for (const [prefix, values, known] of [
@@ -307,7 +313,7 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
   }
   return value;
 }
-export const approvalConfigKeys = ['approvalRules', 'worktrees.links', 'requiresApproval', 'brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
+export const approvalConfigKeys = ['secrets.readDeny', 'secrets.readAllow', 'secrets.defaults', 'worktrees.setup', 'delegate.codex.externalGuard', 'approvalRules', 'worktrees.links', 'requiresApproval', 'brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
 export async function setConfig(root: string, key: string, text: string,
   options: { fromCli?: boolean; approve?: boolean } = {}): Promise<unknown> {
   await assertNotBrain(root, `config set ${key}`);

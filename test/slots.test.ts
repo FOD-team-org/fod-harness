@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,12 @@ import { readLedger } from '../src/core/ledger.ts';
 import * as processTime from '../src/core/process-time.ts';
 import * as runner from '../src/provider/runner.ts';
 import * as lock from '../src/core/lock.ts';
+import * as processTree from '../src/core/proc-tree.ts';
 const roots: string[] = [];
+beforeEach(() => {
+  vi.spyOn(processTree, 'commandSnapshot').mockResolvedValue([]);
+  vi.spyOn(processTime, 'processStartedAt').mockImplementation(async () => new Date(Date.now() - process.uptime() * 1000).toISOString());
+});
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'fodh-slots-')); roots.push(root); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));

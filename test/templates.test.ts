@@ -177,3 +177,11 @@ it('F34 RECLAIM 템플릿은 판단 유무·재시도에 맞는 정식 입구만
   expect(text).toContain('`state transition RECLAIM` 은 쓰지 않는다');
   expect(text).toContain('RECLAIM 에서는 기다리지 않는다');
 });
+
+it('A14-c 비밀 파일 금지와 CLEANUP 커밋 신원 규칙', async () => {
+  expect(await readFile('templates/codex-header.md', 'utf8')).toContain('비밀 파일(`.env*`·키·인증 파일) 열기·출력');
+  expect(await readFile('templates/brain-rules.md', 'utf8')).toContain('비밀 파일');
+  const cleanup = await readFile('templates/prompts/CLEANUP.md', 'utf8');
+  expect(cleanup).toContain('git commit -m "docs(backlog): {{taskId}} 완료" -- {{backlogFile}}');
+  expect(cleanup).toContain('`-c user.*`·`--author`·`--no-verify` 금지');
+});

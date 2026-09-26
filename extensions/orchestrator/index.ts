@@ -407,9 +407,12 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         await notify(root, { key: kind, level: 'warning', title: '메모리 경고', body: `스왑 ${batch[0].swapUsedGB} GB — 잔존 프로세스 ${report.processes?.reclaimed.length ?? 0}개 회수` }, context);
         handled = true;
       } else if (kind === 'memory-critical') {
-        const wasActive = active.has((await readState(root)).state);
-        if (wasActive) await transitionState(root, 'paused(memory)', { system: true });
-        await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}. 해제: fodh memory reset(스왑이 실제로 줄지 않으면 다시 걸린다)` }, context);
+        const state = await readState(root);
+        const finishing = ['CLEANUP', 'DOCS'].includes(state.state);
+        const wasActive = active.has(state.state);
+        if (finishing) await updateState(root, { lastPaused: 'memory' });
+        else if (wasActive) await transitionState(root, 'paused(memory)', { system: true });
+        await notify(root, { key: kind, level: 'error', title: '메모리 중단', body: finishing ? '정리·문서 단계는 계속합니다. 다음 task 는 메모리 회복 뒤 시작합니다' : `스왑 초과가 5분 지속되어 ${wasActive ? '새 위임을 중단했습니다' : '회복 전까지 새 위임을 거부합니다'}. 해제: fodh memory reset(스왑이 실제로 줄지 않으면 다시 걸린다)` }, context);
         handled = true;
       } else if (kind === 'slot-free') {
         const state = await readState(root);
