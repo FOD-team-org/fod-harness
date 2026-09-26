@@ -40,7 +40,7 @@ async function setup() {
 
 it('Pi 명령 6종과 orchestrator 확장 등록', async () => {
   const test = await setup();
-  expect([...test.commands.keys()]).toEqual(['hold', 'project-start', 'develop-start', 'status', 'judged', 'cleanup']);
+  expect([...test.commands.keys()]).toEqual(['hold', 'project-start', 'develop-start', 'status', 'judged', 'cleanup', 'autopilot']);
   expect(JSON.parse(await readFile('package.json', 'utf8')).pi.extensions).toContain('./extensions/orchestrator/index.ts');
 });
 it('project-start는 없는 문서 생성·INTERVIEW 전이·프로젝트 이름 저장·턴 시작', async () => {

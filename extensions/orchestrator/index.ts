@@ -1,3 +1,6 @@
+import { runAutopilot } from './autopilot.ts';
+export { runAutopilot } from './autopilot.ts';
+import { autopilotOn, autopilotOff, autopilotStatus, parseAutopilotCommand, autopilotChat, resetAutopilotChat } from '../../src/core/autopilot.ts';
 import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { randomUUID } from 'node:crypto';
 import { redact } from '../../src/provider/privacy.ts';
@@ -22,7 +25,7 @@ import { listInbox, resolveInbox, type InboxRecord } from '../../src/core/inbox.
 import { appendLedger, unknownEntries } from '../../src/core/ledger.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from '../../src/core/storage.ts';
 
-import { autoResume, resumeContext, send } from './resume.ts';
+import { autoResume, resumeContext, send, type ResumeContext } from './resume.ts';
 import { watcherStatus, judgmentStableFor, tick, logDeferredDecision } from '../../src/core/watcher.ts';
 export { instruction } from './resume.ts';
 
@@ -63,7 +66,60 @@ async function prepareProject(root: string, ctx: ExtensionContext, reportChanges
   }
 }
 
-export default function orchestrator(pi: ExtensionAPI): void {
+export async function startDevelopment(pi: ExtensionAPI, ctx: ExtensionContext, root: string, source: 'command' | 'autopilot'): Promise<void> {
+  if (source === 'autopilot') {
+    const current = await readState(root);
+    if (!ctx.hasUI || !ctx.isIdle() || ctx.hasPendingMessages?.() || current.userHold || current.userAborted || current.state !== 'PROJECT_READY') return;
+  }
+  let state = await readState(root);
+  if (!canDevelopStart(state.state)) throw new Error('현재 상태에서 develop-start를 시작할 수 없습니다');
+  if (state.state === 'WAIT_RETRY' && state.retry?.nextAt && Date.parse(state.retry.nextAt) > Date.now()) {
+    ctx.ui.notify(`${Math.ceil((Date.parse(state.retry.nextAt) - Date.now()) / 60000)}분 뒤 재시도 예정`, 'info'); return;
+  }
+  await prepareProject(root, ctx, true);
+  if (state.state === 'recovering') {
+    state = await updateState(root, { userAborted: false, awaitingUser: false, autoTurns: 0 });
+    await send(pi, root, state); return;
+  }
+  const missingBacklog = !await exists(join(root, 'docs/backlog.md'));
+  const tasks = await listBacklog(root);
+  if (missingBacklog) await initialize(root);
+  await updateState(root, { userAborted: false, awaitingUser: false, autoTurns: 0 });
+  if (!tasks.length && state.state === 'PLANNING') {
+    ctx.ui.notify('백로그가 비어 있습니다. PLANNING 을 계속합니다', 'info'); return;
+  }
+  if (['IDLE', 'PROJECT_READY', 'DONE_ALL'].includes(state.state)) state = await transitionState(root, 'PLANNING');
+  if (source === 'autopilot') ctx.ui.notify('오토파일럿: 기획 완료 → 개발 시작', 'info');
+  if (!tasks.length) {
+    if (state.state !== 'PLANNING') throw new Error('백로그 계획은 PLANNING 상태가 필요합니다');
+    await send(pi, root, state); return;
+  }
+  if (state.state !== 'PICK') await transitionState(root, 'PICK');
+  const result = await runPick(root);
+  if (result.outcome === 'EMPTY') { ctx.ui.notify(result.reason, 'info'); return; }
+  state = await readState(root);
+  if (active.has(state.state)) await send(pi, root, state);
+  else ctx.ui.notify(JSON.stringify(result), 'info');
+}
+
+export async function applyAndResume(pi: ExtensionAPI, context: ResumeContext, root: string, ids: string[], expectedAnswers: Record<string, string>, kind: string) {
+  const result = await applyJudgments(root, ids, expectedAnswers);
+  const applied = result.applied.map(item => item.id);
+  const reasked = result.unapplied.length ? (await readJudgment(root)).items
+    .filter(item => item.reaskOf && ids.includes(item.reaskOf))
+    .map(item => ({ id: item.id, reaskOf: item.reaskOf })) : [];
+  context.notify(JSON.stringify({ ...result, reasked }), 'info');
+  let resumed = false;
+  if (applied.length) await resetAutopilotChat(root);
+  if (applied.length && active.has((await readState(root)).state)) {
+    await updateState(root, { awaitingUser: false, autoTurns: 0 });
+    resumed = (await autoResume(pi, root, context, kind)).resumed === true;
+  }
+  return { applied, reasked, resumed };
+}
+
+export default function orchestrator(pi: ExtensionAPI, options: { now?: () => Date } = {}): void {
+  const now = options.now ?? (() => new Date());
   pi.on('session_start', async (_event, ctx) => {
     setNotifyContext(ctx.cwd, resumeContext(ctx));
     await recoverOrphanBrain(ctx.cwd);
@@ -133,34 +189,7 @@ export default function orchestrator(pi: ExtensionAPI): void {
   pi.registerCommand('develop-start', {
     description: '백로그 계획 또는 작업 선택 시작',
     handler: async (_args, ctx) => {
-      let state = await readState(ctx.cwd);
-      if (!canDevelopStart(state.state)) throw new Error('현재 상태에서 develop-start를 시작할 수 없습니다');
-      if (state.state === 'WAIT_RETRY' && state.retry?.nextAt && Date.parse(state.retry.nextAt) > Date.now()) {
-        ctx.ui.notify(`${Math.ceil((Date.parse(state.retry.nextAt) - Date.now()) / 60000)}분 뒤 재시도 예정`, 'info'); return;
-      }
-      await prepareProject(ctx.cwd, ctx, true);
-      if (state.state === 'recovering') {
-        state = await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
-        await send(pi, ctx.cwd, state); return;
-      }
-      const missingBacklog = !await exists(join(ctx.cwd, 'docs/backlog.md'));
-      const tasks = await listBacklog(ctx.cwd);
-      if (missingBacklog) await initialize(ctx.cwd);
-      await updateState(ctx.cwd, { userAborted: false, awaitingUser: false, autoTurns: 0 });
-      if (!tasks.length && state.state === 'PLANNING') {
-        ctx.ui.notify('백로그가 비어 있습니다. PLANNING 을 계속합니다', 'info'); return;
-      }
-      if (['IDLE', 'PROJECT_READY', 'DONE_ALL'].includes(state.state)) state = await transitionState(ctx.cwd, 'PLANNING');
-      if (!tasks.length) {
-        if (state.state !== 'PLANNING') throw new Error('백로그 계획은 PLANNING 상태가 필요합니다');
-        await send(pi, ctx.cwd, state); return;
-      }
-      if (state.state !== 'PICK') await transitionState(ctx.cwd, 'PICK');
-      const result = await runPick(ctx.cwd);
-      if (result.outcome === 'EMPTY') { ctx.ui.notify(result.reason, 'info'); return; }
-      state = await readState(ctx.cwd);
-      if (active.has(state.state)) await send(pi, ctx.cwd, state);
-      else ctx.ui.notify(JSON.stringify(result), 'info');
+      await startDevelopment(pi, ctx, ctx.cwd, 'command');
     },
   });
   pi.registerCommand('status', {
@@ -203,6 +232,17 @@ export default function orchestrator(pi: ExtensionAPI): void {
       const result = await runCleanup(ctx.cwd, { scope: 'all', dryRun: !!args.trim() });
       await notify(ctx.cwd, { key: `cleanup:${result.runId}`, level: result.ok ? 'info' : 'warning', title: '정리 결과',
         body: JSON.stringify({ ok: result.ok, remaining: (result.processes?.residual.length ?? 0) + (result.processes?.unverified.length ?? 0), stale: result.processes?.stale.length ?? 0, protected: result.processes?.protected.length ?? 0, report: '.pi/cleanup-last.json' }) }, resumeContext(ctx));
+    },
+  });
+  pi.registerCommand('autopilot', {
+    description: '추천안 자동 진행 on|off|status [--for 8h] [--max 30] [--interview]',
+    handler: async (args, ctx) => {
+      const parsed = parseAutopilotCommand(args.trim().split(/\s+/u));
+      const result = parsed.action === 'on' ? await autopilotOn(ctx.cwd, { ...parsed.options, now: now() })
+        : parsed.action === 'off' ? await autopilotOff(ctx.cwd, { context: resumeContext(ctx), now: now() }) : await autopilotStatus(ctx.cwd, now());
+      ctx.ui.notify(JSON.stringify(result), 'info');
+      if (parsed.action === 'on') await runAutopilot(pi, ctx, ctx.cwd, now);
+      else ctx.ui?.setStatus?.('fodh-autopilot', result.enabled ? `오토 ${result.answered ?? 0}/${result.maxAnswers ?? 30}` : undefined);
     },
   });
   pi.on('agent_end', async (event, ctx) => {
@@ -294,6 +334,14 @@ export default function orchestrator(pi: ExtensionAPI): void {
         }
         if (state.userHold) await appendLedger(ctx.cwd, { runId: randomUUID(), action: 'turn:user-wait-accepted', status: 'ok',
           evidence: { state: state.state, taskId: state.taskId, hold: state.userHoldSource ?? 'input' } });
+        if (!state.userHold && !state.userAborted) {
+          const reply = await autopilotChat(ctx.cwd, now(), async prefix => {
+            await updateState(ctx.cwd, { awaitingUser: false });
+            return (await autoResume(pi, ctx.cwd, context, 'agent_end', prefix)).resumed === true;
+          });
+          if (reply === 'sent') return;
+          if (reply === 'limit') context.notify('오토파일럿: 두뇌가 사용자 답을 계속 기다립니다', 'warning');
+        }
         await updateState(ctx.cwd, { awaitingUser: true, autoTurns: 0 }); return;
       }
       if ((await readState(ctx.cwd)).awaitingUser) { await updateState(ctx.cwd, { autoTurns: 0 }); return; }
@@ -306,6 +354,8 @@ export default function orchestrator(pi: ExtensionAPI): void {
             && latest.userHoldSource === holdAtStart.userHoldSource ? { userHold: false, userHoldSource: undefined } : {});
         }
       }
+      const last = [...event.messages].reverse().find(message => message.role === 'assistant');
+      if (!holdAtStart.userHold && last?.role === 'assistant' && !['error', 'aborted'].includes(last.stopReason)) await runAutopilot(pi, ctx, ctx.cwd, now);
     }
   });
 }
@@ -358,16 +408,10 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
           && stableFor < config.watch.freeTextStableSeconds);
         const ready = answered.filter(item => !waiting.includes(item));
         if (ready.length) {
-          const result = await applyJudgments(root, ready.map(item => item.id), Object.fromEntries(ready.map(item => [item.id, item.raw])));
-          applied = result.applied.map(item => item.id);
-          const reasked = result.unapplied.length ? (await readJudgment(root)).items
-            .filter(item => item.reaskOf && ready.some(answer => answer.id === item.reaskOf))
-            .map(item => ({ id: item.id, reaskOf: item.reaskOf })) : [];
-          context.notify(JSON.stringify({ ...result, reasked }), 'info');
-          if (applied.length && active.has((await readState(root)).state)) {
-            await updateState(root, { awaitingUser: false, autoTurns: 0 });
-            resumed = (await autoResume(pi, root, context, kind)).resumed === true;
-          }
+          const result = await applyAndResume(pi, context, root, ready.map(item => item.id), Object.fromEntries(ready.map(item => [item.id, item.raw])), kind);
+          applied = result.applied;
+          const reasked = result.reasked;
+          resumed = result.resumed;
           handled = applied.length > 0 || reasked.length > 0;
         }
         if (waiting.length) {

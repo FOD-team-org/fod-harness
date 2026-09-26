@@ -1,3 +1,4 @@
+import { autopilotOn, autopilotOff, autopilotStatus, readAutopilot, parseAutopilotCommand, recommendedOption } from '../core/autopilot.ts';
 import { initWorkspace, addWorkspaceMember, removeWorkspaceMember, listWorkspace } from '../core/workspace.ts';
 import { initProject } from './init.ts';
 import { startPlan } from './start.ts';
@@ -36,6 +37,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
   let createdJudgment: string | undefined;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      for: { type: 'string' }, max: { type: 'string' }, interview: { type: 'boolean' },
       repo: { type: 'string', multiple: true }, identity: { type: 'string' },
       brain: { type: 'string' }, model: { type: 'string' }, help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
@@ -52,6 +54,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       'same-as': { type: 'string' }, distinct: { type: 'boolean' }, options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
+    for (const key of ['for', 'max', 'interview'] as const) if (group !== 'autopilot' && values[key] !== undefined) throw new Error(`Unknown option '--${key}'`);
     const workspaceInit = group === 'workspace' && action === 'init';
     if (values.repo !== undefined && !(workspaceInit || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
     if (values.identity !== undefined && !workspaceInit) throw new Error("Unknown option '--identity'");
@@ -82,7 +85,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       const choices = commandTable.filter(c => c.group === group);
       throw new Error('지원하지 않는 fodh 명령입니다. 가능한 명령: '+(choices.length ? choices : commandTable).map(c => `fodh ${c.group}${c.action ? ' '+c.action : ''}`).join(', '));
     }
-    const readOnly = new Set(['state get', 'backlog list', 'backlog get', 'codex status', 'codex result',
+    const readOnly = new Set(['autopilot status', 'state get', 'backlog list', 'backlog get', 'codex status', 'codex result',
       'judgment read', 'ledger list', 'worktree list', 'config get', 'slots status', 'memory status',
       'workspace list', 'watch status', 'interview status', 'skills status', 'inbox list', 'proc list']);
     if (!readOnly.has(`${group} ${action ?? ''}`) && !(group === 'pick' && values.dry)
@@ -95,7 +98,12 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     if (group === 'backlog' && (values.repo?.length ?? 0) > 1) throw new Error('--repo 는 하나만 지정하세요');
     const repo = values.repo?.[0];
     let result: unknown;
-    if (group === 'interview' && action === 'start') { exact(0); result = await startInterview(root); }
+    if (group === 'autopilot') {
+      exact(0); const parsed = parseAutopilotCommand(args.slice(1));
+      result = action === 'on' ? await autopilotOn(root, { ...parsed.options, now: new Date() })
+        : action === 'off' ? await autopilotOff(root) : await autopilotStatus(root, new Date());
+    }
+    else if (group === 'interview' && action === 'start') { exact(0); result = await startInterview(root); }
     else if (group === 'interview' && action === 'next') { exact(0); result = await nextInterview(root, values.count === undefined ? undefined : Number(values.count)); }
     else if (group === 'interview' && action === 'record') { exact(1); result = await recordInterview(root, rest[0], values.answer ?? '', values.source); }
     else if (group === 'interview' && action === 'defer') { exact(1); result = await deferInterview(root, rest[0]); }
@@ -242,6 +250,9 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       } else {
         if (/^T\d+$/u.test(values.blocks!)) await setTask(root, values.blocks!, { status: `blocked(${added.item.id})`, judgment: added.item.id });
         result = added;
+      }
+      if ((await readAutopilot(root)).enabled && added.item.options.length && recommendedOption(added.item) === undefined && !added.item.recommend.trim().startsWith('추천 없음')) {
+        result = { ...(result as object), warning: '오토파일럿이 이 판단을 자동으로 답할 수 없습니다: 추천이 번호로 시작하지 않음' };
       }
     } else if (group === 'judgment' && action === 'answer') { exact(2); await assertNotBrain(root, '판단 답변'); result = await answerJudgment(root, rest[0], rest[1]); }
     else if (group === 'judgment' && action === 'write-status') { exact(1); result = await writeJudgmentStatus(root, rest[0]); }

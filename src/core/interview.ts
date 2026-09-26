@@ -198,7 +198,7 @@ async function deferQuestion(root: string, data: Interview, q: Question): Promis
   const normalize = (value: string) => value.trim().replace(/\s+/gu, ' ');
   const recommended = q.options ? options.findIndex(option => normalize(option) === normalize(q.recommend)) : -1;
   if (recommended > 0) options.unshift(...options.splice(recommended, 1));
-  const added = await addJudgment(root, { title: q.text, background: `인터뷰 영역 ${q.area}`, options, recommend: q.recommend, blocks: '-', dedupeKey: `interview:${id}` });
+  const added = await addJudgment(root, { origin: { kind: 'interview' }, title: q.text, background: `인터뷰 영역 ${q.area}`, options, recommend: q.recommend, blocks: '-', dedupeKey: `interview:${id}` });
   return data.questions[id] = { askCount: data.questions[id]?.askCount ?? 0, round: data.questions[id]?.round, status: 'judgment', judgmentId: added.item.id };
 }
 export async function skipInterview(root: string, id: string, reason: string) {

@@ -1,3 +1,4 @@
+import { runAutopilot } from '../orchestrator/autopilot.ts';
 import { runCleanup } from '../../src/core/cleanup.ts';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { watch, type FSWatcher } from 'node:fs';
@@ -11,7 +12,7 @@ import { redact } from '../../src/provider/privacy.ts';
 import { decideInbox, clearDecisionTimers } from '../orchestrator/index.ts';
 import { waitForShutdown } from '../../src/core/shutdown-wait.ts';
 
-export default function watcher(pi: ExtensionAPI, options: { shutdownWaitMs?: number } = {}): void {
+export default function watcher(pi: ExtensionAPI, options: { shutdownWaitMs?: number; now?: () => Date } = {}): void {
   let root: string, ctx: ExtensionContext;
   let sessionStartedAt: string;
   let timers: ReturnType<typeof setInterval>[] = [], periods = '';
@@ -109,6 +110,8 @@ export default function watcher(pi: ExtensionAPI, options: { shutdownWaitMs?: nu
           configureTimers(config.watch.pollSeconds, config.watch.tickSeconds);
           await tick(root, { ctx: liveContext(), judgmentOnly });
           if (current()) await decidePending();
+          // Drain an already queued full tick first; additional I/O must not delay coalesced decisions.
+          if (current() && !pendingFull) await runAutopilot(pi, liveContext(), root, options.now);
         } catch (error) { if (current()) await fail('tick', error); }
         try { if (current()) await ensureWatch(); } catch (error) { if (current()) await fail('tick', error); }
         judgmentOnly = false;

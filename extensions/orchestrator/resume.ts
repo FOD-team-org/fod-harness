@@ -1,3 +1,4 @@
+import { readAutopilot, autopilotInstruction } from '../../src/core/autopilot.ts';
 import { slotOwnerAlive } from '../../src/core/slots.ts';
 import { redact } from '../../src/provider/privacy.ts';
 import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
@@ -33,7 +34,7 @@ export async function instruction(root: string, state: HarnessState, promptState
     taskId: state.taskId ?? '', judgmentFile: config.judgment.file, backlogFile: 'docs/backlog.md',
   };
   const rendered = substitute(prompt, values, false);
-  return rendered;
+  return (await readAutopilot(root)).enabled ? autopilotInstruction + '\n' + rendered : rendered;
 }
 
 export async function send(pi: ExtensionAPI, root: string, state: HarnessState, promptState = state.state, automatic = false): Promise<void> {

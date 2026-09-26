@@ -3,7 +3,7 @@ import { processStartedAt } from './process-time.ts';
 import { lockOwnerAlive } from './lock.ts';
 import { readdir, realpath, stat, unlink } from 'node:fs/promises';
 import { notify } from './notify.ts';
-import { assertNotBrain } from './brain-guard.ts';
+import { assertNotBrain, originOfCaller } from './brain-guard.ts';
 import { appendLedger } from './ledger.ts';
 import type { BrainTurn } from './state.ts';
 import { createHash } from 'node:crypto';
@@ -13,15 +13,18 @@ import { readState, updateState, transitionState } from './state.ts';
 import { listBacklog, setTask } from './backlog.ts';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 
+export interface JudgmentOrigin { kind: 'brain' | 'cli' | 'stall' | 'interview'; scope?: string }
 export interface JudgmentItem {
+  origin?: JudgmentOrigin; answerSource?: 'autopilot';
   id: string; title: string; rev: number; background: string; options: string[]; recommend: string;
   held?: { at: string; reason: 'brain-turn'; runId: string };
   detail?: string; blocks: string; answer: string; answerRev?: number; classification?: AnswerClassification;
   resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string; followup?: string; dedupeKey?: string; raw: string; start: number; end: number;
 }
-export interface CompletedJudgment { title?: string; path?: string; id: string; rev?: number; answer: string; interpretation: string; commit: string; date: string }
+export interface CompletedJudgment { answerSource?: string; title?: string; path?: string; id: string; rev?: number; answer: string; interpretation: string; commit: string; date: string }
 export interface JudgmentDocument { items: JudgmentItem[]; completed: CompletedJudgment[] }
 export interface JudgmentInput {
+  origin?: JudgmentOrigin;
   title: string; background: string; options: string | string[]; recommend: string;
   detail?: string; blocks: string | string[]; dedupeKey?: string; resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string;
 }
@@ -69,6 +72,7 @@ export function parseJudgment(text: string, options: { migrate?: boolean } = {})
     items.push({
       id: heading[1]!, title: heading[2]!, rev: Number(heading[3] ?? 1), background: field(raw, '배경'),
       options: parsedOptions(raw), detail: field(raw, '자세히') || undefined, recommend: field(raw, '추천'), blocks: field(raw, '막힌 작업'),
+      ...(field(raw, '답 출처') === '오토파일럿' && raw.match(/<!-- fodh-answer: ([a-f0-9]+) -->/u)?.[1] === hash(raw.match(/^- 답:[^\r\n]*$/mu)?.[0] ?? '') ? { answerSource: 'autopilot' as const } : {}),
       answer: field(raw, '답'), requiresApproval: ['true', '예'].includes(field(raw, '승인 필수')),
       resolution: ['resume', 'cleanup'].includes(field(raw, '적용 정책')) ? field(raw, '적용 정책') as 'resume' | 'cleanup' : undefined,
       reaskOf: field(raw, '재질문 원본') || undefined, followup: field(raw, '후속 질문') || undefined, ...(answerRev ? { answerRev: Number(answerRev) } : {}),
@@ -130,6 +134,15 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
   };
 }
 
+function classifyItemAnswer(item: JudgmentItem, answerRev = item.answerRev ?? item.rev, requiresApproval = approvalRequired(item)): AnswerClassification {
+  const number = Number(item.answer);
+  if (item.answerSource === 'autopilot' && /^\d+$/u.test(item.answer) && number > 10
+    && number <= item.options.length && item.rev === answerRev) {
+    return { kind: 'choice', applicable: true, selection: number, interpretation: item.options[number - 1] };
+  }
+  return classifyAnswer(item.answer, item.options, item.rev, answerRev, requiresApproval);
+}
+
 async function location(root: string): Promise<string> { return resolve(root, (await loadConfig(root)).judgment.file); }
 export function questionHash(item: JudgmentItem): string {
   return hash(JSON.stringify([item.title, item.background, item.options, item.recommend, item.blocks]));
@@ -162,6 +175,17 @@ async function rememberQuestions(root: string, items: JudgmentItem[]): Promise<v
     await atomicWrite(path, JSON.stringify(watcher, null, 2) + '\n');
   });
 }
+// Invalid or unreadable provenance is never evidence for automatic consent.
+async function readOrigins(root: string): Promise<Record<string, JudgmentOrigin & { createdAt: string }>> {
+  try {
+    const data = await readJson<unknown>(harnessPath(root, 'harness-judgment-origin.json'), {});
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+    return Object.fromEntries(Object.entries(data).filter(([id, value]) => /^A\d+(?:-\d+)?$/u.test(id)
+      && value && typeof value === 'object' && ['brain', 'cli', 'stall', 'interview'].includes(value.kind)
+      && (value.scope === undefined || typeof value.scope === 'string')
+      && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))));
+  } catch { return {}; }
+}
 export async function readJudgment(root: string, options: { answered?: boolean } = {}): Promise<JudgmentDocument & {
   expectedHash: string;
 }> {
@@ -173,12 +197,17 @@ export async function readJudgment(root: string, options: { answered?: boolean }
     const expectedHash = text === original ? hash(text) : await save(root, path, text, original);
     if (text !== original) text = await readText(path);
     const document = parseJudgment(text);
+    const origins = await readOrigins(root);
+    for (const item of document.items) {
+      const origin = origins[item.id];
+      if (origin) item.origin = { kind: origin.kind, ...(origin.scope === undefined ? {} : { scope: origin.scope }) };
+    }
     document.completed.push(...await readArchive(root));
     const held = await readJson<HeldAnswer[]>(harnessPath(root, 'harness-judgment-held.json'), []);
     for (const item of document.items) item.held = held.find(record => record.id === item.id && record.answer === item.answer)?.held;
     if (text === original) await rememberQuestions(root, document.items);
     return { ...document, items: document.items.filter(item => !options.answered || item.answer.trim()).map(item => ({
-      ...item, ...(options.answered ? { classification: classifyAnswer(item.answer, item.options, item.rev, item.answerRev, approvalRequired(item, config.requiresApproval)) } : {}),
+      ...item, ...(options.answered ? { classification: classifyItemAnswer(item, item.answerRev, approvalRequired(item, config.requiresApproval)) } : {}),
     })), expectedHash };
   }));
 }
@@ -252,7 +281,7 @@ export async function addCliJudgment(root: string, input: JudgmentInput, distinc
     if (!inside(actual, await realpath(root)) || inside(actual, actualArchive) || actual === actualJudgment) throw new Error('--detail은 판단 파일·판단기록 밖 프로젝트 파일이어야 합니다');
     input = { ...input, detail: `[${basename(target)}](${relative(dirname(resolve(root, config.judgment.file)), target)})` };
   }
-  return addJudgment(root, input, { distinct });
+  return addJudgment(root, { ...input, origin: { kind: originOfCaller() } }, { distinct });
 }
 export async function attachJudgmentTask(root: string, id: string, taskId: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
   if (!/^T\d+$/u.test(taskId)) throw new Error('--same-as는 --blocks 단일 task가 필요합니다');
@@ -325,11 +354,17 @@ export async function addJudgment(root: string, input: JudgmentInput, cliPolicy?
     text = text.slice(0, at).trimEnd() + '\n\n' + section + text.slice(at);
     const expectedHash = await save(root, path, text, original);
     await atomicWrite(harnessPath(root, 'harness-judgment-seq.json'), JSON.stringify({ last: next }) + '\n');
+    if (input.origin) {
+      const origins = await readOrigins(root);
+      origins[id] = { ...input.origin, createdAt: new Date().toISOString() };
+      await atomicWrite(harnessPath(root, 'harness-judgment-origin.json'), JSON.stringify(origins, null, 2) + '\n');
+    }
     return { item: requireItem(await readText(path), id), expectedHash };
   }));
 }
 
-export async function answerJudgment(root: string, id: string, answer: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
+export class AnswerConflict extends Error {}
+export async function answerJudgment(root: string, id: string, answer: string, options: { expectEmpty?: boolean; expectedRaw?: string; source?: 'autopilot' } = {}): Promise<{ item: JudgmentItem; expectedHash: string }> {
   await assertNotBrain(root, '판단 답변');
   if (/[\r\n]/u.test(answer)) throw new Error('답은 한 줄로 입력해야 합니다');
   const path = await location(root);
@@ -337,9 +372,11 @@ export async function answerJudgment(root: string, id: string, answer: string): 
     const original = await readText(path);
     let text = await reconcileEdits(root, path, original || initial);
     const item = requireItem(text, id);
+    if (options.expectEmpty && item.answer.trim() || options.expectedRaw !== undefined && item.raw !== options.expectedRaw) throw new AnswerConflict('판단 답 또는 내용이 변경되었습니다');
     let replacement = item.raw.replace(/^- 답:[^\r\n]*$/mu, () => `- 답: ${answer}`);
     replacement = replacement.replace(/^- 답 기준 rev:[^\r\n]*\n?/mu, '');
-    replacement = replacement.trimEnd() + `\n- 답 기준 rev: ${item.rev}\n\n`;
+    replacement = replacement.replace(/^- 답 출처:[^\r\n]*\n?|^<!-- fodh-answer:[^\r\n]*\n?/gmu, '');
+    replacement = replacement.trimEnd() + `\n- 답 기준 rev: ${item.rev}\n${options.source === 'autopilot' ? `- 답 출처: 오토파일럿\n<!-- fodh-answer: ${hash(`- 답: ${answer}`)} -->\n` : ''}\n`;
     text = text.slice(0, item.start) + replacement + text.slice(item.end);
     const expectedHash = await save(root, path, text, original);
     return { item: requireItem(await readText(path), id), expectedHash };
@@ -376,12 +413,11 @@ export async function completeJudgment(
     let text = await reconcileEdits(root, path, original || initial);
     const item = requireItem(text, id);
     if (input.expectedRaw !== undefined && input.expectedRaw !== item.raw) throw new JudgmentConflict();
-    const classification = classifyAnswer(
-      item.answer, item.options, item.rev, input.answerRev ?? item.answerRev ?? item.rev, input.requiresApproval ?? approvalRequired(item),
-    );
+    const classification = classifyItemAnswer(item, input.answerRev ?? item.answerRev ?? item.rev, input.requiresApproval ?? approvalRequired(item));
     if (!classification.applicable) throw new Error('적용할 수 없는 답입니다');
     if (!input.interpretation.trim() || !input.commit.trim()) throw new Error('해석과 반영 커밋이 필요합니다');
     const completed: CompletedJudgment = {
+      ...(item.answerSource === 'autopilot' ? { answerSource: '오토파일럿' } : {}),
       id, rev: item.rev, answer: item.answer, interpretation: input.interpretation, commit: input.commit,
       date: new Intl.DateTimeFormat('en-CA', {
         timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -390,6 +426,7 @@ export async function completeJudgment(
     const chain = input.resolveChain ? relatedChain(parseJudgment(text).items, item) : [item];
     const archiveChanges: { path: string; original: string; text: string }[] = [];
     for (const member of chain) archiveChanges.push(await appendArchive(root, { ...completed, id: member.id, rev: member.rev, title: member.title,
+      answerSource: member.id === id ? completed.answerSource : undefined,
       answer: member.id === id ? item.answer : `모호: ${member.answer} → ${id}: ${item.answer}` }, member.raw));
     for (const member of [...chain].sort((a, b) => b.start - a.start)) text = text.slice(0, member.start) + text.slice(member.end);
     try { return { expectedHash: await save(root, path, text, original), completed }; }
@@ -408,7 +445,7 @@ export async function completeJudgment(
   });
 }
 
-function approvalRequired(item: JudgmentItem, configured: string[] = []): boolean {
+export function approvalRequired(item: JudgmentItem, configured: string[] = []): boolean {
   const text = `${item.title} ${item.background} ${item.options.join(' ')}`;
   return item.requiresApproval === true || configured.some(name => text.includes(name))
     || /승인|훅.*거부|프로덕션|운영.*배포|결제|스토어|심사|push|환경변수|비밀값|외부.*발송|약관|개인정보|DNS|키체인/iu.test(text);
@@ -519,7 +556,7 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
       if (expectedAnswers && expectedAnswers[item.id] !== item.raw) throw new JudgmentConflict();
       if (item.followup) { unapplied.push({ id: item.id, reason: `후속 질문 ${item.followup}의 답을 기다립니다` }); continue; }
       const requiresApproval = approvalRequired(item, config.requiresApproval);
-      const classification = classifyAnswer(item.answer, item.options, item.rev, item.answerRev, requiresApproval);
+      const classification = classifyItemAnswer(item, item.answerRev, requiresApproval);
       if (!classification.applicable) {
         const reason = classification.reason ?? '미답';
         unapplied.push({ id: item.id, reason });
@@ -687,7 +724,7 @@ export function renderDerived(text: string, context: { recent: number; completed
   };
   replaceSection('한눈에', overview, '열린 판단');
   const recent = latestCompleted(context.completed, context.recent).map(item =>
-    `- ${item.id} · ${item.date} · ${short(item.title ?? item.id, 30)} → 답 "${short(item.answer, 30)}" · [기록](${item.path})`).join('\n');
+    `- ${item.id} · ${item.date} · ${short(item.title ?? item.id, 30)} → 답 "${short(item.answer, 30)}"${item.answerSource === '오토파일럿' ? '(오토)' : ''} · [기록](${item.path})`).join('\n');
   if (context.recent > 0 || section(text, '최근 결정')) replaceSection('최근 결정', recent);
   return text;
 }
@@ -699,11 +736,11 @@ async function archiveFiles(root: string, archive?: string): Promise<string[]> {
   });
   return entries.filter(entry => entry.isFile() && entry.name.endsWith('.md')).map(entry => resolve(entry.parentPath, entry.name)).sort();
 }
-function parseArchive(text: string, path?: string): CompletedJudgment[] {
+export function parseArchive(text: string, path?: string): CompletedJudgment[] {
   return [...text.matchAll(/^### (A\d+(?:-\d+)?) — (.*?) \(rev (\d+)\)[ \t]*\r?\n([\s\S]*?)(?=^#{1,3} |$(?![\s\S]))/gmu)].flatMap(match => {
     const raw = match[4];
     if (!/^- 결정일:/mu.test(raw)) return [];
-    return [{ id: match[1], title: match[2], rev: Number(match[3]), answer: field(raw, '답'), interpretation: field(raw, '해석'), commit: field(raw, '반영'), date: field(raw, '결정일'), path }];
+    return [{ ...(field(raw, '답 출처') ? { answerSource: field(raw, '답 출처') } : {}), id: match[1], title: match[2], rev: Number(match[3]), answer: field(raw, '답'), interpretation: field(raw, '해석'), commit: field(raw, '반영'), date: field(raw, '결정일'), path }];
   });
 }
 export async function readArchive(root: string): Promise<CompletedJudgment[]> {
@@ -722,8 +759,8 @@ async function highestNumber(root: string, text: string, archive?: string): Prom
 }
 const koreanApproval = (text: string) => text.replace(/^- 승인 필수:[ \t]*true[ \t]*$/gmu, '- 승인 필수: 예');
 function archiveBlock(item: CompletedJudgment, raw = ''): string {
-  const rest = koreanApproval(raw).split('\n').filter(line => !/^### |^- (?:답|답 기준 rev|회신):|^<!-- fodh-dedupe:/u.test(line)).join('\n').trim();
-  return `### ${item.id} — ${oneLine(item.title ?? item.id)} (rev ${item.rev ?? 1})\n- 결정일: ${oneLine(item.date)}\n- 답: ${oneLine(item.answer)}\n- 해석: ${oneLine(item.interpretation)}\n- 반영: ${oneLine(item.commit)}\n${rest ? rest + '\n' : ''}`;
+  const rest = koreanApproval(raw).split('\n').filter(line => !/^### |^- (?:답|답 기준 rev|답 출처|회신):|^<!-- fodh-(?:dedupe|answer):/u.test(line)).join('\n').trim();
+  return `### ${item.id} — ${oneLine(item.title ?? item.id)} (rev ${item.rev ?? 1})\n- 결정일: ${oneLine(item.date)}\n- 답: ${oneLine(item.answer)}\n${item.answerSource ? `- 답 출처: ${oneLine(item.answerSource)}\n` : ''}- 해석: ${oneLine(item.interpretation)}\n- 반영: ${oneLine(item.commit)}\n${rest ? rest + '\n' : ''}`;
 }
 function archiveAppend(text: string, item: CompletedJudgment, sourceFile: string, targetFile: string, raw = ''): string {
   const block = rebaseJudgmentLinks(archiveBlock(item, raw), sourceFile, targetFile);
@@ -776,7 +813,7 @@ function ambiguousInlineOptions(item: JudgmentItem): boolean {
   });
 }
 function migrateItem(item: JudgmentItem): string {
-  const lines = koreanApproval(item.raw).split('\n'), known = /^(?:### |^- (?:배경|선택지|추천|막힌 작업|자세히|답|답 기준 rev|적용 정책|승인 필수|재질문 원본|후속 질문|회신):|<!-- fodh-dedupe:)/u;
+  const lines = koreanApproval(item.raw).split('\n'), known = /^(?:### |^- (?:배경|선택지|추천|막힌 작업|자세히|답|답 기준 rev|답 출처|적용 정책|승인 필수|재질문 원본|후속 질문|회신):|<!-- fodh-(?:dedupe|answer):)/u;
   let optionContinuation = false;
   const unknown = lines.filter(line => {
     if (/^- 선택지:[ \t]*$/u.test(line)) { optionContinuation = true; return false; }
@@ -789,8 +826,9 @@ function migrateItem(item: JudgmentItem): string {
     ...['배경'].map(key => lines.find(line => line.startsWith(`- ${key}:`)) ?? `- ${key}:`),
     ...(ambiguousInlineOptions(item) ? lines.filter(line => line.startsWith('- 선택지:'))
       : ['- 선택지:', ...item.options.map((option, index) => `  ${circled[index] ?? `${index + 1}.`} ${option}`)]),
-    ...['추천', '막힌 작업', '자세히', '답', '답 기준 rev', '적용 정책', '승인 필수', '재질문 원본', '후속 질문']
+    ...['추천', '막힌 작업', '자세히', '답', '답 기준 rev', '답 출처', '적용 정책', '승인 필수', '재질문 원본', '후속 질문']
       .flatMap(key => lines.filter(line => line.startsWith(`- ${key}:`))),
+    ...lines.filter(line => line.startsWith('<!-- fodh-answer:')),
     ...lines.filter(line => line.startsWith('<!-- fodh-dedupe:')),
   ];
   return ordered.join('\n') + '\n' + (unknown ? unknown + '\n' : '') + '\n';

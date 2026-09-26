@@ -342,6 +342,7 @@ export async function stopForJudgment(root: string): Promise<HarnessState> {
   const { item } = await addJudgment(root, { title: `진행 정체: ${current.state}/${current.taskId ?? '-'}`,
     background: `상태와 작업이 바뀌지 않은 자동 턴 ${current.autoTurns ?? 0}회. 진행 증거를 확인해야 합니다.`,
     options: ['ready 로 되돌려 재개', 'blocked 유지(보류)'], recommend: '① 원인을 확인한 뒤 재개',
+    origin: { kind: 'stall', scope: `${current.state}:${current.phase ?? (current.taskId ? 'task' : 'project')}:${current.taskId ?? '-'}` },
     blocks: current.taskId ?? '-', resolution: 'resume', dedupeKey: `stall:${current.state}:${current.taskId}:${current.enteredAt}` });
   if (current.taskId && [...taskStates, 'RECLAIM'].includes(current.state)) {
     const { reclaimTask } = await import('./reclaim.ts');

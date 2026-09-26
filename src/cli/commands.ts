@@ -1,5 +1,8 @@
 // Shared by the CLI and document generator; no CLI runtime imports in core.
 export const commandTable: { group: string; action?: string; summary: string; usage: string }[] = [
+  { group: 'autopilot', action: 'on', summary: '추천안 자동 진행 켜기', usage: 'fodh autopilot on [--for <기간>] [--max <n>] [--interview]' },
+  { group: 'autopilot', action: 'off', summary: '추천안 자동 진행 끄기', usage: 'fodh autopilot off' },
+  { group: 'autopilot', action: 'status', summary: '추천안 자동 진행 상태', usage: 'fodh autopilot status' },
   { group: 'workspace', action: 'init', summary: '워크스페이스 설치', usage: "fodh workspace init --repo 이름=경로 [--repo …] [--identity '이름 <메일>'] [--dry-run]" },
   { group: 'workspace', action: 'add', summary: '멤버 추가(사용자 전용, 경로는 워크스페이스 루트 기준)', usage: 'fodh workspace add <이름> <경로> --approve' },
   { group: 'workspace', action: 'remove', summary: '멤버 제거(사용자 전용)', usage: 'fodh workspace remove <이름> --approve' },

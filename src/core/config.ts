@@ -20,6 +20,7 @@ export interface WorkspaceMember {
   approvalRules?: ApprovalRule[];
 }
 export interface HarnessConfig {
+  autopilot: { delaySeconds: number; maxAnswers: number; perTaskMax: number; perScopeMax: number; maxChatReplies: number };
   workspace?: { repos: Record<string, WorkspaceMember> };
   ui: { brainOutput: 'result' | 'full' };
   secrets: SecretSettings;
@@ -230,7 +231,17 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
       || target === docsPathKey(archiveTarget) || target.startsWith(docsPathKey(archiveTarget) + '/') || docsPathKey(archiveTarget).startsWith(target + '/')
       || target === judgmentPath || target.startsWith(judgmentPath + '/') || judgmentPath.startsWith(target + '/');
   })) throw new Error('worktrees.links는 보호 경로를 제외한 중복 없는 root 상대 경로여야 합니다');
+  const autopilot = object(defaultValue(raw.autopilot, {}), 'autopilot');
+  const autoKeys = ['delaySeconds', 'maxAnswers', 'perTaskMax', 'perScopeMax', 'maxChatReplies'];
+  if (Object.keys(autopilot).some(key => !autoKeys.includes(key))) throw new Error('알 수 없는 autopilot 설정 키');
   const config: HarnessConfig = {
+    autopilot: {
+      delaySeconds: bounded(autopilot.delaySeconds, 30, 0, 600, 'autopilot.delaySeconds'),
+      maxAnswers: bounded(autopilot.maxAnswers, 30, 1, 200, 'autopilot.maxAnswers'),
+      perTaskMax: bounded(autopilot.perTaskMax, 3, 1, 10, 'autopilot.perTaskMax'),
+      perScopeMax: bounded(autopilot.perScopeMax, 3, 1, 10, 'autopilot.perScopeMax'),
+      maxChatReplies: bounded(autopilot.maxChatReplies, 2, 0, 5, 'autopilot.maxChatReplies'),
+    },
     ui: { brainOutput },
     interview: { enforce, roundSize: bounded(interview.roundSize, 6, 5, 8, 'interview.roundSize'), maxAsks: bounded(interview.maxAsks, 2, 1, 5, 'interview.maxAsks'), extraBankFile: protectedInternal(interview.extraBankFile, '.pi/interview-bank.md', 'interview.extraBankFile') },
     docs: { root: docsRoot, overrideDir: protectedInternal(docs.overrideDir, '.pi/templates/docs', 'docs.overrideDir') },
