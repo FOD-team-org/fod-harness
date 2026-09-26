@@ -1,3 +1,4 @@
+import { memberWorkspace } from '../core/workspace.ts';
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,6 +38,8 @@ export async function projectRoots(cwd = process.cwd(), home = process.env.HOME 
     }
     if (!harness && await stat(join(current, '.pi/harness.json')).then(s => s.isFile(), () => false)) harness = current;
     if (await lstat(join(current, '.git')).then(s => s.isDirectory() || s.isFile(), () => false)) {
+      const membership = await memberWorkspace(current);
+      if (membership) return { harness: membership.workspace, git: current, member: membership.member };
       await assertMainWorktree(current);
       return { harness, git: current };
     }

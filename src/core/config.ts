@@ -2,15 +2,25 @@ import { secretSettings, secretPolicy, type SecretSettings } from '../../hooks/s
 import { approvalRules, type ApprovalRule } from '../../hooks/approval-rules.mjs';
 import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { lstat, realpath, stat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { commandParts } from '../provider/runner.ts';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { notify as sendNotification } from './notify.ts';
 
 export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
+export interface WorkspaceMember {
+  path: string;
+  baseBranch?: string;
+  worktrees: { root?: string; prefix: string; links?: string[]; setup?: string[]; setupTimeoutMinutes?: number };
+  verify: { commands: string[]; heavy?: string[]; timeoutMinutes?: number };
+  secrets?: { readDeny?: string[]; readAllow?: string[] };
+  approvalRules?: ApprovalRule[];
+}
 export interface HarnessConfig {
+  workspace?: { repos: Record<string, WorkspaceMember> };
   ui: { brainOutput: 'result' | 'full' };
   secrets: SecretSettings;
   interview: { enforce: boolean; roundSize: number; maxAsks: number; extraBankFile: string };
@@ -241,6 +251,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
     secrets, delegate: delegation, worktrees: { root: wtRoot, prefix, links, setup: strings(wt.setup, [], 'worktrees.setup'), setupTimeoutMinutes: bounded(wt.setupTimeoutMinutes, 10, 1, 60, 'worktrees.setupTimeoutMinutes') }, watch: watching, judgment: { file, archive, recent }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
   };
+  if (raw.workspace !== undefined) config.workspace = await validateWorkspace(root, raw, config.approvalRules);
   const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
   for (const [prefix, values, known] of [
     ['ui', ui, config.ui], ['brain', brain, config.brain], ['delegate.codex', codex, config.delegate.codex],
@@ -321,8 +332,11 @@ export async function getConfig(root: string, key?: string): Promise<unknown> {
 export const approvalConfigKeys = ['secrets.readDeny', 'secrets.readAllow', 'secrets.defaults', 'worktrees.setup', 'delegate.codex.externalGuard', 'approvalRules', 'worktrees.links', 'requiresApproval', 'brain.allowedModels', 'delegate.codex.command', 'brain.command', 'brain.switchCommand', 'delegate.codex.sandbox'];
 export async function setConfig(root: string, key: string, text: string,
   options: { fromCli?: boolean; approve?: boolean } = {}): Promise<unknown> {
+  if (key === 'workspace' || key.startsWith('workspace.')) {
+    throw new Error('워크스페이스 설정은 fodh workspace add/remove 또는 사용자의 harness.json 직접 편집으로 바꿉니다');
+  }
   await assertNotBrain(root, `config set ${key}`);
-  if (options.fromCli && !options.approve && approvalConfigKeys.some(k => k === key || k.startsWith(`${key}.`))) {
+  if (options.fromCli && !options.approve && approvalConfigKeys.some(k => key === k || key.startsWith(`${k}.`) || k.startsWith(`${key}.`))) {
     throw new Error(`승인 전용 키입니다: ${key}. --approve 를 붙여 사용자 터미널에서 실행하세요`);
   }
   const parts = keyParts(key), path = harnessPath(root, 'harness.json');
@@ -356,4 +370,63 @@ function atLeast(value: unknown, label: string, minimum: number): number {
   const number = positive(value, label);
   if (number < minimum) throw new Error(`${label}는 ${minimum} 이상이어야 합니다`);
   return number;
+}
+
+// Reuse single-repository validators against each member, without reading its old harness config.
+async function validateWorkspace(root: string, raw: Record<string, unknown>, topRules: ApprovalRule[]): Promise<NonNullable<HarnessConfig['workspace']>> {
+  const workspace = object(raw.workspace, 'workspace'), repos = object(workspace.repos, 'workspace.repos');
+  const wt = object(raw.worktrees ?? {}, 'worktrees');
+  if (Object.hasOwn(raw, 'verify') || ['prefix', 'links', 'setup'].some(key => Object.hasOwn(wt, key))) {
+    throw new Error('워크스페이스 모드에서는 workspace.repos.<이름> 아래에 둡니다');
+  }
+  if (Object.keys(repos).length < 1 || Object.keys(repos).length > 8) throw new Error('workspace.repos 멤버 수는 1~8개여야 합니다');
+  const actualRoot = await realpath(root), home = await realpath(process.env.HOME ?? homedir());
+  const contains = (a: string, b: string) => a === b || b.startsWith(a + '/');
+  const paths: string[] = [], pairs = new Set<string>(), ids = new Set(topRules.map(rule => rule.id));
+  const result: Record<string, WorkspaceMember> = {};
+  for (const [name, value] of Object.entries(repos)) {
+    if (!/^[a-z][a-z0-9-]{0,15}$/u.test(name)) throw new Error('워크스페이스 멤버 이름이 올바르지 않습니다(. 은 예약)');
+    const member = object(value, `workspace.repos.${name}`);
+    if (typeof member.path !== 'string' || !member.path.trim() || isAbsolute(member.path) || /[\0\r\n]/u.test(member.path)) throw new Error(`멤버 ${name} path는 상대경로여야 합니다`);
+    const pathError = () => new Error(`멤버 ${name} 경로와 .git 디렉터리를 확인하세요 — 멤버를 옮겼다면 경로를 고치고, 없앴다면 fodh workspace remove ${name}`);
+    let path: string;
+    try { path = await realpath(resolve(root, member.path)); }
+    catch { throw pathError(); }
+    // Reject global/overlapping roots independently of whether they contain Git metadata.
+    if (path === '/' || path === home || contains(path, actualRoot) || contains(actualRoot, path)) throw new Error(`멤버 ${name} 경로는 HOME·루트·루트의 조상·안쪽일 수 없습니다`);
+    try {
+      if (!(await stat(path)).isDirectory() || !(await lstat(resolve(path, '.git'))).isDirectory()) throw pathError();
+    } catch { throw pathError(); }
+    if (paths.some(other => contains(other, path) || contains(path, other))) throw new Error('멤버 경로가 같거나 포함 관계입니다');
+    paths.push(path);
+    const worktrees = object(member.worktrees, `멤버 ${name} worktrees`);
+    if (!Object.hasOwn(worktrees, 'prefix')) throw new Error(`멤버 ${name} worktrees.prefix는 필수입니다`);
+    const verify = object(member.verify, `멤버 ${name} verify`);
+    const normalized = await loadConfig(path, { worktrees, verify, secrets: member.secrets, approvalRules: member.approvalRules,
+      ...(raw.judgment === undefined ? {} : { judgment: raw.judgment }) }, { dryRun: true });
+    if (!normalized.verify.commands.length) throw new Error(`멤버 ${name} verify.commands는 비어 있으면 안 됩니다`);
+    const baseBranch = member.baseBranch ?? 'main';
+    if (typeof baseBranch !== 'string' || !baseBranch.trim() || /[\0\r\n]/u.test(baseBranch)) throw new Error(`멤버 ${name} baseBranch가 올바르지 않습니다`);
+    const pair = JSON.stringify([await prospectiveRealpath(resolve(path, normalized.worktrees.root)), normalized.worktrees.prefix]);
+    if (pairs.has(pair)) throw new Error('멤버 worktrees.root와 prefix 쌍이 겹칩니다');
+    pairs.add(pair);
+    for (const rule of normalized.approvalRules) {
+      if (ids.has(rule.id)) throw new Error('approvalRules id는 전체에서 중복될 수 없습니다');
+      ids.add(rule.id);
+    }
+    result[name] = { path: member.path, baseBranch, worktrees: normalized.worktrees, verify: normalized.verify,
+      ...(member.secrets === undefined ? {} : { secrets: normalized.secrets }), approvalRules: normalized.approvalRules };
+  }
+  return { repos: result };
+}
+
+// Worktree destinations may not exist yet; resolve aliases in their existing ancestors.
+async function prospectiveRealpath(path: string): Promise<string> {
+  try { return await realpath(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(path) === path) throw error;
+    // A dangling symlink is not a not-yet-created directory.
+    if (await lstat(path).then(entry => entry.isSymbolicLink(), () => false)) throw error;
+    return resolve(await prospectiveRealpath(dirname(path)), basename(path));
+  }
 }

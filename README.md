@@ -307,3 +307,5 @@ Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 �
 - `fodh judgment add … --detail docs/조사/비교.md`: 긴 근거를 존재하는 프로젝트 상대 파일로 연결한다. 판단 파일·판단기록 안 경로는 허용하지 않는다.
 
 CLI 등록 상한은 제목 60자, 배경 400자, 선택지 하나 160자, 추천 200자다. 배경은 두 문장 안으로 쓰고 긴 근거는 문서로 분리한다. 내부 재질문·안전망 등록에는 이 제한을 적용하지 않는다. 판단기록은 워처 감시 대상이 아니며 두뇌의 직접 쓰기는 판단 파일과 같은 경계로 차단한다.
+
+워크스페이스는 독립 폴더에서 `fodh workspace init --repo web=../web --repo app=../app`으로 만듭니다(`--dry-run`, `--identity '이름 <메일>'` 지원). `fodh workspace add <이름> <상대경로> --approve`, `remove <이름> --approve`로 멤버를 관리하고 `list`로 JSON 상태를 확인합니다. add의 경로는 워크스페이스 루트 기준입니다. 작업 등록에는 `fodh backlog add --repo <이름> …`를 씁니다. 새 멤버 기본 검증은 `git diff --check`이므로 실제 검증 명령은 사용자가 `harness.json`의 `workspace.repos.<이름>.verify.commands`에 직접 설정하세요. `config set workspace…`는 `--approve`가 있어도 거부됩니다. W1은 설정·백로그까지 지원하며 레포별 실행은 W2에서 연결합니다.

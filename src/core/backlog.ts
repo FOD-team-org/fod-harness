@@ -1,3 +1,4 @@
+import { loadConfig, type HarnessConfig } from './config.ts';
 import { redact } from '../provider/privacy.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { readFile, unlink } from 'node:fs/promises';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 
 export interface Task {
+  repo?: string;
   id: string; title: string; category: string; depends: string[]; status: string; repair: number;
   resume?: { status: string; state: string; at: string };
   delegate?: 'codex' | 'claude'; codexThread?: string;
@@ -14,6 +16,27 @@ export interface Task {
 }
 interface BacklogStore { tasks: Task[]; usedIds: string[]; hash: string; pending?: { before: string; text: string } }
 const columns = ['ID', '제목', '분류', '의존', '상태', 'repair', '판단', '워크트리', '검수(커밋)', '비고'];
+export type BacklogMode = Pick<HarnessConfig, 'workspace'>;
+const tableColumns = (mode: BacklogMode) => mode.workspace ? [...columns.slice(0, 3), '레포', ...columns.slice(3)] : columns;
+class WorkspaceBacklogError extends Error {}
+function validateRepo(task: Pick<Task, 'repo'> & Partial<Pick<Task, 'status'>>, mode: BacklogMode) {
+  if (mode.workspace) {
+    if (!task.repo || !/^[a-z][a-z0-9-]{0,15}$/u.test(task.repo)
+      || task.status !== 'done' && !Object.hasOwn(mode.workspace.repos, task.repo)) {
+      throw new WorkspaceBacklogError('워크스페이스 task에는 알려진 --repo <이름>이 필요합니다');
+    }
+  } else if (task.repo !== undefined) throw new WorkspaceBacklogError('한 레포 모드에서는 --repo 를 쓰지 않습니다');
+}
+function protectRepo(old: Task | undefined, repo: string | undefined) {
+  if (old && old.repo !== repo && (old.status !== 'ready' || old.worktree)) throw new WorkspaceBacklogError(`진행 중 task ${old.id}의 레포는 바꿀 수 없습니다`);
+}
+async function backlogMode(root: string): Promise<BacklogMode> {
+  // Legacy backlog commands did not depend on a readable or valid config file.
+  let raw: BacklogMode | null;
+  try { raw = await readJson<BacklogMode | null>(harnessPath(root, 'harness.json'), {}); }
+  catch { return {}; }
+  return !raw || raw.workspace === undefined ? {} : loadConfig(root, raw, { dryRun: true });
+}
 const initial = '# 백로그\n\n표 순서대로 의존 관계를 확인해 작업합니다.\n\n';
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 const cells = (line: string) => line.trim().replace(/^\||\|$/gu, '').split(/(?<!\\)\|/u)
@@ -57,12 +80,12 @@ function tableRange(text: string): { lines: string[]; start: number; end: number
 }
 interface BacklogRead { tasks: Task[]; warnings: string[] }
 const unreadable = () => new Error('백로그 표를 읽을 수 없습니다(JSON 보존)');
-function parseRows(text: string, previous: Task[] = []): BacklogRead {
+function parseRows(text: string, previous: Task[] = [], mode: BacklogMode = {}): BacklogRead {
   const { lines, start, end } = tableRange(text);
   if (start === lines.length) throw unreadable();
   const headers = cells(lines[start]);
   const separator = cells(lines[start + 1] ?? '');
-  if (columns.some(name => !headers.includes(name)) || new Set(headers).size !== headers.length
+  if (tableColumns(mode).some(name => !headers.includes(name)) || new Set(headers).size !== headers.length
     || separator.length !== headers.length || !separator.every(value => /^:?-+:?$/u.test(value))) throw unreadable();
   const result: Task[] = [], warnings: string[] = [];
   let unidentifiedError = false;
@@ -85,10 +108,12 @@ function parseRows(text: string, previous: Task[] = []): BacklogRead {
         ...old, id: value('ID'), title: value('제목'), category: value('분류'), depends: value('의존').split(',').map(s => s.trim()).filter(Boolean),
         status: value('상태'), repair: Number(value('repair')), judgment: value('판단'), worktree: value('워크트리'), notes: value('비고'),
       };
+      if (mode.workspace) { task.repo = value('레포'); validateRepo(task, mode); protectRepo(old, task.repo); }
       if (old?.review || reviewCommit) task.review = { ...old?.review, commit: reviewCommit || undefined,
         high: old?.review?.commit === (reviewCommit || undefined) ? old?.review?.high : undefined };
       validate(task); result.push(task);
     } catch (error) {
+      if (error instanceof WorkspaceBacklogError) throw new WorkspaceBacklogError(`${error.message} — fodh backlog sync 로 JSON 기준 복원`);
       warnings.push(`백로그 ${row.line}행 ${value('ID') || '(ID 없음)'}: ${(error as Error).message} (JSON 값 유지)`);
       if (old && !result.some(task => task.id === old.id)) result.push(old);
       if (!old) unidentifiedError = true;
@@ -98,13 +123,15 @@ function parseRows(text: string, previous: Task[] = []): BacklogRead {
   if (unidentifiedError) for (const old of previous) if (!result.some(task => task.id === old.id)) result.push(old);
   return { tasks: result, warnings };
 }
-export function parseBacklog(text: string, previous: Task[] = []): Task[] {
-  return parseRows(text, previous).tasks;
+export function parseBacklog(text: string, previous: Task[] = [], mode: BacklogMode = {}): Task[] {
+  return parseRows(text, previous, mode).tasks;
 }
-export function renderBacklog(text: string, tasks: Task[]): string {
+export function renderBacklog(text: string, tasks: Task[], mode: BacklogMode = {}): string {
+  if (mode.workspace) for (const task of tasks) validateRepo(task, mode);
+  const columns = tableColumns(mode);
   const { lines, start, end } = tableRange(text || initial);
   const table = [`| ${columns.join(' | ')} |`, `| ${columns.map(() => '---').join(' | ')} |`, ...tasks.map(task =>
-    `| ${[task.id, task.title, task.category, task.depends.join(','), task.status, String(task.repair), task.judgment,
+    `| ${[task.id, task.title, task.category, ...(mode.workspace ? [task.repo!] : []), task.depends.join(','), task.status, String(task.repair), task.judgment,
       task.worktree, task.review?.commit ?? '', task.notes].map(cell).join(' | ')} |`)];
   return [...lines.slice(0, start), ...table, ...lines.slice(end)].join('\n').trimEnd() + '\n';
 }
@@ -120,13 +147,15 @@ function protectsRemoval(task: Task): boolean {
     return evidence && Object.values(evidence).some(value => value !== undefined);
   });
 }
-async function load(root: string, retry = false): Promise<{ store: BacklogStore; text: string; warnings: string[] }> {
+async function load(root: string, retry = false, modeOverride?: BacklogMode): Promise<{ store: BacklogStore; text: string; warnings: string[] }> {
+  const mode = modeOverride ?? await backlogMode(root);
   const path = join(root, 'docs/backlog.md');
   let text = await markdown(root);
   const store = await readJson<BacklogStore>(harnessPath(root, 'harness-backlog.json'), { tasks: [], usedIds: [], hash: '' });
+  if (mode.workspace) for (const task of store.tasks) validateRepo(task, mode);
   if (text === undefined) {
-    const rendered = renderBacklog('', store.tasks);
-    if (await markdown(root) !== undefined) { if (retry) throw contention(); return load(root, true); }
+    const rendered = renderBacklog('', store.tasks, mode);
+    if (await markdown(root) !== undefined) { if (retry) throw contention(); return load(root, true, mode); }
     await atomicWrite(path, rendered);
     return { store, text: rendered, warnings: ['backlog.md 재생성'] };
   }
@@ -139,7 +168,7 @@ async function load(root: string, retry = false): Promise<{ store: BacklogStore;
   }
   let warnings: string[] = [];
   if (digest(text) !== store.hash) {
-    const parsed = parseRows(text, store.tasks), tasks = parsed.tasks;
+    const parsed = parseRows(text, store.tasks, mode), tasks = parsed.tasks;
     warnings = parsed.warnings;
     for (const task of tasks) {
       if (store.usedIds.includes(task.id) && !store.tasks.some(old => old.id === task.id)) throw new Error('삭제한 task ID는 재사용할 수 없습니다');
@@ -177,15 +206,16 @@ async function mutate<T>(root: string, action: (tasks: Task[], store: BacklogSto
     for (let attempt = 0; attempt < 2; attempt++) {
       const { store, text } = await load(root);
       const result = action(store.tasks, store);
-      for (const task of store.tasks) validate(task);
-      if (await commitMarkdown(root, store, text, renderBacklog(text, store.tasks))) return result;
+      const mode = await backlogMode(root);
+      for (const task of store.tasks) { validate(task); if (mode.workspace) validateRepo(task, mode); }
+      if (await commitMarkdown(root, store, text, renderBacklog(text, store.tasks, mode))) return result;
     }
     throw contention();
   });
 }
-export async function readBacklog(root: string): Promise<BacklogRead> {
+export async function readBacklog(root: string, mode?: BacklogMode): Promise<BacklogRead> {
   return withFileLock(harnessPath(root, 'harness-backlog.json'), async () => {
-    const loaded = await load(root);
+    const loaded = await load(root, false, mode);
     // Recreating a missing markdown file must not rewrite the authoritative JSON.
     if (!loaded.warnings.includes('backlog.md 재생성')) await saveStore(root, loaded.store);
     return { tasks: loaded.store.tasks, warnings: loaded.warnings };
@@ -195,23 +225,26 @@ export async function listBacklog(root: string): Promise<Task[]> {
   return (await readBacklog(root)).tasks;
 }
 // Check without load(): reading the backlog normally imports Markdown edits into JSON.
-export async function backlogInSync(root: string): Promise<boolean> {
+export async function backlogInSync(root: string, mode?: BacklogMode): Promise<boolean> {
+  mode ??= await backlogMode(root);
   return withFileLock(harnessPath(root, 'harness-backlog.json'), async () => {
     const text = await markdown(root);
     const store = await readJson<BacklogStore>(harnessPath(root, 'harness-backlog.json'), { tasks: [], usedIds: [], hash: '' });
+    if (mode.workspace) for (const task of store.tasks) validateRepo(task, mode);
     return text !== undefined && !store.pending && store.hash === digest(text)
-      && renderBacklog(text, store.tasks) === text;
+      && renderBacklog(text, store.tasks, mode) === text;
   });
 }
 export async function syncBacklog(root: string): Promise<BacklogRead> {
+  const mode = await backlogMode(root);
   return withFileLock(harnessPath(root, 'harness-backlog.json'), async () => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const text = await markdown(root);
       const store = await readJson<BacklogStore>(harnessPath(root, 'harness-backlog.json'), { tasks: [], usedIds: [], hash: '' });
       let warnings: string[] = [];
       if (text === undefined) warnings = ['backlog.md 재생성'];
-      else { try { warnings = parseRows(text, store.tasks).warnings; } catch (error) { warnings = [(error as Error).message]; } }
-      if (await commitMarkdown(root, store, text, renderBacklog(text ?? '', store.tasks))) return { tasks: store.tasks, warnings };
+      else { try { warnings = parseRows(text, store.tasks, mode).warnings; } catch (error) { warnings = [(error as Error).message]; } }
+      if (await commitMarkdown(root, store, text, renderBacklog(text ?? '', store.tasks, mode))) return { tasks: store.tasks, warnings };
     }
     throw contention();
   });
@@ -221,7 +254,8 @@ export async function getTask(root: string, id: string): Promise<Task> {
   if (!task) throw new Error(`백로그 task를 찾을 수 없습니다: ${id}`);
   return task;
 }
-export async function addTask(root: string, input: { title: string; category: string; depends?: string[] }): Promise<Task> {
+export async function addTask(root: string, input: { title: string; category: string; depends?: string[]; repo?: string }): Promise<Task> {
+  validateRepo(input, await backlogMode(root));
   return mutate(root, (tasks, store) => {
     const number = Math.max(0, ...store.usedIds.map(id => Number(id.slice(1)))) + 1;
     if (!Number.isSafeInteger(number)) throw new Error('task ID 한도 초과');
@@ -238,11 +272,14 @@ export function normalizeNotes(value: string): string {
   return notes;
 }
 export async function setTask(root: string, id: string, patch: Partial<Omit<Task, 'id'>>): Promise<Task> {
+  const mode = Object.hasOwn(patch, 'repo') ? await backlogMode(root) : undefined;
   return mutate(root, tasks => {
     const index = tasks.findIndex(task => task.id === id);
     if (index < 0) throw new Error(`백로그 task를 찾을 수 없습니다: ${id}`);
     const old = tasks[index];
+    if (Object.hasOwn(patch, 'repo')) protectRepo(old, patch.repo);
     const task = { ...old, ...patch };
+    if (mode) validateRepo(task, mode);
     for (const key of ['verify', 'review', 'merge', 'docs', 'cleanup', 'spec'] as const) {
       if (patch[key]) task[key] = { ...old[key], ...patch[key] };
     }

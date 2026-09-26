@@ -1,3 +1,4 @@
+import { initWorkspace, addWorkspaceMember, removeWorkspaceMember, listWorkspace } from '../core/workspace.ts';
 import { initProject } from './init.ts';
 import { startPlan } from './start.ts';
 import { commandTable as commands } from './commands.ts';
@@ -35,6 +36,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
   let createdJudgment: string | undefined;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+      repo: { type: 'string', multiple: true }, identity: { type: 'string' },
       brain: { type: 'string' }, model: { type: 'string' }, help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
       approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, dry: { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
@@ -50,11 +52,19 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       'same-as': { type: 'string' }, distinct: { type: 'boolean' }, options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
+    const workspaceInit = group === 'workspace' && action === 'init';
+    if (values.repo !== undefined && !(workspaceInit || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
+    if (values.identity !== undefined && !workspaceInit) throw new Error("Unknown option '--identity'");
     if (!args.length || group === 'help' || values.help) {
       const selected = !group || group === 'help' ? commandTable
         : commandTable.filter(c => c.group === group && (!action || c.action === action));
       if (!selected.length) throw new Error('지원하지 않는 fodh 명령입니다.');
       process.stdout.write(JSON.stringify({ help: selected.map(({ usage, summary }) => ({ usage, summary })) }) + '\n');
+      return;
+    }
+    if (group === 'workspace' && action === 'init') {
+      if (rest.length) throw new Error('명령 인자 수를 확인하세요.');
+      process.stdout.write(JSON.stringify(await initWorkspace({ cwd: root, repos: values.repo ?? [], identity: values.identity, dryRun: values['dry-run'] })) + '\n');
       return;
     }
     if (group === 'init' && !action) {
@@ -74,7 +84,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     }
     const readOnly = new Set(['state get', 'backlog list', 'backlog get', 'codex status', 'codex result',
       'judgment read', 'ledger list', 'worktree list', 'config get', 'slots status', 'memory status',
-      'watch status', 'interview status', 'skills status', 'inbox list', 'proc list']);
+      'workspace list', 'watch status', 'interview status', 'skills status', 'inbox list', 'proc list']);
     if (!readOnly.has(`${group} ${action ?? ''}`) && !(group === 'pick' && values.dry)
       && !(group === 'claude-md' && values.check)) await assertHarnessAlive(root);
     const exact = (count: number) => { if (rest.length !== count) throw new Error('명령 인자 수를 확인하세요.'); };
@@ -82,6 +92,8 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (!/^(0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name}는 0 이상의 정수여야 합니다`);
       return Number(value);
     };
+    if (group === 'backlog' && (values.repo?.length ?? 0) > 1) throw new Error('--repo 는 하나만 지정하세요');
+    const repo = values.repo?.[0];
     let result: unknown;
     if (group === 'interview' && action === 'start') { exact(0); result = await startInterview(root); }
     else if (group === 'interview' && action === 'next') { exact(0); result = await nextInterview(root, values.count === undefined ? undefined : Number(values.count)); }
@@ -116,6 +128,9 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'worktree' && action === 'commit') { exact(1); result = await commitWorktree(root, rest[0], values.message ?? ''); }
     else if (group === 'worktree' && action === 'remove') { exact(1); result = await removeWorktree(root, rest[0], values.force); }
     else if (group === 'worktree' && action === 'list') { exact(0); result = await listWorktrees(root); }
+    else if (group === 'workspace' && action === 'add') { exact(2); result = await addWorkspaceMember(root, rest[0], rest[1], { approve: values.approve }); }
+    else if (group === 'workspace' && action === 'remove') { exact(1); result = await removeWorkspaceMember(root, rest[0], { approve: values.approve }); }
+    else if (group === 'workspace' && action === 'list') { exact(0); result = await listWorkspace(root); }
     else if (group === 'doctor'  && !action) result = await doctor(root);
     else if (group === 'config' && action === 'get') {
       if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.');
@@ -152,7 +167,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'backlog' && action === 'add') {
       exact(0);
       if (!values.title || !values.category) throw new Error('--title 및 --category가 필요합니다');
-      result = await addTask(root, { title: values.title, category: values.category,
+      result = await addTask(root, { ...(repo === undefined ? {} : { repo }), title: values.title, category: values.category,
         depends: values.depends?.split(',').map(value => value.trim()).filter(Boolean) });
     } else if (group === 'backlog' && action === 'set') {
       exact(1); const patch: Partial<Task> = {};
@@ -165,6 +180,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       for (const key of ['title', 'category', 'status', 'judgment', 'worktree'] as const) {
         if (values[key] !== undefined) patch[key] = values[key];
       }
+      if (repo !== undefined) patch.repo = repo;
       if (values.notes !== undefined) patch.notes = normalizeNotes(values.notes);
       if (values.delegate !== undefined) {
         if (!['codex', 'claude'].includes(values.delegate)) throw new Error('delegate는 codex, claude 중 하나여야 합니다');

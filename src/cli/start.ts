@@ -1,6 +1,6 @@
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { join, resolve, delimiter } from 'node:path';
+import { basename, join, resolve, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeHookStatus, hookMergeGuidance, HarnessHookRequired } from '../core/claude-settings.ts';
 import { projectRoots, globalProjectLocation, projectFolderHint } from './project-root.ts';
@@ -22,7 +22,7 @@ export async function implicitStart(options: { cwd?: string; env?: NodeJS.Proces
   if (env.FODH_CODEX_CHILD) throw new Error('Codex 위임 안에서는 fodh 를 실행할 수 없습니다');
   if (await globalProjectLocation(cwd, env.HOME)) { options.report(projectFolderHint); return undefined; }
   const { harness, git } = await projectRoots(cwd, env.HOME);
-  if (harness) return startPlan({ cwd: harness, env });
+  if (harness) return startPlan({ cwd, env });
   const target = git ?? cwd;
   if (await globalProjectLocation(target, env.HOME)) { options.report(projectFolderHint); return undefined; }
   if (!options.interactive || !/^y$/iu.test((await options.ask(`이 폴더(${target})는 하네스 프로젝트가 아닙니다. 여기에 하네스를 설치하고 열까요? [y/N] `)).trim())) return undefined;
@@ -36,6 +36,7 @@ export async function startPlan(options: { cwd?: string; model?: string; dryRun?
   const env = options.env ?? process.env;
   if (env.FODH_CODEX_CHILD) throw new Error('Codex 위임 안에서는 fodh 를 실행할 수 없습니다');
   if (!options.dryRun && env.FODH_BRAIN === '1') throw new Error('두뇌는 fodh start 를 실행할 수 없습니다. --dry-run 만 허용합니다');
+  const discovered = await projectRoots(options.cwd, env.HOME);
   const root = await startRoot(options.cwd, env.HOME), config = await loadConfig(root, undefined, { dryRun: true });
   const hook = await claudeHookStatus(root);
   const guidance = hook.settingsNeedsHook ? await hookMergeGuidance() : undefined;
@@ -52,11 +53,12 @@ export async function startPlan(options: { cwd?: string; model?: string; dryRun?
   if (!pi && !guidance) throw new Error('pi 를 PATH에서 찾을 수 없습니다. README의 pi 설치 안내를 확인하세요');
   const pkg = fileURLToPath(new URL('../../', import.meta.url)).replace(/\/$/u, '');
   const argv = ['pi', ...['provider', 'orchestrator', 'watcher'].flatMap(name => ['-e', join(pkg, 'extensions', name, 'index.ts')]), '--model', `claude-code/${model}`];
-  return { cwd: root, command: pi ?? 'pi', argv, allowed: !hook.settingsNeedsHook, settingsNeedsHook: hook.settingsNeedsHook, ...guidance, env: { unset: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY'],
+  return { ...(discovered.member ? { notice: `워크스페이스 ${basename(root)} (멤버 ${discovered.member} 에서 열림)` } : {}), cwd: root, command: pi ?? 'pi', argv, allowed: !hook.settingsNeedsHook, settingsNeedsHook: hook.settingsNeedsHook, ...guidance, env: { unset: ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY'],
     set: { PI_SKIP_VERSION_CHECK: '1', FODH_PACKAGE_ROOT: pkg } } };
 }
 const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
 export function startShell(plan: Awaited<ReturnType<typeof startPlan>>): string {
   if (!plan.allowed) throw new HarnessHookRequired(plan.reason ?? '하네스 PreToolUse 훅이 필요합니다');
-  return `cd ${quote(plan.cwd)} && exec env ${plan.env.unset.flatMap(key => ['-u', key]).map(quote).join(' ')} ${Object.entries(plan.env.set).map(([key, value]) => quote(`${key}=${value}`)).join(' ')} ${[plan.command, ...plan.argv.slice(1)].map(quote).join(' ')}`;
+  const notice = plan.notice ? `printf '%s\\n' ${quote(plan.notice)} >&2; ` : '';
+  return `${notice}cd ${quote(plan.cwd)} && exec env ${plan.env.unset.flatMap(key => ['-u', key]).map(quote).join(' ')} ${Object.entries(plan.env.set).map(([key, value]) => quote(`${key}=${value}`)).join(' ')} ${[plan.command, ...plan.argv.slice(1)].map(quote).join(' ')}`;
 }

@@ -1,4 +1,4 @@
-import { doctorFiles } from '../core/doctor.ts';
+import { doctorFiles, doctorWorkspace } from '../core/doctor.ts';
 import { warnLegacyJudgment } from '../core/judgment.ts';
 import { unlink } from 'node:fs/promises';
 import { claudeMdMarker as expectedMarker } from '../core/claude-md.ts';
@@ -12,6 +12,7 @@ import { acquireLock, ownerAt, isProcessAlive } from '../core/lock.ts';
 export async function doctor(root: string, options: {
   env?: NodeJS.ProcessEnv; lockHeld?: boolean; signal?: AbortSignal;
 } = {}) {
+  let workspaceConfigFailure = false;
   let release: (() => Promise<void>) | undefined;
   if (!options.lockHeld) {
     const path = join(root, '.pi/harness.lock');
@@ -23,6 +24,9 @@ export async function doctor(root: string, options: {
     catch { throw new Error('Pi 세션이 잠금을 보유 중입니다. 세션에서 doctor 가 수행됩니다.'); }
   }
   try {
+    const workspace = await doctorWorkspace(root);
+    workspaceConfigFailure = !!workspace?.checks.some(check => check.check === 'config' && check.level === 'error');
+    if (workspace && !workspace.ok) throw new Error(`워크스페이스 doctor 실패: ${workspace.checks.filter(check => check.level === 'error').map(check => `${check.member ?? ''} ${check.message}`).join('; ')}`);
     await warnLegacyJudgment(root);
     const config = await loadConfig(root), env = options.env ?? process.env;
     const files = await doctorFiles(root);
@@ -58,10 +62,10 @@ export async function doctor(root: string, options: {
     const claudeMdLoaded = markers.length > 0;
     const claudeMdStale = markers.some(marker => marker !== claudeMdMarker);
     if (skillsMissing.length || !claudeMdLoaded || claudeMdStale) await notify(root, { key: 'doctor:skills-memory', level: 'warning', title: '하네스 문서 로드 확인', body: `누락 스킬: ${skillsMissing.join(', ') || '없음'}, CLAUDE.md 로드: ${claudeMdLoaded}${claudeMdStale ? ', 낡음(재생성 필요)' : ''}` });
-    return { ok: true, ...files, brainModel: config.brain.model, allowedModels: config.brain.allowedModels, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, pluginsLeaked, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
+    return { ok: true, ...(workspace ? { workspace } : {}), ...files, brainModel: config.brain.model, allowedModels: config.brain.allowedModels, hookDenials: result.hookDenials, checkedAt, skills, memory_paths, pluginsLeaked, skillsMissing, claudeMdLoaded, claudeMdStale, claudeMdMarker };
   } catch (error) {
     await updateState(root, { doctor: { ok: false, checkedAt: new Date().toISOString() } });
-    await notify(root, { key: 'doctor:fail', level: 'error', title: 'doctor 실패', body: 'doctor 검증에 실패했습니다. 오류를 확인하세요' });
+    if (!workspaceConfigFailure) await notify(root, { key: 'doctor:fail', level: 'error', title: 'doctor 실패', body: 'doctor 검증에 실패했습니다. 오류를 확인하세요' });
     throw error;
   } finally { await release?.(); }
 }

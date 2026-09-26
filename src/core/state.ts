@@ -19,7 +19,7 @@ export interface HarnessState {
   awaitingSlot?: { kind: 'codex'; owner: import('./slots.ts').SlotOwner; since: string };
   delegation?: { runId: string; taskId?: string; kind: 'task' | 'review' | 'research'; startedAt: string; title?: string; implied?: string };
   awaitingDelegation?: boolean;
-  worktrees?: { taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string; setupOk?: boolean; setupAt?: string }[];
+  worktrees?: { repo?: string; taskId: string; path: string; branch: string; base?: string; baseBranch?: string; createdAt: string; setupOk?: boolean; setupAt?: string }[];
   state: string; sessionId?: string; taskId?: string; savedAt?: string; resumeState?: string;
   resumeTask?: { taskId?: string; resumeState?: string }; awaitingUser?: boolean; userAborted?: boolean; cleanupFailures?: number;
   verify?: { runId: string; taskId?: string; ok: boolean; at: string; heavy: boolean; cwd: string; head?: string | null; clean?: boolean | null; since?: string; dirtyAfter?: string[] };

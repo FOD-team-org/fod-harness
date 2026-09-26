@@ -1,6 +1,10 @@
 // Shared by the CLI and document generator; no CLI runtime imports in core.
 export const commandTable: { group: string; action?: string; summary: string; usage: string }[] = [
-  { group: 'init', summary: '하네스 설치(사용자 전용)', usage: 'fodh init [--brain opus|fable] [--dry-run]' },
+  { group: 'workspace', action: 'init', summary: '워크스페이스 설치', usage: "fodh workspace init --repo 이름=경로 [--repo …] [--identity '이름 <메일>'] [--dry-run]" },
+  { group: 'workspace', action: 'add', summary: '멤버 추가(사용자 전용, 경로는 워크스페이스 루트 기준)', usage: 'fodh workspace add <이름> <경로> --approve' },
+  { group: 'workspace', action: 'remove', summary: '멤버 제거(사용자 전용)', usage: 'fodh workspace remove <이름> --approve' },
+  { group: 'workspace', action: 'list', summary: '멤버 상태 JSON', usage: 'fodh workspace list' },
+  { group: 'init' , summary: '하네스 설치(사용자 전용)', usage: 'fodh init [--brain opus|fable] [--dry-run]' },
   { group: 'start', summary: '터미널에서 하네스 시작', usage: 'fodh start [--model 별칭|id] [--dry-run]' },
   {"group": "cleanup", "action": "run", "summary": "정리 실행", "usage": "fodh cleanup run [--scope processes|storage|worktrees|all] [--task T번호] [--dry-run]"},
   {"group": "verify", "action": "run", "summary": "검증 실행", "usage": "fodh verify run [--heavy] [--cwd 경로]"},
@@ -25,8 +29,8 @@ export const commandTable: { group: string; action?: string; summary: string; us
   {"group": "backlog", "action": "list", "summary": "백로그 조회", "usage": "fodh backlog list"},
   {"group": "backlog", "action": "sync", "summary": "백로그 동기화", "usage": "fodh backlog sync"},
   {"group": "backlog", "action": "get", "summary": "작업 조회", "usage": "fodh backlog get <T번호>"},
-  {"group": "backlog", "action": "add", "summary": "작업 등록", "usage": "fodh backlog add --title 제목 --category 분류 [--depends T01,T02]"},
-  {"group": "backlog", "action": "set", "summary": "작업 정보 변경", "usage": "fodh backlog set <T번호> [--title 제목] [--category 분류] [--depends T01,T02] [--delegate codex|claude] [--status done] [--judgment A번호] [--worktree 경로] [--notes 메모] [--review-commit sha] [--review-high N] [--merge-commit sha] [--spec-rev N]"},
+  {"group": "backlog", "action": "add", "summary": "작업 등록", "usage": "fodh backlog add --title 제목 --category 분류 [--depends T01,T02] [--repo 이름]"},
+  {"group": "backlog", "action": "set", "summary": "작업 정보 변경", "usage": "fodh backlog set <T번호> [--title 제목] [--category 분류] [--depends T01,T02] [--repo 이름] [--delegate codex|claude] [--status done] [--judgment A번호] [--worktree 경로] [--notes 메모] [--review-commit sha] [--review-high N] [--merge-commit sha] [--spec-rev N]"},
   {"group": "cleanup", "action": "report", "summary": "정리 보고 조회", "usage": "fodh cleanup report"},
   {"group": "judgment", "action": "migrate", "summary": "옛 판단 파일 이전(사용자 전용)", "usage": "fodh judgment migrate [--dry-run]"},
   {"group": "judgment", "action": "apply", "summary": "사용자 판단 적용", "usage": "fodh judgment apply [A번호…]"},

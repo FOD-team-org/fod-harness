@@ -5,7 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { claudeHookStatus, hookMergeGuidance } from '../core/claude-settings.ts';
 import { globalProjectLocation, projectFolderHint, assertMainWorktree } from './project-root.ts';
 import { assertNotBrain } from '../core/brain-guard.ts';
-import { brainModels, loadConfig } from '../core/config.ts';
+import { memberWorkspace } from '../core/workspace.ts';
+import { brainModels, loadConfig, type WorkspaceMember } from '../core/config.ts';
 import { installSkills } from '../core/skills.ts';
 import { generateClaudeMd } from '../core/claude-md.ts';
 import { readJudgment } from '../core/judgment.ts';
@@ -17,7 +18,7 @@ const exists = (path: string) => lstat(path).then(() => true, () => false);
 async function git(root: string, args: string[]) {
   return (await execute('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } })).stdout.trim();
 }
-export async function initProject(options: { cwd?: string; brain?: string; dryRun?: boolean } = {}) {
+export async function initProject(options: { cwd?: string; brain?: string; dryRun?: boolean; workspaceInit?: { repos: Record<string, WorkspaceMember>; afterConfig?: () => Promise<void>; beforeCommit: (willCommit: boolean) => Promise<string | undefined> } } = {}) {
   const cwd = await realpath(options.cwd ?? process.cwd());
   if (await globalProjectLocation(cwd)) throw new Error(projectFolderHint);
   if (process.env.FODH_CODEX_CHILD) throw new Error('Codex 위임 안에서는 fodh 를 실행할 수 없습니다');
@@ -30,14 +31,16 @@ export async function initProject(options: { cwd?: string; brain?: string; dryRu
     newRepository = true;
   }
   if (await globalProjectLocation(root)) throw new Error(projectFolderHint);
+  const membership = await memberWorkspace(root);
+  if (membership) throw new Error(`이 레포는 워크스페이스 ${membership.workspace}에 속합니다`);
   await assertMainWorktree(root);
   await assertNotBrain(root, 'fodh init');
-  const config = await loadConfig(root, undefined, { dryRun: true });
+  const config = await loadConfig(root, options.workspaceInit ? { workspace: { repos: options.workspaceInit.repos } } : undefined, { dryRun: true });
   if (options.brain !== undefined && !['opus', 'fable'].includes(options.brain)) throw new Error('--brain 은 opus 또는 fable 이어야 합니다 (brain.allowedModels 검사)');
   const { model } = brainModels({ brain: { ...config.brain, model: options.brain ?? config.brain.model } });
   const created: string[] = [], existed: string[] = [], skipped: { path: string; reason: string }[] = [];
   const existingCode = (await readdir(root)).some(name => !['.git', '.pi', '.claude', '.DS_Store', 'CLAUDE.md', 'AGENTS.md', 'docs'].includes(name));
-  const nextSteps = [existingCode ? 'docs/backlog.md 를 채운 뒤 /develop-start 를 실행하세요' : '/project-start 를 실행하세요'];
+  const nextSteps = [options.workspaceInit ? 'fodh 로 창을 열고 첫 백로그를 요청합니다(fodh backlog add --repo <이름> …)' : existingCode ? 'docs/backlog.md 를 채운 뒤 /develop-start 를 실행하세요' : '/project-start 를 실행하세요'];
   const result = { root, dryRun: !!options.dryRun, created, existed, skipped, settingsNeedsHook: false,
     gitInitialized: false, committed: false, nextSteps };
   if (newRepository) {
@@ -54,7 +57,8 @@ export async function initProject(options: { cwd?: string; brain?: string; dryRu
     if (!options.dryRun) { await mkdir(dirname(path), { recursive: true }); await action(path); }
     return true;
   }
-  await create('.pi/harness.json', path => writeFile(path, JSON.stringify({ brain: { model: options.brain ?? model } }, null, 2) + '\n', { flag: 'wx' }));
+  await create('.pi/harness.json', path => writeFile(path, JSON.stringify(options.workspaceInit ? { workspace: { repos: options.workspaceInit.repos } } : { brain: { model: options.brain ?? model } }, null, 2) + '\n', { flag: 'wx' }));
+  if (!options.dryRun) await options.workspaceInit?.afterConfig?.();
   const settingsCreated = await create('.claude/settings.json', async path =>
     writeFile(path, await readFile(new URL('../../templates/claude-settings.json', import.meta.url)), { flag: 'wx' }));
   if (!settingsCreated) {
@@ -92,7 +96,9 @@ export async function initProject(options: { cwd?: string; brain?: string; dryRu
   }
   // Check all refs: an unborn branch in a repository with history is not a new repository.
   const hasCommits = !newRepository && !!(await git(root, ['rev-list', '--all', '--max-count=1']));
-  if (hasCommits) skipped.push({ path: 'commit', reason: '커밋이 있는 저장소이므로 자동 커밋하지 않습니다' });
+  const commitSkip = !options.dryRun ? await options.workspaceInit?.beforeCommit(!hasCommits) : undefined;
+  if (commitSkip && !hasCommits) { skipped.push({ path: 'commit', reason: commitSkip }); nextSteps.push(commitSkip); }
+  else if (hasCommits) skipped.push({ path: 'commit', reason: '커밋이 있는 저장소이므로 자동 커밋하지 않습니다' });
   else if (options.dryRun) nextSteps.push('커밋이 없는 저장소: 하네스 설정 3개 파일로 첫 커밋 예정 (저장소 신원·훅 사용)');
   else {
     const files = ['.pi/harness.json', config.judgment.file, 'CLAUDE.md'];

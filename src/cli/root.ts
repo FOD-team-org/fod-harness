@@ -1,3 +1,4 @@
+import { memberWorkspace } from '../core/workspace.ts';
 import { dirname, resolve, isAbsolute, relative, sep } from 'node:path';
 import { realpath, stat } from 'node:fs/promises';
 import { harnessPath, readText } from '../core/storage.ts';
@@ -8,6 +9,15 @@ export async function resolveCliRoot(cwd = process.cwd(), explicit = process.env
   if (process.env.FODH_CODEX_CHILD) throw new Error('Codex 위임 안에서는 fodh 를 실행할 수 없습니다');
   if (explicit) return resolve(explicit);
   const location = await realpath(cwd), candidates: string[] = [];
+  // Marker authority precedes any old member harness state. Stop at the nearest git boundary.
+  for (let current = location;; current = dirname(current)) {
+    if (await exists(resolve(current, '.git'))) {
+      const membership = await memberWorkspace(current);
+      if (membership) return membership.workspace;
+      break;
+    }
+    if (dirname(current) === current) break;
+  }
   let discovered: string | undefined;
   for (let current = location;; current = dirname(current)) {
     if (await exists(harnessPath(current, 'harness-state.json'))) { discovered ??= current; candidates.push(current); }
