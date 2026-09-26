@@ -6,7 +6,9 @@ import { runTurn, latestMessage, type TurnOptions } from '../../src/provider/tur
 
 export function streamClaude(
   model: Model<any>, context: Context, options: SimpleStreamOptions | undefined,
-  turnOptions: Omit<TurnOptions, 'model' | 'signal' | 'onText'> & { useConfiguredModel?: boolean },
+  turnOptions: Omit<TurnOptions, 'model' | 'signal' | 'onText'> & {
+    useConfiguredModel?: boolean; ui?: { setWorkingMessage: (line?: string) => void };
+  },
 ) {
   const stream = createAssistantMessageEventStream();
   const output: AssistantMessage = {
@@ -19,11 +21,16 @@ export function streamClaude(
   void (async () => {
     stream.push({ type: 'start', partial: output });
     stream.push({ type: 'text_start', contentIndex: 0, partial: output });
+    let resultDisplay = false;
+    const working = (line?: string) => { try { turnOptions.ui?.setWorkingMessage(line); } catch { /* Disposed UI. */ } };
     try {
-      const selectedModel = turnOptions.useConfiguredModel ? (await loadConfig(turnOptions.root)).brain.model : model.id;
+      const config = await loadConfig(turnOptions.root);
+      resultDisplay = !turnOptions.doctor && config.ui.brainOutput === 'result';
+      const selectedModel = turnOptions.useConfiguredModel ? config.brain.model : model.id;
       output.model = selectedModel;
       const result = await runTurn(latestMessage(context), {
-        ...turnOptions, model: selectedModel, signal: options?.signal, onText: delta => {
+        ...turnOptions, display: config.ui.brainOutput, onProgress: working,
+        model: selectedModel, signal: options?.signal, onText: delta => {
           const content = output.content[0];
           if (content.type === 'text') content.text += delta;
           stream.push({ type: 'text_delta', contentIndex: 0, delta, partial: output });
@@ -49,7 +56,7 @@ export function streamClaude(
       output.errorMessage = error instanceof Error && /^(configError:|하네스|잠금)/.test(error.message)
         ? error.message : '하네스 실행 실패: 설정과 원장을 확인하세요.';
       stream.push({ type: 'error', reason: output.stopReason, error: output });
-    } finally { stream.end(); }
+    } finally { if (resultDisplay) working(); stream.end(); }
   })();
   return stream;
 }

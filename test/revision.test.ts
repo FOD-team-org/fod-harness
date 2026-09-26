@@ -23,7 +23,7 @@ const roots: string[] = [];
 async function project() {
   const root = await mkdtemp('/private/tmp/fodh-revision-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ ui: { brainOutput: 'full' }, brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
     command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')],
     model: 'haiku', maxTurnMinutes: 0.015,
   } }));
@@ -203,9 +203,9 @@ it.each(['모두', '전부', '1과 2 제외'])('다중 선택 문맥 %s는 모�
 it('잠금 소유자의 프로세스 시작 시각이 다르면 PID가 살아 있어도 stale이다', async () => {
   const startedAt = new Date('2026-09-26T00:00:00.000Z');
   const started = vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(startedAt.toISOString());
-  expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: startedAt.toISOString() })).toBe(true);
-  expect(await lockOwnerAlive({ pid: process.pid, token: 'test', startedAt: new Date(startedAt.getTime() - 10000).toISOString() })).toBe(false);
+  expect(await lockOwnerAlive({ pid: process.ppid, token: 'test', startedAt: startedAt.toISOString() })).toBe(true);
+  expect(await lockOwnerAlive({ pid: process.ppid, token: 'test', startedAt: new Date(startedAt.getTime() - 10000).toISOString() })).toBe(false);
   expect(started).toHaveBeenCalledTimes(2);
-  expect(started).toHaveBeenNthCalledWith(1, process.pid);
-  expect(started).toHaveBeenNthCalledWith(2, process.pid);
+  expect(started).toHaveBeenNthCalledWith(1, process.ppid);
+  expect(started).toHaveBeenNthCalledWith(2, process.ppid);
 });

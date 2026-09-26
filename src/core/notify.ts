@@ -58,7 +58,9 @@ export async function notify(root: string, message: Notification, ctxLike?: Noti
       try { ctxLike?.notify?.(body, message.level); } catch { /* A disposed UI does not suppress other channels. */ }
     }
     if (config.notify.channels.includes('macos')) {
-      try {
+      if (!options.exec && process.env.FODH_NOTIFY_OS === 'off') {
+        await appendLedger(root, { runId: message.key, action: 'notify:macos', status: 'skip', evidence: { reason: 'FODH_NOTIFY_OS=off' } });
+      } else try {
         await (options.exec ?? ((file, args) => promisify(execFile)(file, args, { timeout: 3000 })))('osascript', ['-e', `display notification ${appleString(body)} with title ${appleString(title)}`]);
       } catch { await appendLedger(root, { runId: message.key, action: 'notify:macos', status: 'fail' }); }
     }

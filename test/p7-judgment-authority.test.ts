@@ -31,7 +31,7 @@ it.each(['env', 'ancestor'])('F24 %s 두뇌는 일반 판단의 answer/apply 불
 
 it('R1 Pi 잠금 소유자 자신은 코어 답변·적용 가능', async () => {
   const root = await project('RESEARCH');
-  await writeFile(join(root, '.pi/harness.lock'), JSON.stringify({ pid: process.pid, startedAt: 'owner', token: 'fixture' }));
+  await liveHarness(root);
   const { item } = await addJudgment(root, { title: 'Pi', background: '', options: ['진행'], recommend: '', blocks: '-' });
   await answerJudgment(root, item.id, '1');
   expect((await applyJudgments(root)).applied.map(item => item.id)).toEqual([item.id]);

@@ -1057,3 +1057,17 @@ it.each(['command', 'input'])('F34 RECLAIM에서도 M2 명시적 %s 멈춤은 �
   expect(t.sendMessage).not.toHaveBeenCalled();
   expect(await readState(t.root)).toMatchObject({ awaitingUser: true, userHold: false });
 });
+
+it('A14-d 2회차 result 표시 줄을 제외한 위임 표식은 implied 없이 인식한다', async () => {
+  const t = await setup(); await delegationFixture(t.root, 'X');
+  await updateState(t.root, { state: 'IMPLEMENT' });
+  await t.end('stop', '완료한 작업\n대기: 위임 X\n상태: IMPLEMENT\n[훅 차단] 승인 필요: 판단대기 항목을 확인하세요.\n\n— 도구 3회 · 보조 에이전트 0개 · 1초 · 훅 차단 1건');
+  expect(await readState(t.root)).toMatchObject({ awaitingDelegation: true, state: 'IMPLEMENT' });
+  expect((await readLedger(t.root)).filter(entry => entry.action === 'delegation:implied')).toHaveLength(0);
+  expect(t.sendMessage).not.toHaveBeenCalled();
+});
+it('A14-d 2회차 result 표시 줄이 있어도 사용자 대기 표식 유지', async () => {
+  const t = await setup(); await updateState(t.root, { state: 'INTERVIEW' });
+  await t.end('stop', '질문\n대기: 사용자\n상태: INTERVIEW\n[훅 차단] 보호: 이 동작은 포기하세요.\n— 도구 1회 · 보조 에이전트 0개 · 1초');
+  expect((await readState(t.root)).awaitingUser).toBe(true); expect(t.sendMessage).not.toHaveBeenCalled();
+});

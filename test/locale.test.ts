@@ -38,12 +38,12 @@ it.each([
 ])('시각 파싱 불가 시 원문 비교, 비교 불가 시 alive 유지: %s / %s', async (actual, expected, alive) => {
   vi.spyOn(process, 'kill').mockReturnValue(true);
   ps.mockResolvedValue({ stdout: actual, stderr: '' });
-  await expect(lockOwnerAlive({ pid: process.pid, token: 'locale', startedAt: expected })).resolves.toBe(alive);
+  await expect(lockOwnerAlive({ pid: process.ppid, token: 'locale', startedAt: expected })).resolves.toBe(alive);
 });
 
 it('ps 제한은 시작 시각 미확인으로 남기며 살아 있는 잠금 소유자를 회수하지 않는다 (ps mock)', async () => {
   vi.spyOn(process, 'kill').mockReturnValue(true);
   ps.mockRejectedValue(Object.assign(new Error('시험용 ps 제한'), { code: 'EPERM' }));
   await expect(processStartedAt(process.pid)).resolves.toBeUndefined();
-  await expect(lockOwnerAlive({ pid: process.pid, token: 'locale', startedAt: cTime })).resolves.toBe(true);
+  await expect(lockOwnerAlive({ pid: process.ppid, token: 'locale', startedAt: cTime })).resolves.toBe(true);
 });

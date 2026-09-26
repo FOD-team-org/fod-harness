@@ -11,6 +11,7 @@ import { notify as sendNotification } from './notify.ts';
 
 export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
 export interface HarnessConfig {
+  ui: { brainOutput: 'result' | 'full' };
   secrets: SecretSettings;
   interview: { enforce: boolean; roundSize: number; maxAsks: number; extraBankFile: string };
   docs: { root: string; overrideDir: string };
@@ -78,6 +79,9 @@ const warnedKeysHash = new Map<string, string>();
 export async function loadConfig(root: string, candidate?: unknown, options: { dryRun?: boolean } = {}): Promise<HarnessConfig> {
   const raw = object(candidate === undefined ? await readJson<unknown>(harnessPath(root, 'harness.json'), {}) : candidate, '하네스');
   const brain = object(defaultValue(raw.brain, {}), 'brain');
+  const ui = object(defaultValue(raw.ui, {}), 'ui');
+  const brainOutput = defaultValue(ui.brainOutput, 'result');
+  if (brainOutput !== 'result' && brainOutput !== 'full') throw new Error('ui.brainOutput은 result|full만 허용합니다');
   const judgment = object(defaultValue(raw.judgment, {}), 'judgment');
   const watch = object(defaultValue(raw.watch, {}), 'watch');
   const watching = {
@@ -217,6 +221,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
       || target === judgmentPath || target.startsWith(judgmentPath + '/') || judgmentPath.startsWith(target + '/');
   })) throw new Error('worktrees.links는 보호 경로를 제외한 중복 없는 root 상대 경로여야 합니다');
   const config: HarnessConfig = {
+    ui: { brainOutput },
     interview: { enforce, roundSize: bounded(interview.roundSize, 6, 5, 8, 'interview.roundSize'), maxAsks: bounded(interview.maxAsks, 2, 1, 5, 'interview.maxAsks'), extraBankFile: protectedInternal(interview.extraBankFile, '.pi/interview-bank.md', 'interview.extraBankFile') },
     docs: { root: docsRoot, overrideDir: protectedInternal(docs.overrideDir, '.pi/templates/docs', 'docs.overrideDir') },
     skills: { target: internal(skills.target, '.claude/skills', 'skills.target'), install },
@@ -238,7 +243,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
   };
   const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
   for (const [prefix, values, known] of [
-    ['brain', brain, config.brain], ['delegate.codex', codex, config.delegate.codex],
+    ['ui', ui, config.ui], ['brain', brain, config.brain], ['delegate.codex', codex, config.delegate.codex],
     ['verify', verify, config.verify], ['docs', docs, config.docs],
     ['skills', skills, config.skills], ['notify', notify, config.notify],
   ] as const) {

@@ -245,3 +245,18 @@ it('A16 보정 1 PI_CODING_AGENT_DIR의 ~를 HOME으로 펼친다', async () => 
     expect(t.ctx.ui.notify.mock.calls.filter(([message]) => message.includes('compaction.enabled=false'))).toHaveLength(0);
   } finally { await t.handlers.get('session_shutdown')!(); }
 });
+
+it.each([false, true])('A14-d 세션 UI 보관 hasUI=%s·shutdown 작업 메시지 복원 예외 무시', async hasUI => {
+  const t = await setup();
+  await updateState(t.root, { doctor: { ok: true, checkedAt: new Date().toISOString() } });
+  const setWorkingMessage = vi.fn(() => { throw new Error('disposed'); });
+  const ctx = { ...t.ctx, hasUI, ui: { ...t.ctx.ui, setWorkingMessage } };
+  const stream = vi.spyOn(streamModule, 'streamClaude').mockReturnValue({ result: async () => ({}) } as ReturnType<typeof streamModule.streamClaude>);
+  try {
+    await t.handlers.get('session_start')!({}, ctx);
+    const model = { ...t.config.models![0], provider: 'claude-code', api: 'claude-code', baseUrl: 'local://claude-code' };
+    await t.config.streamSimple!(model, normalizeContext({ messages: [] })).result();
+    expect(stream.mock.calls[0][3].ui).toBe(hasUI ? ctx.ui : undefined);
+  } finally { await expect(t.handlers.get('session_shutdown')!()).resolves.toBeUndefined(); }
+  expect(setWorkingMessage).toHaveBeenCalledTimes(hasUI ? 1 : 0);
+});

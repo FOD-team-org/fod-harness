@@ -1,6 +1,8 @@
-import { writeFile } from 'node:fs/promises';
+import { afterEach } from 'vitest';
 import { join } from 'node:path';
-import { processStartedAt } from '../src/core/process-time.ts';
+import { acquireLock } from '../src/core/lock.ts';
+const releases: (() => Promise<void>)[] = [];
+afterEach(async () => { for (const release of releases.splice(0)) await release(); });
 export async function liveHarness(root: string) {
-  await writeFile(join(root, '.pi/harness.lock'), JSON.stringify({ pid: process.pid, startedAt: await processStartedAt(process.pid) ?? '', token: 'live-test' }));
+  releases.push(await acquireLock(join(root, '.pi/harness.lock')));
 }

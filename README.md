@@ -58,6 +58,14 @@ if [ -n "${FODH_PACKAGE_ROOT:-}" ]; then exec "$FODH_PACKAGE_ROOT/hooks/pretoolu
 Pi가 잠금을 보유한 동안 `fodh doctor`는 즉시 오류를 반환합니다.
 
 
+## 화면 출력
+
+기본값은 두뇌가 정리한 결과만 표시하는 `ui.brainOutput=result`입니다. 진행 중에는 작업 메시지에 경과 시간·메인 도구 수·보조 에이전트 완료/시작 수·보조 도구 수를 표시하고, 종료하면 마지막 결과와 실행 요약을 한 번 표시합니다. 훅 차단과 중단 사유도 결과에 남습니다.
+
+전체 진행 내용을 보려면 `fodh config set ui.brainOutput full`을 실행하세요. 다음 턴부터 적용됩니다. 결과만 보기로 돌아가려면 `fodh config set ui.brainOutput result`를 실행합니다. doctor는 문서 표식 확인을 위해 항상 전체 출력을 사용합니다.
+
+하네스 원장은 프로젝트의 `.pi/harness-ledger.jsonl`에 있습니다(`fodh ledger list`). Claude 대화 기록은 기본적으로 `~/.claude/projects/<프로젝트 경로 인코딩>/<sessionId>.jsonl`에 있으며, 현재 세션 ID는 `.pi/harness-state.json`의 `sessionId`로 확인합니다.
+
 ## 모델 배치와 교체
 
 두뇌는 `brain.allowedModels` 허용 목록 안에서만 고릅니다. 기본 목록은 Opus 5.5(`claude-opus-5-5`)·Fable 5.1(`claude-fable-5-1`)이고, 기본 두뇌는 **Fable 5.1**입니다. `brain.allowPlugins=false`(기본값)이면 `--setting-sources project,local`로 사용자 전역 설정(플러그인·enabledPlugins 포함)을 제외하고 `--strict-mcp-config` + 빈 `--mcp-config`로 MCP를 제한한다. 하네스 스킬·훅은 프로젝트 `.claude/settings.json`과 `--settings`로 들어온다. 사용자 전역 스킬(`~/.claude/skills`)도 함께 제외된다. true이면 위 세 옵션을 생략하며 위임 훅은 유지된다. doctor는 비builtin plugin source 또는 codex: 접두 agent·command·skill이 남으면 `pluginsLeaked`와 경고를 반환한다.

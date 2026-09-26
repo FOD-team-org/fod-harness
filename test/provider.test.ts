@@ -23,7 +23,7 @@ const model: Model<'claude-code'> = { id: 'haiku', name: '시험', api: 'claude-
 async function project(maxTurnMinutes = 0.2) {
   const root = await mkdtemp('/private/tmp/fodh-provider-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'], command: fake, switchCommand: [fakeSwitch], model: 'haiku', maxTurnMinutes } }));
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ ui: { brainOutput: 'full' }, brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'], command: fake, switchCommand: [fakeSwitch], model: 'haiku', maxTurnMinutes } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
   await writeFile(join(root, '.pi/harness-state.json'), JSON.stringify({ state: 'IDLE', autoTurns: 0 }));
   return root;
@@ -47,7 +47,7 @@ describe('프로바이더 실물 픽스처', () => {
     const fixture = (await readFile('test/fixtures/claude-stream-json/first-run-hook-deny.jsonl', 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     const deltas = fixture.filter(event => event.type === 'stream_event' && event.event.delta?.type === 'text_delta').map(event => event.event.delta.text);
     expect(events.filter(event => event.type.startsWith('toolcall'))).toHaveLength(0);
-    expect(events.filter(event => event.type === 'text_delta').map(event => event.delta).filter(text => !text.startsWith('\n['))).toEqual(deltas);
+    expect(events.filter(event => event.type === 'text_delta').map(event => event.delta).filter(text => !text.startsWith('\n[') && !text.startsWith('\n```'))).toEqual(deltas);
     expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'stop' });
     expect((await stream.result()).content).toEqual([expect.objectContaining({ type: 'text', text: expect.stringContaining('[tool] Bash:') })]);
     const state = await readState(root); expect(state.sessionId).toMatch(/^[a-f\d-]{36}$/);

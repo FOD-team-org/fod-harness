@@ -5,6 +5,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { processStartedAt } from './process-time.ts';
 
 export interface LockOwner { pid: number; startedAt: string; token: string }
+const heldKey = Symbol.for('fodh.lock.held');
+const shared = globalThis as typeof globalThis & { [heldKey]?: Set<string> };
+const held = shared[heldKey] ??= new Set<string>();
+const startedKey = Symbol.for('fodh.lock.selfStartedAt');
+const startedShared = globalThis as typeof globalThis & { [startedKey]?: string };
+function normalizedStart(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value;
+}
 
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -20,10 +30,13 @@ export async function ownerAt(path: string): Promise<LockOwner | undefined> {
   }
 }
 
-export async function lockOwnerAlive(owner: LockOwner): Promise<boolean> {
+export async function lockOwnerAlive(owner: LockOwner, options: {
+  startedAt?: (pid: number) => Promise<string | undefined>;
+} = {}): Promise<boolean> {
+  if (owner.pid === process.pid) return held.has(owner.token);
   if (!isProcessAlive(owner.pid)) return false;
   try {
-    const actualText = await processStartedAt(owner.pid);
+    const actualText = await (options.startedAt ?? processStartedAt)(owner.pid);
     const expectedText = typeof owner.startedAt === 'string' ? owner.startedAt.trim() : '';
     if (!actualText || !expectedText) return true;
     const actual = Date.parse(actualText), expected = Date.parse(expectedText);
@@ -33,10 +46,24 @@ export async function lockOwnerAlive(owner: LockOwner): Promise<boolean> {
   return true;
 }
 
-export async function acquireLock(path: string, options: { waitMs?: number } = {}): Promise<() => Promise<void>> {
+export async function acquireLock(path: string, options: {
+  waitMs?: number; startedAt?: () => Promise<string | undefined>;
+} = {}): Promise<() => Promise<void>> {
   await mkdir(dirname(path), { recursive: true });
+  let startedAt: string | undefined;
+  try {
+    if (options.startedAt) startedAt = normalizedStart(await options.startedAt());
+    else {
+      startedAt = startedShared[startedKey];
+      if (!startedAt) {
+        startedAt = normalizedStart(await processStartedAt(process.pid));
+        if (startedAt) startedShared[startedKey] = startedAt;
+      }
+    }
+  }
+  catch { /* Restricted ps falls back to the Node start time. */ }
   const owner: LockOwner = {
-    pid: process.pid, startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), token: randomUUID(),
+    pid: process.pid, startedAt: startedAt || new Date(Date.now() - process.uptime() * 1000).toISOString(), token: randomUUID(),
   };
   const temporary = `${path}.${owner.token}.tmp`;
   const reclaim = `${path}.reclaim`;
@@ -45,7 +72,7 @@ export async function acquireLock(path: string, options: { waitMs?: number } = {
   await writeFile(temporary, JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
   try {
     for (;;) {
-      try { await link(temporary, path); break; }
+      try { await link(temporary, path); held.add(owner.token); break; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
       const current = await ownerAt(path);
       if (current && !(await lockOwnerAlive(current))) {
@@ -72,7 +99,9 @@ export async function acquireLock(path: string, options: { waitMs?: number } = {
   return async () => {
     if (released) return;
     released = true;
-    const current = await ownerAt(path);
-    if (current?.token === owner.token) await unlink(path);
+    try {
+      const current = await ownerAt(path);
+      if (current?.token === owner.token) await unlink(path);
+    } finally { held.delete(owner.token); }
   };
 }

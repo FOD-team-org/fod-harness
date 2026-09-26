@@ -16,6 +16,7 @@ import { setConfig } from '../src/core/config.ts';
 
 async function setup() {
   const root = await project('IDLE');
+  await setConfig(root, 'ui.brainOutput', 'full');
   await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude/settings.json'), '{}');
   return root;
 }

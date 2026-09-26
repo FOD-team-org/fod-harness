@@ -1,3 +1,4 @@
+import { TurnDisplay, toolBlock, HOOK_DENIAL_PREFIX, type BrainOutput } from './display.ts';
 import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { auditPathReport } from '../core/audit.ts';
@@ -20,6 +21,7 @@ export interface TurnOptions {
   root: string; model?: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv;
   onText?: (text: string) => void; notify?: (message: string) => void | Promise<void>;
   lockHeld?: boolean; doctor?: boolean;
+  display?: BrainOutput; onProgress?: (line: string) => void;
 }
 export interface TurnResult {
   hookDenials?: number;
@@ -60,6 +62,19 @@ const turnsInProgress = sharedTurns[turnsKey] ??= new Set<string>();
 export const isTurnInProgress = (root: string): boolean => turnsInProgress.has(resolve(root));
 const canonicalTool = (name: unknown): unknown => name === 'Task' ? 'Agent' : name;
 export async function runTurn(latest: string, options: TurnOptions): Promise<TurnResult> {
+  const display = new TurnDisplay(options.doctor ? 'full' : options.display ?? 'full', options.onText, options.onProgress);
+  let classification: string | undefined = 'processError';
+  try {
+    const result = await executeTurn(latest, options, display);
+    classification = result.reason === 'stop' ? undefined : result.classification ?? result.reason;
+    return result;
+  } catch (error) {
+    classification = options.signal?.aborted ? 'aborted'
+      : error instanceof Error && error.message.startsWith('configError:') ? 'configError' : 'processError';
+    throw error;
+  } finally { display.finish(classification); }
+}
+async function executeTurn(latest: string, options: TurnOptions, display: TurnDisplay): Promise<TurnResult> {
   const { root } = options;
   const runId = randomUUID();
   let release: (() => Promise<void>) | undefined;
@@ -97,6 +112,13 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
       let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
       const toolInputs = new Map<string, { tool_name: string; tool_input: unknown }>();
       const denials = new Map<string, any>();
+      const displayedDenialIds = new Map<string, string>();
+      const displayDenial = (denial: any, line?: string, toolUseId?: string) => {
+        const key = canonical({ tool: canonicalTool(denial.tool_name), input: denial.tool_input });
+        const id = toolUseId ?? denial.tool_use_id ?? displayedDenialIds.get(key) ?? `input:${key}`;
+        displayedDenialIds.set(key, id);
+        display.denial(id, line);
+      };
       type DenialKind = 'approval' | 'boundary' | 'guard' | 'unknown';
       const rememberDenial = (denial: any, kind: DenialKind = 'unknown', toolUseId?: string) => {
         const safe = safeValue(denial), key = canonical({ tool: canonicalTool(safe.tool_name), input: safe.tool_input });
@@ -132,7 +154,7 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
         }
       };
       pendingDenials.push(persistDenials);
-      const text = (value: string) => options.onText?.(redact(value));
+      const text = (value: string) => display.text(value);
       let outcome: ProcessResult;
       turnsInProgress.add(resolve(root));
       try {
@@ -142,6 +164,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
           args: claudeArgs(root, model, sessionId, resume, options.doctor, config.brain.allowPlugins),
           input: prompt, runId, maxMs: turnDeadlineMs(config.brain.maxTurnMinutes, options.doctor), env, signal: options.signal,
           onEvent: async event => {
+            display.observe(event);
+            const child = !!event.parent_tool_use_id;
+            const parentText = (value: string) => child ? value.replace(/^/gmu, '↳ ') : value;
             lastEventAt = new Date().toISOString();
             if (Date.now() - lastPersisted >= 5000) {
               await patchState({ lastEventAt, runId }); lastPersisted = Date.now();
@@ -177,27 +202,27 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                 && (info?.overageStatus === undefined || info.overageStatus === 'rejected')) return 'quota';
               if (info?.isUsingOverage === true || info?.overageStatus !== 'rejected') return 'billing';
             } else if (event.type === 'stream_event') {
-              if (event.event?.type === 'message_start') { partialText = false; reportText = ''; }
+              if (!child && event.event?.type === 'message_start') { partialText = false; reportText = ''; }
               if (event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') {
-                reportText += event.event.delta.text;
-                partialText = true; text(event.event.delta.text);
+                if (!child) { reportText += event.event.delta.text; partialText = true; }
+                text(parentText(event.event.delta.text));
               }
             } else if (event.type === 'assistant') {
-              reportText = (event.message?.content ?? []).filter((block: any) => block.type === 'text')
+              if (!child) reportText = (event.message?.content ?? []).filter((block: any) => block.type === 'text')
                 .map((block: any) => block.text).join('\n');
               for (const block of event.message?.content ?? []) {
                 if (block.type === 'tool_use') {
                   toolSeen = true; toolInputs.set(block.id, { tool_name: block.name, tool_input: block.input });
-                  text(`\n[tool] ${block.name}: ${JSON.stringify(block.input)}\n`);
+                  text(toolBlock(parentText(`[tool] ${block.name}: ${JSON.stringify(block.input)}`)));
                 }
-                if (block.type === 'text' && !partialText) text(block.text);
+                if (block.type === 'text' && (child || !partialText)) text(parentText(block.text));
               }
             } else if (event.type === 'user') {
               for (const block of event.message?.content ?? []) if (block.type === 'tool_result') {
                 const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
                 const visible = redact(content);
                 const suffix = visible.length > 400 ? `… (${visible.length - 400}자 생략)` : '';
-                text(`\n[도구 결과] ${visible.slice(0, 400)}${suffix}\n`);
+                text(toolBlock(parentText(`[도구 결과] ${visible.slice(0, 400)}${suffix}`)));
                 await appendLedger(root, {
                   runId, action: `tool_result:${attempt}:${block.tool_use_id}`, status: 'ok',
                   evidence: { tool_use_id: block.tool_use_id, is_error: !!block.is_error,
@@ -211,8 +236,9 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                     boundary: '경계: 같은 동작을 다시 시도하지 말고 위임(fodh codex task / Claude Agent)으로 바꾸세요.',
                     guard: '보호: 이 동작은 포기하세요.', unknown: '분류 없음: 원장을 확인하세요.',
                   }[kind];
-                  text(`\n[훅 차단] ${message}\n`);
+                  const notice = `${HOOK_DENIAL_PREFIX}${message}`;
                   const denial = toolInputs.get(block.tool_use_id);
+                  displayDenial(denial ?? {}, display.mode === 'full' ? parentText(notice) : notice, block.tool_use_id);
                   if (denial) rememberDenial(denial, kind, block.tool_use_id);
                   if (options.doctor) await appendLedger(root, { runId, action: `hook:${attempt}:${block.tool_use_id}`, status: 'ok',
                     evidence: safeValue({ tool_use_id: block.tool_use_id, ...denial, kind }) });
@@ -227,9 +253,8 @@ export async function runTurn(latest: string, options: TurnOptions): Promise<Tur
                 usage: event.usage,
               }) });
               for (const denial of event.permission_denials ?? []) {
-                if (!denials.has(canonical(safeValue({ tool: canonicalTool(denial.tool_name), input: denial.tool_input })))) {
-                  text('\n[훅 차단] 분류 없음: 원장을 확인하세요.\n');
-                }
+                const known = denials.has(canonical(safeValue({ tool: canonicalTool(denial.tool_name), input: denial.tool_input })));
+                displayDenial(denial, known ? undefined : `${HOOK_DENIAL_PREFIX}분류 없음: 원장을 확인하세요.`);
                 rememberDenial(denial);
               }
             }

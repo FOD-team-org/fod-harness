@@ -33,6 +33,7 @@ export default function provider(pi: ExtensionAPI, options: { shutdownWaitMs?: n
   let pending: Promise<unknown> | undefined;
   let ready = false;
   let notify: ((message: string) => void) | undefined;
+  let ui: { setWorkingMessage: (line?: string) => void } | undefined;
   const selectTools = (active: boolean) => {
     if (active) {
       restoreTools ??= pi.getActiveTools();
@@ -66,7 +67,7 @@ export default function provider(pi: ExtensionAPI, options: { shutdownWaitMs?: n
         void appendLedger(root, { runId: randomUUID(), action: 'shutdown:reorder', status: 'ok', evidence: { signals } })
           .catch(() => notify?.('종료 신호 처리기 순서 복구 원장을 기록하지 못했습니다.'));
       }
-      const stream = streamClaude(model, context, { ...options, signal }, { root, lockHeld: true, notify, useConfiguredModel: true });
+      const stream = streamClaude(model, context, { ...options, signal }, { root, lockHeld: true, notify, ui, useConfiguredModel: true });
       const completion = stream.result().finally(() => { if (pending === completion) pending = undefined; });
       pending = completion;
       return stream;
@@ -82,6 +83,7 @@ export default function provider(pi: ExtensionAPI, options: { shutdownWaitMs?: n
   };
   pi.on('session_start', async (_event, ctx) => {
     root = ctx.cwd;
+    ui = ctx.hasUI ? ctx.ui : undefined;
     uninstallShutdownReclaim?.();
     uninstallShutdownReclaim = installShutdownReclaim(getCurrentBrainGroup, () => root);
     controller = new AbortController(); ready = false;
@@ -111,6 +113,8 @@ export default function provider(pi: ExtensionAPI, options: { shutdownWaitMs?: n
     }
   });
   pi.on('session_shutdown', async () => {
+    try { ui?.setWorkingMessage(); } catch { /* Disposed UI. */ }
+    ui = undefined;
     controller.abort(); ready = false;
     uninstallShutdownReclaim?.(); uninstallShutdownReclaim = undefined;
     setNotifyContext(root);

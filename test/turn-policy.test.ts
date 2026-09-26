@@ -18,7 +18,7 @@ const roots: string[] = [];
 async function project() {
   const root = await mkdtemp('/private/tmp/fodh-policy-'); roots.push(root);
   await mkdir(join(root, '.pi')); await mkdir(join(root, '.claude'));
-  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
+  await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ ui: { brainOutput: 'full' }, brain: { allowedModels: ['claude-opus-5-5', 'claude-fable-5-1', 'haiku', 'sonnet'],
     command: resolve('test/fake-claude/claude'), switchCommand: [resolve('test/fake-claude/switch')],
   } }));
   await writeFile(join(root, '.claude/settings.json'), await readFile('templates/claude-settings.json'));
@@ -255,4 +255,18 @@ it.each([false, true])('A16 F33 @builtin은 제외하고 사용자 플러그인 
   const notices = (await readLedger(root)).filter(entry => entry.action === 'notify:doctor:plugins');
   expect(notices).toHaveLength(user ? 1 : 0);
   if (user) expect(notices[0].evidence).toMatchObject({ body: '발견 항목: foo@user' });
+});
+
+it('A14-d doctor는 display=result에도 full 텍스트로 문서 표식을 보존한다', async () => {
+  const root = await project(), onText = vi.fn(), onProgress = vi.fn();
+  emulate([init,
+    { type: 'assistant', message: { content: [{ type: 'text', text: '문서 확인 FODH-DOC-1234abcd' }] } },
+    { ...done, result: '차단 확인', permission_denials: [
+      { tool_name: 'Bash', tool_input: { command: 'echo FODH_DOCTOR_MARKER' } },
+      { tool_name: 'Write', tool_input: { file_path: 'src/FODH_DOCTOR_MARKER.ts' } },
+    ] },
+  ]);
+  expect(await runTurn('doctor 시험', { root, doctor: true, display: 'result', env: environment(root), onText, onProgress })).toMatchObject({ reason: 'stop' });
+  expect(onText.mock.calls.map(([text]) => text).join('')).toContain('문서 확인 FODH-DOC-1234abcd');
+  expect(onText.mock.calls.map(([text]) => text).join('')).not.toContain('— 도구'); expect(onProgress).not.toHaveBeenCalled();
 });

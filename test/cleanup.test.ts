@@ -32,7 +32,8 @@ async function sleeper(root: string, patch: Record<string, unknown> = {}) {
   const record = { pid: child.pid!, pgid: child.pid!, runId: `run-${child.pid}`, kind: 'verify', taskId: 'T01', startedAt: startedAt ?? 'spawn:unknown', ...patch };
   await registerProc(root, record); return { child, record, startedAt };
 }
-it('실제 sleep 회수·레지스트리 제거·보고서 및 pre→ok 원장', async () => {
+const psAvailable = !!await processStartedAt(process.pid);
+it.skipIf(!psAvailable)('실제 sleep 회수·레지스트리 제거·보고서 및 pre→ok 원장', async () => {
   const root = await setup(); const { child, startedAt } = await sleeper(root, { kind: 'worker' });
   expect(startedAt, '/bin/ps 시작 시각 확인 필요').toBeTruthy();
   const report = await runCleanup(root, { scope: 'processes' });

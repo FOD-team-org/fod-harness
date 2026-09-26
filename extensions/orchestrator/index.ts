@@ -1,6 +1,7 @@
 import { recoverOrphanBrain } from '../../src/core/brain-lifecycle.ts';
 import { randomUUID } from 'node:crypto';
 import { redact } from '../../src/provider/privacy.ts';
+import { isHarnessDisplayLine } from '../../src/provider/display.ts';
 import { scaffoldDoc } from '../../src/core/docs.ts';
 import { ensureHarnessGitignore, GitignoreNotRegularError } from '../../src/core/project-init.ts';
 import { startInterview, validateInterviewStart } from '../../src/core/interview.ts';
@@ -218,11 +219,12 @@ export default function orchestrator(pi: ExtensionAPI): void {
       if ((await readState(ctx.cwd)).brainErrors) await updateState(ctx.cwd, { brainErrors: 0 });
       if (ctx.hasUI === false) return;
       const text = last?.role === 'assistant' ? last.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : '';
-      const tail = text.split('\n').map(line => line.trim()).filter(Boolean).slice(-3)
+      const lines = text.split('\n').map(line => line.trim()).filter(line => line && !isHarnessDisplayLine(line));
+      const tail = lines.slice(-3)
         .map(line => line.replace(/^[`<>]+|[`<>]+$/gu, '').trim());
       const marker = tail.map(line => /^대기: 위임\s+([`<>]*[A-Za-z0-9_-]+[`<>]*)$/u.exec(line)?.[1])
         .find(Boolean)?.replace(/[`<>]/gu, '');
-      const awaitingUser = text.split('\n').some(line => line.trim().replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
+      const awaitingUser = lines.some(line => line.replace(/^[*_`]+|[*_`]+$/gu, '').trim() === '대기: 사용자');
       const slotState = await readState(ctx.cwd);
       if (slotState.awaitingSlot && !slotState.delegation
         && (active.has(slotState.state) && !['recovering', 'INTERVIEW'].includes(slotState.state) || slotState.state === 'paused(slot)')) {
