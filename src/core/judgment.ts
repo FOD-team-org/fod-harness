@@ -1,12 +1,13 @@
+import { rebaseJudgmentLinks } from './judgment-links.ts';
 import { processStartedAt } from './process-time.ts';
 import { lockOwnerAlive } from './lock.ts';
-import { unlink } from 'node:fs/promises';
+import { readdir, realpath, stat, unlink } from 'node:fs/promises';
 import { notify } from './notify.ts';
 import { assertNotBrain } from './brain-guard.ts';
 import { appendLedger } from './ledger.ts';
 import type { BrainTurn } from './state.ts';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { loadConfig } from './config.ts';
 import { readState, updateState, transitionState } from './state.ts';
 import { listBacklog, setTask } from './backlog.ts';
@@ -15,14 +16,14 @@ import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './st
 export interface JudgmentItem {
   id: string; title: string; rev: number; background: string; options: string[]; recommend: string;
   held?: { at: string; reason: 'brain-turn'; runId: string };
-  blocks: string; answer: string; answerRev?: number; classification?: AnswerClassification;
+  detail?: string; blocks: string; answer: string; answerRev?: number; classification?: AnswerClassification;
   resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string; followup?: string; dedupeKey?: string; raw: string; start: number; end: number;
 }
-export interface CompletedJudgment { id: string; rev?: number; answer: string; interpretation: string; commit: string; date: string }
+export interface CompletedJudgment { title?: string; path?: string; id: string; rev?: number; answer: string; interpretation: string; commit: string; date: string }
 export interface JudgmentDocument { items: JudgmentItem[]; completed: CompletedJudgment[] }
 export interface JudgmentInput {
   title: string; background: string; options: string | string[]; recommend: string;
-  blocks: string | string[]; dedupeKey?: string; resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string;
+  detail?: string; blocks: string | string[]; dedupeKey?: string; resolution?: 'resume' | 'cleanup'; requiresApproval?: boolean; reaskOf?: string;
 }
 export interface AnswerClassification {
   kind: 'choice' | 'conditional' | 'freeform' | 'ambiguous' | 'revision-mismatch' | 'empty';
@@ -30,7 +31,10 @@ export interface AnswerClassification {
 }
 
 const circled = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
-const initial = '# 판단대기\n\n편집기는 외부 변경 자동 새로고침을 켜 둘 것.\n\n## 지금 상태\n\n대기 중\n\n## 열린 판단\n\n## 결정 완료\n\n| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |\n|---|---|---|---|---|---|\n';
+const preamble = (archive: string) => `> 답은 각 항목의 \`- 답:\` 줄에만 쓴다. 번호 하나(1 또는 ①)나 자유 서술로 쓰고, 승인이 필요한 동작이면 번호나 "승인"을 넣는다. 채팅으로 \`A<n> 1\` 이라고 답해도 된다.
+> \`한눈에\` 표와 \`최근 결정\` 은 하네스가 다시 쓴다. 지난 판단: [판단기록](${archive}/). 편집기는 외부 변경 자동 새로고침을 켜 둘 것.`;
+const initial = '# 판단대기\n\n## 지금 상태\n\n대기 중\n\n## 열린 판단\n\n';
+
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 const field = (text: string, key: string): string => text.match(new RegExp(`^- ${key}:[ \\t]*(.*)$`, 'mu'))?.[1]?.trim() ?? '';
 
@@ -45,15 +49,16 @@ function cells(line: string): string[] {
     .map(value => value.trim().replace(/\\\|/gu, '|').replace(/<br\s*\/?\s*>/giu, '\n'));
 }
 
-export function parseJudgment(text: string): JudgmentDocument {
+export function parseJudgment(text: string, options: { migrate?: boolean } = {}): JudgmentDocument {
   const items: JudgmentItem[] = [];
-  const headings = [...text.matchAll(/^###\s+(A\d+(?:-\d+)?)\s*[—–-]\s*(.*?)\s*\(rev\s+(\d+)\)\s*$/gmu)];
+  const headings = [...text.matchAll(/^###\s+(A\d+(?:-\d+)?)\s*[—–-]\s*(.*?)\s*\((?:rev\s+(\d+)|\d{4}-\d{2}-\d{2})\)\s*$/gmu)];
   const open = /^## 열린 판단[ \t]*\r?$/mu.exec(text);
   const openStart = open ? open.index + open[0].length : -1;
   const nextSection = open ? text.slice(openStart).search(/^#{1,2}[ \t]/mu) : -1;
   const openEnd = nextSection < 0 ? text.length : openStart + nextSection;
   const completedStart = text.search(/^## 결정 완료\s*$/mu);
   for (const heading of headings) {
+    if (!options.migrate && heading[3] === undefined) continue;
     const start = heading.index!;
     if (openStart < 0 || start < openStart || start >= openEnd) continue;
     const tail = text.slice(start + heading[0].length);
@@ -62,8 +67,8 @@ export function parseJudgment(text: string): JudgmentDocument {
     const raw = text.slice(start, end);
     const answerRev = field(raw, '답 기준 rev');
     items.push({
-      id: heading[1]!, title: heading[2]!, rev: Number(heading[3]), background: field(raw, '배경'),
-      options: optionsOf(field(raw, '선택지')), recommend: field(raw, '추천'), blocks: field(raw, '막힌 작업'),
+      id: heading[1]!, title: heading[2]!, rev: Number(heading[3] ?? 1), background: field(raw, '배경'),
+      options: parsedOptions(raw), detail: field(raw, '자세히') || undefined, recommend: field(raw, '추천'), blocks: field(raw, '막힌 작업'),
       answer: field(raw, '답'), requiresApproval: field(raw, '승인 필수') === 'true',
       resolution: ['resume', 'cleanup'].includes(field(raw, '적용 정책')) ? field(raw, '적용 정책') as 'resume' | 'cleanup' : undefined,
       reaskOf: field(raw, '재질문 원본') || undefined, followup: field(raw, '후속 질문') || undefined, ...(answerRev ? { answerRev: Number(answerRev) } : {}),
@@ -126,7 +131,7 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
 }
 
 async function location(root: string): Promise<string> { return resolve(root, (await loadConfig(root)).judgment.file); }
-function questionHash(item: JudgmentItem): string {
+export function questionHash(item: JudgmentItem): string {
   return hash(JSON.stringify([item.title, item.background, item.options, item.recommend, item.blocks]));
 }
 async function reconcileEdits(root: string, path: string, text: string): Promise<string> {
@@ -164,9 +169,11 @@ export async function readJudgment(root: string, options: { answered?: boolean }
   const path = await location(root);
   return retryJudgment(() => withFileLock(path, async () => {
     const original = await readText(path);
-    const text = await reconcileEdits(root, path, original || initial);
+    let text = await reconcileEdits(root, path, original || initial);
     const expectedHash = text === original ? hash(text) : await save(root, path, text, original);
+    if (text !== original) text = await readText(path);
     const document = parseJudgment(text);
+    document.completed.push(...await readArchive(root));
     const held = await readJson<HeldAnswer[]>(harnessPath(root, 'harness-judgment-held.json'), []);
     for (const item of document.items) item.held = held.find(record => record.id === item.id && record.answer === item.answer)?.held;
     if (text === original) await rememberQuestions(root, document.items);
@@ -184,6 +191,9 @@ async function retryJudgment<T>(action: () => Promise<T>): Promise<T> {
   catch (error) { if (!(error instanceof JudgmentConflict)) throw error; return action(); }
 }
 async function save(root: string, path: string, text: string, original: string): Promise<string> {
+  const config = await loadConfig(root);
+  if (!original && !text.includes(preamble(relative(dirname(path), resolve(root, config.judgment.archive))))) text = text.replace(/^(#[^\n]*\n)/u, (_, title: string) => `${title}\n${preamble(relative(dirname(path), resolve(root, config.judgment.archive)))}\n`);
+  text = renderDerived(text, { recent: config.judgment.recent, completed: await readArchive(root) });
   const expectedHash = hash(text);
   const watcherPath = harnessPath(root, 'harness-watcher.json');
   await withFileLock(watcherPath, async () => {
@@ -222,7 +232,26 @@ export function similarJudgmentTitle(left: string, right: string): boolean {
   return a.size >= 2 && b.size >= 2 && [...a].filter(token => b.has(token)).length / Math.min(a.size, b.size) >= 0.6;
 }
 // CLI policy is opt-in; internal safeguards/reasks keep their existing dedupe behavior.
-export function addCliJudgment(root: string, input: JudgmentInput, distinct = false) {
+export async function addCliJudgment(root: string, input: JudgmentInput, distinct = false) {
+  for (const [label, value, limit] of [
+    ['제목', input.title, 60], ['배경', input.background, 400], ['추천', input.recommend, 200],
+    ...(typeof input.options === 'string' ? optionsOf(input.options) : input.options).map(value => ['선택지', value, 160] as const),
+  ] as const) {
+    if (typeof value !== 'string') throw new Error(`${label}는 문자열이어야 합니다`);
+    if ([...value].length > limit) throw new Error(`${label}가 ${limit}자를 넘습니다(${[...value].length}자). 자세한 내용은 문서에 쓰고 --detail <경로> 로 연결하라`);
+  }
+  if (input.detail !== undefined) {
+    const config = await loadConfig(root), target = resolve(root, input.detail);
+    const inside = (p: string, base: string) => p === base || p.startsWith(base + '/');
+    if (isAbsolute(input.detail) || input.detail.split('/').includes('..') || !inside(target, resolve(root))
+      || target === resolve(root, config.judgment.file) || inside(target, resolve(root, config.judgment.archive))) throw new Error('--detail은 판단 파일·판단기록 밖 프로젝트 상대 파일 경로여야 합니다');
+    if (!(await stat(target).catch(() => undefined))?.isFile()) throw new Error('--detail 파일이 존재하지 않습니다');
+    const actual = await realpath(target);
+    const actualArchive = await realpath(resolve(root, config.judgment.archive)).catch(() => resolve(root, config.judgment.archive));
+    const actualJudgment = await realpath(resolve(root, config.judgment.file)).catch(() => resolve(root, config.judgment.file));
+    if (!inside(actual, await realpath(root)) || inside(actual, actualArchive) || actual === actualJudgment) throw new Error('--detail은 판단 파일·판단기록 밖 프로젝트 파일이어야 합니다');
+    input = { ...input, detail: `[${basename(target)}](${relative(dirname(resolve(root, config.judgment.file)), target)})` };
+  }
   return addJudgment(root, input, { distinct });
 }
 export async function attachJudgmentTask(root: string, id: string, taskId: string): Promise<{ item: JudgmentItem; expectedHash: string }> {
@@ -238,7 +267,8 @@ export async function attachJudgmentTask(root: string, id: string, taskId: strin
     const blocked = /^blocked\((A\d+(?:-\d+)?)\)$/u.exec(task.status);
     if (blocked && blocked[1] !== id) throw new Error(`task ${taskId} 는 이미 ${blocked[1]} 에 묶여 있습니다`);
     if (blocked?.[1] === id && item.blocks.split(/[,\s]+/u).includes(taskId)) {
-      return { item, expectedHash: await save(root, path, text, original) };
+      const expectedHash = await save(root, path, text, original);
+      return { item: requireItem(await readText(path), id), expectedHash };
     }
     if (item.answer.trim()) throw new Error('답이 있는 판단에는 task를 붙일 수 없습니다');
     if (!item.blocks.split(/[,\s]+/u).includes(taskId)) {
@@ -248,7 +278,8 @@ export async function attachJudgmentTask(root: string, id: string, taskId: strin
         : item.raw.trimEnd() + `\n- 막힌 작업: ${blocks}\n\n`;
       text = text.slice(0, item.start) + raw + text.slice(item.end);
     }
-    return { item: requireItem(text, id), expectedHash: await save(root, path, text, original) };
+    const expectedHash = await save(root, path, text, original);
+    return { item: requireItem(await readText(path), id), expectedHash };
   }));
 }
 
@@ -260,28 +291,28 @@ export async function addJudgment(root: string, input: JudgmentInput, cliPolicy?
     const document = parseJudgment(text);
     const dedupeKey = input.dedupeKey ? hash(input.dedupeKey) : undefined;
     const found = dedupeKey && document.items.find(item => item.dedupeKey === dedupeKey);
-    if (found) return { item: found, expectedHash: await save(root, path, text, original), ...(cliPolicy ? { deduped: 'same-key' as const } : {}) };
+    if (found) { const expectedHash = await save(root, path, text, original); return { item: requireItem(await readText(path), found.id), expectedHash, ...(cliPolicy ? { deduped: 'same-key' as const } : {}) }; }
     if (cliPolicy) {
       const unanswered = document.items.filter(item => !item.answer.trim());
       const taskId = typeof input.blocks === 'string' && /^T\d+$/u.test(input.blocks) ? input.blocks : undefined;
       const sameTask = taskId && unanswered.find(item => item.blocks.split(/[,\s]+/u).includes(taskId));
-      if (sameTask) return { item: sameTask, expectedHash: await save(root, path, text, original), deduped: 'same-task' };
+      if (sameTask) { const expectedHash = await save(root, path, text, original); return { item: requireItem(await readText(path), sameTask.id), expectedHash, deduped: 'same-task' }; }
       const similar = !cliPolicy.distinct && unanswered.find(item => similarJudgmentTitle(input.title, item.title));
       if (similar) throw new Error(`비슷한 열린 판단 ${similar.id}(${similar.title})이 있습니다. ${taskId
         ? `같은 원인이면 --same-as ${similar.id} 로 이 task 를 붙이고, 다른 원인이면 --distinct 를 붙여 다시 등록하라`
         : '같은 원인이면 새로 등록하지 말고 그 판단을 기다려라. 다른 원인이면 --distinct 를 붙여 다시 등록하라'}`);
     }
     if (!input.title.trim()) throw new Error('판단 제목이 필요합니다');
-    const numbers = [...text.matchAll(/\bA(\d+)(?:-\d+)?\b/gu)].map(match => Number(match[1]));
-    const id = `A${Math.max(0, ...numbers) + 1}`;
+    const next = await highestNumber(root, text) + 1;
+    const id = `A${next}`;
     const options = typeof input.options === 'string' ? optionsOf(input.options) : input.options;
     if (!options.length) throw new Error('판단 선택지가 필요합니다');
     const section = [
       `### ${id} — ${oneLine(input.title)} (rev 1)\n- 배경: ${oneLine(input.background)}\n`,
-      `- 선택지: ${options.map((option, index) => `${circled[index] ?? `${index + 1}.`} ${oneLine(option)}`).join(' ')}\n`,
+      `- 선택지:\n${options.map((option, index) => `  ${circled[index] ?? `${index + 1}.`} ${oneLine(option)}`).join('\n')}\n`,
       `- 추천: ${oneLine(input.recommend)}\n`,
       `- 막힌 작업: ${oneLine(Array.isArray(input.blocks) ? input.blocks.join(', ') : input.blocks)}\n`,
-      '- 회신: 번호 하나 또는 자유 서술. 승인이 필요한 동작이면 번호 또는 승인/진행 토큰을 포함.\n- 답:\n',
+      `${input.detail ? `- 자세히: ${input.detail}\n` : ''}- 답:\n`,
       `${input.resolution ? `- 적용 정책: ${input.resolution}\n` : ''}`,
       `${input.requiresApproval ? '- 승인 필수: true\n' : ''}${input.reaskOf ? `- 재질문 원본: ${oneLine(input.reaskOf)}\n` : ''}`,
       `${dedupeKey ? `<!-- fodh-dedupe: ${dedupeKey} -->\n` : ''}\n`,
@@ -293,7 +324,8 @@ export async function addJudgment(root: string, input: JudgmentInput, cliPolicy?
     const at = nextHeading < 0 ? text.length : afterOpen + nextHeading;
     text = text.slice(0, at).trimEnd() + '\n\n' + section + text.slice(at);
     const expectedHash = await save(root, path, text, original);
-    return { item: requireItem(text, id), expectedHash };
+    await atomicWrite(harnessPath(root, 'harness-judgment-seq.json'), JSON.stringify({ last: next }) + '\n');
+    return { item: requireItem(await readText(path), id), expectedHash };
   }));
 }
 
@@ -309,7 +341,8 @@ export async function answerJudgment(root: string, id: string, answer: string): 
     replacement = replacement.replace(/^- 답 기준 rev:[^\r\n]*\n?/mu, '');
     replacement = replacement.trimEnd() + `\n- 답 기준 rev: ${item.rev}\n\n`;
     text = text.slice(0, item.start) + replacement + text.slice(item.end);
-    return { item: requireItem(text, id), expectedHash: await save(root, path, text, original) };
+    const expectedHash = await save(root, path, text, original);
+    return { item: requireItem(await readText(path), id), expectedHash };
   }));
 }
 
@@ -318,7 +351,11 @@ export async function writeJudgmentStatus(root: string, status: string): Promise
   return retryJudgment(() => withFileLock(path, async () => {
     const original = await readText(path);
     let text = await reconcileEdits(root, path, original || initial);
-    if (!/^## 지금 상태\s*$/mu.test(text)) text = `## 지금 상태\n\n${text}`;
+    if (!/^## 지금 상태\s*$/mu.test(text)) {
+      const at = text.match(/^#[^\n]*\n(?:[ \t]*\n|>[^\n]*\n)*/u)?.[0].length ?? 0;
+      text = text.slice(0, at) + `## 지금 상태\n\n${oneLine(status)}\n\n` + text.slice(at);
+      return { expectedHash: await save(root, path, text, original) };
+    }
     const heading = /^## 지금 상태[^\r\n]*\r?\n/mu.exec(text)!;
     const start = heading.index + heading[0].length;
     const boundary = text.slice(start).search(/^## /mu);
@@ -351,17 +388,23 @@ export async function completeJudgment(
       }).format(new Date()),
     };
     const chain = input.resolveChain ? relatedChain(parseJudgment(text).items, item) : [item];
+    const archiveChanges: { path: string; original: string; text: string }[] = [];
+    for (const member of chain) archiveChanges.push(await appendArchive(root, { ...completed, id: member.id, rev: member.rev, title: member.title,
+      answer: member.id === id ? item.answer : `모호: ${member.answer} → ${id}: ${item.answer}` }, member.raw));
     for (const member of [...chain].sort((a, b) => b.start - a.start)) text = text.slice(0, member.start) + text.slice(member.end);
-    if (!/^## 결정 완료\s*$/mu.test(text)) text += '\n## 결정 완료\n';
-    // 구형 완료 표도 보존하고 현재 규격 표를 별도로 덧붙인다.
-    if (!text.includes('| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |')) {
-      text += '\n| 번호 | rev | 답(원문) | 해석 | 반영 커밋 | 날짜 |\n|---|---|---|---|---|---|\n';
+    try { return { expectedHash: await save(root, path, text, original), completed }; }
+    catch (error) {
+      // A rejected CAS is a known non-commit. Undo only our new archive writes;
+      // abrupt interruption instead leaves the archive for finish(pending).
+      if (error instanceof JudgmentConflict) for (const change of archiveChanges.reverse()) {
+        if (change.text === change.original) continue;
+        await withFileLock(change.path, async () => {
+          if (await readText(change.path) !== change.text) throw new JudgmentConflict();
+          if (change.original) await atomicWrite(change.path, change.original); else await unlink(change.path);
+        });
+      }
+      throw error;
     }
-    for (const member of chain) text = text.trimEnd() + `\n| ${[
-      member.id, String(member.rev), member.id === id ? item.answer : `모호: ${member.answer} → ${id}: ${item.answer}`,
-      input.interpretation, input.commit, completed.date,
-    ].map(tableValue).join(' | ')} |\n`;
-    return { expectedHash: await save(root, path, text, original), completed };
   });
 }
 
@@ -407,8 +450,25 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
     let journal = await readJson<ApplyJournal[]>(journalPath, []);
     const persist = () => atomicWrite(journalPath, JSON.stringify(journal, null, 2) + '\n');
     const finish = async (entry: ApplyJournal) => {
-      const document = await readJudgment(root);
-      if (!document.completed.some(item => item.id === entry.id && item.rev === entry.rev && item.answer === entry.answer)) return;
+      let document = await readJudgment(root);
+      const path = await location(root);
+      const discarded = await withFileLock(path, async () => {
+        const original = await readText(path), text = await reconcileEdits(root, path, original);
+        const open = parseJudgment(text).items.find(item => item.id === entry.id);
+        if (!open || open.rev === entry.rev && open.answer === entry.answer) return false;
+        const removed = await removeArchivedJudgment(root, entry, path);
+        journal = journal.filter(item => item.id !== entry.id); await persist();
+        if (removed || text !== original) await save(root, path, text, original);
+        return true;
+      });
+      if (discarded) return;
+      if (!document.completed.some(item => archivedIdentity(item, entry, path))) return;
+      if (document.items.some(item => entry.releases.includes(item.id))) {
+        const open = document.items.find(item => item.id === entry.id);
+        if (!open) throw new JudgmentConflict();
+        await completeJudgment(root, entry.id, { interpretation: entry.interpretation, commit: '판단 적용; 코드 커밋 없음', expectedRaw: open.raw, resolveChain: true });
+        document = await readJudgment(root);
+      }
       let relevant = entry.relevant ?? false;
       for (const task of await listBacklog(root)) {
         if (!entry.releases.some(id => task.status === `blocked(${id})`)) continue;
@@ -585,4 +645,245 @@ export async function recoverJudgmentSnapshot(root: string): Promise<void> {
     return settleSnapshot(root, recoveryEnd(await readState(root)));
   });
   await notifyHeld(root, ids);
+}
+
+function parsedOptions(raw: string): string[] {
+  const value = field(raw, '선택지');
+  if (value) return optionsOf(value);
+  const lines = raw.split('\n'), index = lines.findIndex(line => /^- 선택지:[ \t]*\r?$/u.test(line));
+  const options: string[] = [];
+  if (index < 0) return options;
+  for (const line of lines.slice(index + 1)) {
+    if (!/^[ \t]+\S/u.test(line)) break;
+    options.push(line.trim().replace(/^(?:[①-⑳]|\d+[.)]|[-*])\s*/u, '').trim());
+  }
+  return options;
+}
+function section(text: string, name: string) {
+  const heading = new RegExp(`^## ${name}[ \\t]*\\r?\\n`, 'mu').exec(text);
+  if (!heading) return undefined;
+  const start = heading.index, bodyStart = start + heading[0].length;
+  const boundary = text.slice(bodyStart).search(/^#{1,2} /mu);
+  const end = boundary < 0 ? text.length : bodyStart + boundary;
+  return { start, bodyStart, end, body: text.slice(bodyStart, end) };
+}
+const short = (value: string, limit: number) => [...oneLine(value)].slice(0, limit).join('') + ([...oneLine(value)].length > limit ? '…' : '');
+export function latestCompleted(items: CompletedJudgment[], count: number): CompletedJudgment[] {
+  return items.map((item, index) => ({ item, index })).sort((a, b) => b.item.date.localeCompare(a.item.date) || b.index - a.index)
+    .slice(0, count).map(({ item }) => item);
+}
+export function renderDerived(text: string, context: { recent: number; completed: CompletedJudgment[] }): string {
+  const items = parseJudgment(text).items;
+  const overview = items.length ? '| 번호 | 제목 | 막힌 작업 | 추천 |\n|---|---|---|---|\n' + items.map(item =>
+    `| ${item.id} | ${tableValue(short(item.title, 40))} | ${tableValue(short(item.blocks, 24))} | ${tableValue(short(item.recommend.split(/ — |—|:/u)[0], 24))} |`).join('\n') : '열린 판단 없음';
+  const replaceSection = (name: string, body: string, before?: string) => {
+    const current = section(text, name);
+    if (current) {
+      text = text.slice(0, current.bodyStart) + `\n${body ? body + '\n\n' : ''}` + text.slice(current.end);
+      return;
+    }
+    const at = before ? section(text, before)?.start ?? text.length : text.length;
+    text = text.slice(0, at) + `${at && !text.slice(0, at).endsWith('\n\n') ? '\n' : ''}## ${name}\n\n${body ? body + '\n\n' : ''}` + text.slice(at);
+  };
+  replaceSection('한눈에', overview, '열린 판단');
+  const recent = latestCompleted(context.completed, context.recent).map(item =>
+    `- ${item.id} · ${item.date} · ${short(item.title ?? item.id, 30)} → 답 "${short(item.answer, 30)}" · [기록](${item.path})`).join('\n');
+  if (context.recent > 0 || section(text, '최근 결정')) replaceSection('최근 결정', recent);
+  return text;
+}
+const kstDate = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+async function archiveFiles(root: string, archive?: string): Promise<string[]> {
+  const dir = resolve(root, archive ?? (await loadConfig(root)).judgment.archive);
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return []; throw error;
+  });
+  return entries.filter(entry => entry.isFile() && entry.name.endsWith('.md')).map(entry => resolve(entry.parentPath, entry.name)).sort();
+}
+function parseArchive(text: string, path?: string): CompletedJudgment[] {
+  return [...text.matchAll(/^### (A\d+(?:-\d+)?) — (.*?) \(rev (\d+)\)[ \t]*\r?\n([\s\S]*?)(?=^#{1,3} |$(?![\s\S]))/gmu)].flatMap(match => {
+    const raw = match[4];
+    if (!/^- 결정일:/mu.test(raw)) return [];
+    return [{ id: match[1], title: match[2], rev: Number(match[3]), answer: field(raw, '답'), interpretation: field(raw, '해석'), commit: field(raw, '반영'), date: field(raw, '결정일'), path }];
+  });
+}
+export async function readArchive(root: string): Promise<CompletedJudgment[]> {
+  const directory = dirname(await location(root));
+  const records: CompletedJudgment[] = [];
+  for (const path of await archiveFiles(root)) records.push(...parseArchive(await readText(path), relative(directory, path)));
+  return records;
+}
+async function highestNumber(root: string, text: string, archive?: string): Promise<number> {
+  const seq = await readJson<{ last: number }>(harnessPath(root, 'harness-judgment-seq.json'), { last: 0 });
+  let last = seq.last;
+  for (const body of [text, ...await Promise.all((await archiveFiles(root, archive)).map(path => readText(path)))]) {
+    for (const match of body.matchAll(/(?<![A-Za-z0-9_])A(\d+)(?:-\d+)?(?![0-9])/gu)) last = Math.max(last, Number(match[1]));
+  }
+  return last;
+}
+function archiveBlock(item: CompletedJudgment, raw = ''): string {
+  const rest = raw.split('\n').filter(line => !/^### |^- (?:답|답 기준 rev|회신):|^<!-- fodh-dedupe:/u.test(line)).join('\n').trim();
+  return `### ${item.id} — ${oneLine(item.title ?? item.id)} (rev ${item.rev ?? 1})\n- 결정일: ${oneLine(item.date)}\n- 답: ${oneLine(item.answer)}\n- 해석: ${oneLine(item.interpretation)}\n- 반영: ${oneLine(item.commit)}\n${rest ? rest + '\n' : ''}`;
+}
+function archiveAppend(text: string, item: CompletedJudgment, sourceFile: string, targetFile: string, raw = ''): string {
+  const block = rebaseJudgmentLinks(archiveBlock(item, raw), sourceFile, targetFile);
+  const answer = field(block, '답');
+  if (parseArchive(text).some(record => record.id === item.id && record.rev === (item.rev ?? 1) && record.answer === answer)) return text;
+  return text.trimEnd() + '\n\n' + block;
+}
+function archivedIdentity(record: CompletedJudgment, item: Pick<CompletedJudgment, 'id' | 'rev' | 'answer'>, sourceFile: string): boolean {
+  const answer = record.path ? rebaseJudgmentLinks(oneLine(item.answer), sourceFile, resolve(dirname(sourceFile), record.path)) : oneLine(item.answer);
+  return record.id === item.id && record.rev === (item.rev ?? 1) && record.answer === answer;
+}
+// Caller holds the judgment lock (and apply lock), each archive is changed under its own lock.
+async function removeArchivedJudgment(root: string, entry: ApplyJournal, sourceFile: string): Promise<boolean> {
+  let removed = false;
+  for (const path of await archiveFiles(root)) await withFileLock(path, async () => {
+    const original = await readText(path);
+    const text = original.replace(/^### A\d+(?:-\d+)? — .*? \(rev \d+\)[ \t]*\r?\n[\s\S]*?(?=^#{1,3} |$(?![\s\S]))/gmu, block => {
+      const record = parseArchive(block, relative(dirname(sourceFile), path))[0];
+      return record && archivedIdentity(record, entry, sourceFile) ? '' : block;
+    });
+    if (text !== original) { await atomicWrite(path, text); removed = true; }
+  });
+  return removed;
+}
+async function appendArchive(root: string, item: CompletedJudgment, raw = '') {
+  const config = await loadConfig(root), month = /^\d{4}-\d{2}-\d{2}$/u.test(item.date) ? item.date.slice(0, 7) : '이전';
+  const sourceFile = await location(root);
+  const existing = (await readArchive(root)).find(record => archivedIdentity(record, item, sourceFile));
+  if (existing?.path) {
+    const path = resolve(dirname(await location(root)), existing.path), original = await readText(path);
+    return { path, original, text: original };
+  }
+  const path = resolve(root, config.judgment.archive, `${month}.md`);
+  return withFileLock(path, async () => {
+    const original = await readText(path), text = archiveAppend(original || `# 판단기록 ${month}\n`, item, sourceFile, path, raw);
+    if (text !== original) await atomicWrite(path, text);
+    return { path, original, text };
+  });
+}
+// Keep the old parser/hash contract; uncertain inline markers require a human.
+function ambiguousInlineOptions(item: JudgmentItem): boolean {
+  const value = field(item.raw, '선택지');
+  if (!value) return false;
+  const markers = [...value.matchAll(/[①-⑳]|\d+[.)]/gu)];
+  if (!markers.length) return false; // Unnumbered pipe-separated options are unambiguous.
+  return markers.some((match, index) => {
+    const at = match.index!;
+    const number = circled.includes(match[0]) ? circled.indexOf(match[0]) + 1 : Number.parseInt(match[0], 10);
+    return number !== index + 1 || at > 0 && !/\s/u.test(value[at - 1]) || index === 0 && at !== 0;
+  });
+}
+function migrateItem(item: JudgmentItem): string {
+  const lines = item.raw.split('\n'), known = /^(?:### |^- (?:배경|선택지|추천|막힌 작업|자세히|답|답 기준 rev|적용 정책|승인 필수|재질문 원본|후속 질문|회신):|<!-- fodh-dedupe:)/u;
+  let optionContinuation = false;
+  const unknown = lines.filter(line => {
+    if (/^- 선택지:[ \t]*$/u.test(line)) { optionContinuation = true; return false; }
+    if (optionContinuation && /^[ \t]+\S/u.test(line)) return false;
+    optionContinuation = false;
+    return !known.test(line);
+  }).join('\n').replace(/^\n+|\n+$/gu, '');
+  const ordered = [
+    `### ${item.id} — ${item.title} (rev ${item.rev})`,
+    ...['배경'].map(key => lines.find(line => line.startsWith(`- ${key}:`)) ?? `- ${key}:`),
+    ...(ambiguousInlineOptions(item) ? lines.filter(line => line.startsWith('- 선택지:'))
+      : ['- 선택지:', ...item.options.map((option, index) => `  ${circled[index] ?? `${index + 1}.`} ${option}`)]),
+    ...['추천', '막힌 작업', '자세히', '답', '답 기준 rev', '적용 정책', '승인 필수', '재질문 원본', '후속 질문']
+      .flatMap(key => lines.filter(line => line.startsWith(`- ${key}:`))),
+    ...lines.filter(line => line.startsWith('<!-- fodh-dedupe:')),
+  ];
+  return ordered.join('\n') + '\n' + (unknown ? unknown + '\n' : '') + '\n';
+}
+export async function migrateJudgment(root: string, options: { dryRun?: boolean } = {}) {
+  await assertNotBrain(root, 'judgment migrate');
+  return withFileLock(harnessPath(root, 'harness-judgment-apply'), async () => {
+    if (await hasActiveJudgmentSnapshot(root)) throw new Error('두뇌 턴의 활성 판단 스냅샷이 있어 migrate 할 수 없습니다');
+    if ((await readJson<ApplyJournal[]>(harnessPath(root, 'harness-judgment-apply.json'), [])).length) throw new Error('판단 적용 저널이 비어 있지 않아 migrate 할 수 없습니다');
+    const config = await loadConfig(root, undefined, { dryRun: true }), path = resolve(root, config.judgment.file);
+    return withFileLock(path, async () => {
+      const original = await readText(path), before = parseJudgment(original, { migrate: true });
+      let text = original || initial;
+      for (const item of [...before.items].reverse()) text = text.slice(0, item.start) + migrateItem(item) + text.slice(item.end);
+      const after = parseJudgment(text).items;
+      if (before.items.some((item, i) => questionHash(item) !== questionHash(after[i]) || rawAnswer(item) !== rawAnswer(after[i]))) throw new Error('migrate 전후 질문 해시 또는 답 줄이 다릅니다');
+      const writes = new Map<string, string>();
+      const originals = new Map<string, string>();
+      const get = async (file: string) => {
+        if (!originals.has(file)) originals.set(file, await readText(file));
+        return writes.get(file) ?? originals.get(file)!;
+      };
+      const legacy = resolve(root, config.judgment.archive, '이전.md');
+      let rows = 0, paragraphs = 0;
+      const preserve = async (name: string, body: string) => {
+        if (!body.trim()) return;
+        const existing = await get(legacy), block = `## ${kstDate()} 이관 전 ${name}\n${rebaseJudgmentLinks(body, path, legacy)}`;
+        if (!existing.includes(block)) writes.set(legacy, (existing || '# 판단기록 이전\n').trimEnd() + '\n\n' + block);
+        paragraphs += body.trim().split(/\n[ \t]*\n/u).length;
+      };
+      const completed = section(text, '결정 완료');
+      if (completed) {
+        const lines = completed.body.split('\n');
+        let standard = false;
+        const leftover: string[] = [];
+        for (const line of lines) {
+          if (line.trim().startsWith('|') && cells(line)[0] === '번호') {
+            standard = cells(line).join('|') === '번호|rev|답(원문)|해석|반영 커밋|날짜';
+            if (standard) continue;
+          }
+          if (standard && /^\|[\s|:-]+\|\s*$/u.test(line)) continue;
+          if (standard && /^A\d+(?:-\d+)?$/u.test(cells(line)[0] ?? '') && line.trim().startsWith('|')) {
+            const [id, rev, answer, interpretation, commit, date] = cells(line);
+            const month = /^\d{4}-\d{2}-\d{2}$/u.test(date) ? date.slice(0, 7) : '이전';
+            const file = resolve(root, config.judgment.archive, `${month}.md`);
+            writes.set(file, archiveAppend(await get(file) || `# 판단기록 ${month}\n`, { id, rev: Number(rev) || 1, answer, interpretation, commit, date }, path, file));
+            rows++; continue;
+          }
+          if (line.trim() && !line.trim().startsWith('|')) standard = false;
+          leftover.push(line);
+        }
+        await preserve('결정 완료', leftover.join('\n'));
+        text = text.slice(0, completed.start) + text.slice(completed.end);
+      }
+      const status = section(text, '지금 상태');
+      if (status) {
+        const match = /^(\s*\S[\s\S]*?)(\r?\n[ \t]*\r?\n)([\s\S]*)$/u.exec(status.body);
+        if (match?.[3].trim()) {
+          await preserve('지금 상태 이력', match[3]);
+          text = text.slice(0, status.bodyStart) + match[1] + '\n\n' + text.slice(status.end);
+        }
+      }
+      const header = preamble(relative(dirname(path), resolve(root, config.judgment.archive)));
+      text = text.replace(/^편집기는 외부 변경 자동 새로고침을 켜 둘 것\.\r?\n\n?/mu, '');
+      if (!text.includes(header)) text = text.replace(/^(#[^\n]*\n)/u, (_, title: string) => `${title}\n${header}\n`);
+      const records: CompletedJudgment[] = [];
+      const allFiles = new Set([...await archiveFiles(root, config.judgment.archive), ...writes.keys()]);
+      for (const file of [...allFiles].sort()) records.push(...parseArchive(await get(file), relative(dirname(path), file)));
+      text = renderDerived(text, { recent: config.judgment.recent, completed: records });
+      const changedArchives = [...writes].filter(([file, value]) => value !== originals.get(file));
+      const last = await highestNumber(root, original, config.judgment.archive);
+      const seqPath = harnessPath(root, 'harness-judgment-seq.json'), seqText = JSON.stringify({ last }) + '\n';
+      const seqChanged = await readText(seqPath) !== seqText;
+      const files = [...changedArchives.map(([file]) => relative(root, file)),
+        ...(text !== original ? [relative(root, path), '.pi/harness-watcher.json'] : []),
+        ...(seqChanged ? ['.pi/harness-judgment-seq.json'] : [])];
+      const warnings = before.items.filter(ambiguousInlineOptions).map(item => `선택지 수동 확인 필요: ${item.id}`);
+      const result = { changed: files.length > 0, files, rows, paragraphs, bytes: Buffer.byteLength(text), warnings };
+      if (options.dryRun || !result.changed) return result;
+      // Preserve the pre-migration high-water mark, including unstructured legacy IDs.
+      for (const [file, value] of changedArchives) await withFileLock(file, async () => {
+        if (await readText(file) !== originals.get(file)) throw new JudgmentConflict();
+        await atomicWrite(file, value);
+      });
+      if (text !== original) await save(root, path, text, original);
+      if (seqChanged) await atomicWrite(seqPath, seqText);
+      return result;
+    });
+  });
+}
+export async function warnLegacyJudgment(root: string): Promise<void> {
+  const text = await readText(await location(root));
+  const items = parseJudgment(text, { migrate: true }).items;
+  if (section(text, '결정 완료')?.body.trim() || items.some(item => !/\(rev\s+\d+\)\s*$/u.test(item.raw.split('\n')[0]) || field(item.raw, '선택지'))) await notify(root, {
+    key: 'judgment:legacy-format', level: 'warning', title: '옛 판단 파일 형식', body: '사용자 터미널에서 fodh judgment migrate',
+  });
 }

@@ -15,7 +15,7 @@
 ## 다음 fodh 명령
 - 완료 → `fodh state transition VERIFY --task {{taskId}}`
 - 보완 → `fodh docs scaffold fix-spec --task {{taskId}}` 후 `fodh codex task --task {{taskId}} --spec <수정 파일> --resume last`
-- 판단 필요({{judgmentFile}}) → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim` (같은 원인의 열린 판단이 있으면 `fodh judgment add --same-as A<n> --blocks {{taskId}} --reclaim`)
+- 판단 필요({{judgmentFile}}) → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" [--detail <문서>] --blocks {{taskId}} --reclaim` (같은 원인의 열린 판단이 있으면 `fodh judgment add --same-as A<n> --blocks {{taskId}} --reclaim`) 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 Claude Agent에도 워크트리 범위·git·전체 테스트/빌드·비밀값·산출물 금지와 동시 자식 한도를 명시한다. 두뇌는 루트 cwd 유지.

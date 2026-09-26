@@ -154,14 +154,17 @@ try {
       projectRules = approvalRules(config.approvalRules);
     } catch (error) { if (brain) deny('하네스 설정을 읽을 수 없습니다.'); }
   }
-  let judgmentFile = 'docs/판단대기.md';
+  let judgmentFile = 'docs/판단대기.md', judgmentArchive;
   try {
-    const configured = JSON.parse(readFileSync(resolve(root, '.pi/harness.json'), 'utf8')).judgment?.file;
+    const judgment = JSON.parse(readFileSync(resolve(root, '.pi/harness.json'), 'utf8')).judgment;
+    const configured = judgment?.file;
+    if (typeof judgment?.archive === 'string' && judgment.archive) judgmentArchive = judgment.archive;
     if (typeof configured === 'string' && configured) judgmentFile = configured;
   } catch { /* Uninitialized projects still protect the default path and journals. */ }
+  const archiveDir = resolve(root, judgmentArchive ?? `${dirname(judgmentFile)}/판단기록`);
   const judgmentPath = value => {
     const path = normalizePath(resolve(cwd, value));
-    return samePath(path, resolve(root, judgmentFile))
+    return samePath(path, resolve(root, judgmentFile)) || inside(path, archiveDir)
       || samePath(dirname(path), resolve(root, '.pi')) && /^harness-judgment.*\.json$/.test(basename(path));
   };
   const judgmentMessage = '판단대기 문서는 사용자만 고칩니다. 새 판단은 fodh judgment add 로 등록하라';
@@ -194,6 +197,9 @@ try {
     try { candidates.push(...readdirSync(directory).map(name => resolve(directory, name)).filter(protectedPath)); }
     catch { /* Missing files do not expand as globs; brain also rejects their directory prefix. */ }
   }
+  const archiveCandidates = [archiveDir];
+  try { archiveCandidates.push(...readdirSync(archiveDir, { recursive: true, withFileTypes: true })
+    .map(entry => resolve(entry.parentPath, entry.name))); } catch { /* Missing archive has its directory guard. */ }
   const directoryClues = target => {
     const clues = guardDirectories.filter(dir => inside(target, dir) && inside(dir, root) && !samePath(dir, root))
       .map(dir => {
@@ -204,6 +210,7 @@ try {
       const dir = dirname(target);
       if (!startupRoots.some(base => samePath(dir, base)) && !inside(root, dir)) clues.push(dir);
     }
+    if (inside(target, archiveDir) && inside(archiveDir, root)) clues.push(relative(root, archiveDir));
     return clues;
   };
   const patternGuard = (value, rawWords, words, dynamicPattern) => {
@@ -226,7 +233,7 @@ try {
     }
     if (brain && (regex && startupFiles.some(matches) || (!regex || brain) && near(startupDirectories))) deny(startupMessage);
     if (regex && candidates.some(matches) || (!regex || brain) && near(guardDirectories)) deny('가드 설정은 fodh로만 변경할 수 있습니다.');
-    if (brain && (matches(resolve(root, judgmentFile)) || near([judgmentDirectory]))) deny(judgmentMessage, 'boundary');
+    if (brain && (matches(resolve(root, judgmentFile)) || archiveCandidates.some(matches) || near([judgmentDirectory, archiveDir]))) deny(judgmentMessage, 'boundary');
   };
   if ((editing || bash) && secretPattern.test(text)) {
     deny('비밀값 패턴을 기록할 수 없습니다.');
@@ -328,7 +335,7 @@ try {
       const copying = ['cp', 'mv', 'rsync', 'ditto', 'install'].includes(executable);
       const explicitDestinations = operands.flatMap((word, i) => word === '-t' || word === '--target-directory' ? [operands[i + 1]] : word.startsWith('--target-directory=') ? [word.slice(19)] : []);
       const destinations = copying || executable === 'ln' ? explicitDestinations.length ? explicitDestinations : [operands.at(-1)] : [];
-      const targetDirectory = destinations.filter(Boolean).some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))));
+      const targetDirectory = destinations.filter(Boolean).some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))) || inside(resolve(cwd, value), archiveDir));
       const sources = operands.slice(1).filter((word, i) => !word.startsWith('-') && !destinations.includes(word)
         && !['-t', '--target-directory'].includes(operands[i]));
       const sourceDirectory = commands.some(command => basename(command[0] ?? '') === 'cd') || sources.some(word => {
@@ -348,7 +355,7 @@ try {
           : word.startsWith(tar ? '-C' : '-d') && word.length > 2 ? [word.slice(2)] : []) : [];
       const archiveOverwrite = extracting && (archiveDestinations.length
         ? archiveDestinations.some(value => samePath(resolve(cwd, value), dirname(resolve(root, judgmentFile))) || judgmentPath(value))
-        : samePath(cwd, dirname(resolve(root, judgmentFile))) || operands.some(word => word.includes(basename(judgmentFile))));
+        : samePath(cwd, dirname(resolve(root, judgmentFile))) || inside(cwd, archiveDir) || operands.some(word => word.includes(basename(judgmentFile)) || word.includes(basename(archiveDir))));
       // Directory destinations can overwrite protected basenames without naming the final path.
       const directoryOverwrite = (protectedFile, directories) => destinations.filter(Boolean).some(value => {
         const dest = expandedPath(value);
@@ -425,7 +432,7 @@ try {
         || destinations.filter(Boolean).some(judgmentPath)
         || targetDirectory && (executable === 'ln' || recursive || matchingSource) || archiveOverwrite
         || executable === 'ln' && operands.slice(1).filter(word => !word.startsWith('-')).some(judgmentPath)
-        || (inline || sedEdit || stdinInterpreter) && inlineText.includes(basename(judgmentFile)))) deny(judgmentMessage, 'boundary');
+        || (inline || sedEdit || stdinInterpreter) && (inlineText.includes(basename(judgmentFile)) || inlineText.includes(basename(archiveDir))))) deny(judgmentMessage, 'boundary');
     }
     if (paths.some(protectedPath)) deny('가드 설정은 fodh로만 변경할 수 있습니다.');
     if (process.env.FODH_CODEX_CHILD === '1' && executable === 'fodh') deny('Codex 자식은 fodh를 실행할 수 없습니다.', 'boundary');

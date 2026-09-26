@@ -21,7 +21,7 @@ import { cleanupReport, reclaimTask } from '../core/reclaim.ts';
 import { parseArgs } from 'node:util';
 import { readState, updateState, transitionState, doctorFresh, TransitionError, userOnlyTransitions } from '../core/state.ts';
 import { assertNotBrain, assertHarnessAlive, HarnessNotAliveError } from '../core/brain-guard.ts';
-import { readJudgment, addCliJudgment, attachJudgmentTask, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
+import { readJudgment, latestCompleted, migrateJudgment, addCliJudgment, attachJudgmentTask, answerJudgment, writeJudgmentStatus, applyJudgments } from '../core/judgment.ts';
 import { listInbox, ackInbox } from '../core/inbox.ts';
 import { tick, watcherStatus } from '../core/watcher.ts';
 import { listProcs } from '../core/procs.ts';
@@ -44,7 +44,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       'review-commit': { type: 'string' }, 'review-high': { type: 'string' },
       'merge-commit': { type: 'string' },
       'spec-rev': { type: 'string' }, 'requires-approval': { type: 'boolean' }, evidence: { type: 'string' },
-      task: { type: 'string' }, answered: { type: 'boolean' }, title: { type: 'string' }, background: { type: 'string' },
+      all: { type: 'boolean' }, detail: { type: 'string' }, task: { type: 'string' }, answered: { type: 'boolean' }, title: { type: 'string' }, background: { type: 'string' },
       'same-as': { type: 'string' }, distinct: { type: 'boolean' }, options: { type: 'string' }, recommend: { type: 'string' }, blocks: { type: 'string' },
     } });
     const [group, action, ...rest] = positionals;
@@ -176,7 +176,12 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       result = await reclaimTask(root, values.task, values.judgment);
     } else if (group === 'cleanup' && action === 'report') { exact(0); result = await cleanupReport(root); }
     else if (group === 'judgment' && action === 'apply') { await assertNotBrain(root, '판단 적용'); result = await applyJudgments(root, rest); }
-    else if (group === 'judgment' && action === 'read') { exact(0); result = await readJudgment(root, { answered: values.answered }); }
+    else if (group === 'judgment' && action === 'migrate') { exact(0); result = await migrateJudgment(root, { dryRun: values['dry-run'] }); }
+    else if (group === 'judgment' && action === 'read') {
+      exact(0); const document = await readJudgment(root, { answered: values.answered });
+      result = { ...document,
+        completed: values.all ? document.completed : latestCompleted(document.completed, (await loadConfig(root)).judgment.recent), completedTotal: document.completed.length };
+    }
     else if (group === 'judgment' && action === 'add') {
       exact(0);
       for (const key of (values['same-as'] ? ['blocks'] : ['title', 'background', 'options', 'recommend', 'blocks']) as ('title' | 'background' | 'options' | 'recommend' | 'blocks')[]) {
@@ -196,7 +201,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       }
       const added = values['same-as'] ? await attachJudgmentTask(root, values['same-as'], values.blocks!) : await addCliJudgment(root, {
         title: values.title!, background: values.background!, options: choices,
-        recommend: values.recommend!, blocks: values.blocks!, requiresApproval: values['requires-approval'],
+        detail: values.detail, recommend: values.recommend!, blocks: values.blocks!, requiresApproval: values['requires-approval'],
         dedupeKey: JSON.stringify([values.title, values.blocks]),
       }, values.distinct);
       createdJudgment = added.item.id;

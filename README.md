@@ -211,6 +211,8 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | Pi 종료와 고아 두뇌 | Pi가 SIGHUP·SIGTERM으로 죽으면 두뇌 그룹을 동기 TERM→KILL로 회수하고 orphan 파일을 다음 session_start 원장으로 옮긴다. SIGINT 도 같은 방식으로 회수한다(Pi 가 Ctrl+Z 로 멈춘 동안은 제외). session_start에서 처리기를 재설치하고 두뇌 턴 직전에 순서를 자가 교정해 Pi의 즉시 종료 처리기보다 먼저 회수한다. SIGKILL로 죽은 Pi의 두뇌는 다음 session_start가 회수하며, 그 사이 FODH_BRAIN=1인 두뇌의 fodh 쓰기는 잠금 소유자 부재·사망·읽기 실패로 코드 2 거부된다. 읽기 조회는 허용한다. 다음 세션 전까지 프로세스 자체가 남는 지연은 있다 |
 | 위임 감독 신호 | 취소 표지 없는 `kill <감독 pid>`(SIGTERM)는 무시된다 — `fodh codex cancel <runId>`를 쓴다. SIGKILL은 막을 수 없다. 감독은 CLI→런처→감독의 2단 분리로 시작한다 |
 | 복사·이동 잔여 문법 | GNU 묶음 `-t`(`cp -vt DIR x`, `install -Dt DIR x`)는 마지막 인자를 목적지로 본다. macOS cp에는 `-t`가 없다. 디렉터리째 원본 삭제(`rsync -a --remove-source-files DIR/ …`)와 사용자 세션의 보호 디렉터리 이름 바꾸기(`mv .claude .claude.bak`)는 검사하지 않는다. |
+| 판단기록 이름 | 사용자 지정 `judgment.archive` 이름이 흔한 단어면 두뇌의 인라인 코드·sed 가 과하게 거부될 수 있다(기본 `판단기록` 은 해당 없음). |
+| 간접 삭제 경로 | `find … -exec rm {} +`·`… \| xargs rm`의 대상 경로는 판단 파일·판단기록·가드 파일 보호에서 대조하지 못한다. 기존 훅의 경로 추출 한계다. |
 | 아카이브 생성 | `tar -cf`·`zip`의 출력 파일은 쓰기 경로로 보지 않는다. |
 | Git 잔여 문법 | git stash pop/apply와 git checkout <ref> <path>(-- 없음)의 효과를 완전히 해석하지 않는다. cd 추적(L10)도 구현하지 않는다. 예: `(cd wt && cp x ../.pi/harness.json)`의 복사 목적지는 바뀐 cwd로 추적하지 않는다 |
 
@@ -236,3 +238,17 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 소유자의 생존을 확인한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.
 
 두뇌 훅은 모든 상태에서 `branch -f/-D/-M/-C`, `branch --move --force/--copy --force`, `checkout -B`, `switch -C/--force-create`, `update-ref`, 인자 있는 `reset`, `rebase`, `filter-branch`, `reflog expire`, `fetch/push`의 `+` refspec, `merge -s ours/-X ours`(긴 옵션 포함)를 `[보호]`로 차단한다. 부모 검사는 내용을 버리는 ours 병합을 구분하지 못하므로 해당 훅 차단이 1차 방어다.
+
+
+## 판단대기 구조
+
+판단 파일은 머리말 → 지금 상태 한 줄 → 한눈에 표 → 열린 판단 → 사용자 절(보류 등) → 최근 결정 순으로 읽는다. 답은 열린 항목의 `- 답:`에만 쓴다. 선택지는 한 줄에 하나씩 표시하며, 한눈에 표와 최근 결정은 하네스가 저장할 때 다시 만든다.
+
+완료 항목은 질문·답 원문과 해석·반영·결정일을 함께 `판단기록/YYYY-MM.md`로 옮긴다(KST 결정일). 기본 경로는 판단 파일 디렉터리 아래 `판단기록`, 설정은 `judgment.archive`다. 판단 파일에는 `judgment.recent`개(기본 5, 0~20)의 최근 결정 링크를 표시한다. 0이면 표시하지 않는다. 번호는 판단 파일·판단기록·영속 카운터를 함께 보고 정하므로 기록 파일을 지워도 재사용하지 않는다.
+
+- `fodh judgment read`: 최근 결정과 `completedTotal` 조회. `--all`은 전체 기록 조회.
+- `fodh judgment migrate --dry-run`: 바뀔 파일·이관 행/문단 수·판단 파일 크기를 확인한다.
+- `fodh judgment migrate`: 사용자 터미널에서 실행한다. 활성 두뇌 스냅샷이나 미완료 적용 저널이 있으면 거부한다. 옛 결정 완료와 상태 이력은 월 기록 또는 `이전.md`로 옮기며, 재실행은 멱등이다. 이전하지 않은 파일도 계속 동작한다.
+- `fodh judgment add … --detail docs/조사/비교.md`: 긴 근거를 존재하는 프로젝트 상대 파일로 연결한다. 판단 파일·판단기록 안 경로는 허용하지 않는다.
+
+CLI 등록 상한은 제목 60자, 배경 400자, 선택지 하나 160자, 추천 200자다. 배경은 두 문장 안으로 쓰고 긴 근거는 문서로 분리한다. 내부 재질문·안전망 등록에는 이 제한을 적용하지 않는다. 판단기록은 워처 감시 대상이 아니며 두뇌의 직접 쓰기는 판단 파일과 같은 경계로 차단한다.

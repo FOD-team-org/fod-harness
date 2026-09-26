@@ -40,7 +40,7 @@ async function setup() {
 }
 it('H1: 외부 답 관측→다른 판단 추가가 답을 흡수해도 20초 뒤 한 건 발행', async () => {
   const t = await setup(); const now = Date.now(); await tick(t.root, { now });
-  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('- 답:', '- 답: 1'));
+  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace(/^- 답:/mu, '- 답: 1'));
   await tick(t.root, { now: now + 2000 });
   await addJudgment(t.root, { ...question, title: '다른 판단' });
   const before = await storage.readJson<any>(t.metadata, {});
@@ -54,14 +54,14 @@ it('H1: 외부 답 관측→다른 판단 추가가 답을 흡수해도 20초 �
 });
 it('H1: readJudgment 무변경 읽기는 외부 답과 기대 해시를 다시 쓰지 않는다', async () => {
   const t = await setup(); const before = await readFile(t.metadata, 'utf8');
-  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('- 답:', '- 답: 1'));
+  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace(/^- 답:/mu, '- 답: 1'));
   const document = await readFile(t.path, 'utf8'); await readJudgment(t.root, { answered: true });
   expect(await readFile(t.path, 'utf8')).toBe(document); expect(await readFile(t.metadata, 'utf8')).toBe(before);
 });
 it.each(['add', 'answer', 'status'])('M4: %s 저장 직전 외부 수정은 다시 읽어 한 번 재시도·보존', async operation => {
   const t = await setup(); const originalWrite = storage.atomicWrite; let collisions = 0;
   vi.spyOn(storage, 'atomicWrite').mockImplementation(async (path, text, beforeRename) => {
-    if (path === t.path && beforeRename && collisions++ === 0) await writeFile(path, (await readFile(path, 'utf8')) + '\n사용자 추가 내용\n');
+    if (path === t.path && beforeRename && collisions++ === 0) await writeFile(path, (await readFile(path, 'utf8')) + '\n## 사용자 메모\n\n사용자 추가 내용\n');
     return originalWrite(path, text, beforeRename);
   });
   if (operation === 'add') await addJudgment(t.root, { ...question, title: '추가' });
@@ -120,7 +120,7 @@ it('M1: 지시문 준비 뒤 busy가 되면 autoTurns 원복, 전송 없음', as
 });
 it('M2: CLI형 tick 발행·미결정 재조회·완료 기록·applied 필터·실패 3회 영속', async () => {
   const t = await setup(); const now = Date.now(); await tick(t.root, { now });
-  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('- 답:', '- 답: 1'));
+  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace(/^- 답:/mu, '- 답: 1'));
   await tick(t.root, { now: now + 1 }); const result = await tick(t.root, { now: now + 10001 });
   expect(await pendingDecisions(t.root)).toEqual(result.emitted);
   await t.decide(result.emitted); await recordDecision(t.root, result.emitted[0]);
@@ -228,7 +228,7 @@ it('M2/F9 통합: CLI가 먼저 발행한 답을 실제 워처 session_start가 
   const t = await setup(); const { default: watcher } = await import('../extensions/watcher/index.ts');
   await updateState(t.root, { state: 'WAIT_JUDGMENT', pickJudgment: t.item.id, resumeState: 'INTERVIEW' });
   const now = Date.now(); await tick(t.root, { now: now - 20000 });
-  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('- 답:', '- 답: 1'));
+  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace(/^- 답:/mu, '- 답: 1'));
   await tick(t.root, { now: now - 19000 }); const { emitted } = await tick(t.root, { now: now - 9000 });
   expect(emitted).toHaveLength(1);
   watcher(t.pi);
@@ -269,7 +269,7 @@ it('N4: 자유 서술 대기 skip은 ID당 최초 한 번, 모듈 재로드 뒤�
 it('N5: 수동 추가 항목 읽기는 questions만 병합, 질문 수정 시 rev 상승', async () => {
   const t = await setup(); await tick(t.root); const before = await storage.readJson<any>(t.metadata, {});
   const section = '### A7 — 수동 질문 (rev 1)\n- 배경: 직접 추가\n- 선택지: ① 웹 ② 앱\n- 추천: 웹\n- 막힌 작업:\n- 답: 1\n\n';
-  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('## 결정 완료', section + '## 결정 완료'));
+  await writeFile(t.path, (await readFile(t.path, 'utf8')).replace('## 최근 결정', section + '## 최근 결정'));
   const text = await readFile(t.path, 'utf8'); await readJudgment(t.root);
   expect(await readFile(t.path, 'utf8')).toBe(text);
   const after = await storage.readJson<any>(t.metadata, {});

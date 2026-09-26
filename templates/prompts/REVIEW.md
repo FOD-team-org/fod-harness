@@ -13,7 +13,7 @@
 실제 교차검수 완료·높음 0·대상 SHA 일치.
 ## 다음 fodh 명령
 - task 통과 → `fodh backlog set {{taskId}} --review-commit <sha> --review-high 0` 후 `fodh state transition MERGE --task {{taskId}}`
-- task 반려 → `fodh state transition FIX --task {{taskId}}`; 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim`
+- task 반려 → `fodh state transition FIX --task {{taskId}}`; 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" [--detail <문서>] --blocks {{taskId}} --reclaim` 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 - 프로젝트 통과 → `fodh state transition PROJECT_READY` 이후 `대기: 사용자` 로 턴을 끝낸다; 질문 추가 → `fodh interview add --area NN --text "<질문>" --must` 후 `fodh state transition INTERVIEW`
 - 프로젝트 미결 → `fodh state transition WAIT_JUDGMENT`
 ## 금지

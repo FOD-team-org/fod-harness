@@ -11,7 +11,7 @@
 허용된 병합 완료·검수 대상과 실제 작업 SHA 일치.
 ## 다음 fodh 명령
 - 완료 → `fodh backlog set {{taskId}} --merge-commit <실제병합sha>` 후 `fodh state transition DOCS --task {{taskId}} --commit <검수한작업sha>`
-- 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim`
+- 승인 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" [--detail <문서>] --blocks {{taskId}} --reclaim` 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 승인 미결 동작을 실행하지 않는다.

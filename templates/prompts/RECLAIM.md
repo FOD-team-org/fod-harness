@@ -2,7 +2,7 @@
 ## 지금 할 일
 1. 작업 {{taskId}}를 막는 {{judgmentFile}}의 A번호를 확인한다. pendingReclaim이 있으면 같은 판단 번호를 쓴다.
 2. `fodh reclaim --task {{taskId}} --judgment <A번호>`로 회수한다. 내부 공용 cleanup은 task 위임을 먼저 cancel하고 워크트리·검수 증거를 보존한다.
-3. 판단이 없으면 `fodh judgment add --title "<판단 제목>" --background "<근거>" --options "진행|보류" --recommend "<추천>" --blocks {{taskId}} --reclaim` 한 번으로 등록·회수한다.
+3. 판단이 없으면 `fodh judgment add --title "<판단 제목>" --background "<근거>" --options "진행|보류" --recommend "<추천>" [--detail <문서>] --blocks {{taskId}} --reclaim` 한 번으로 등록·회수한다. 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 ## 산출물
 non-brain 소유 프로세스 잔존 0·blocked(A번호).
 ## 끝내는 조건

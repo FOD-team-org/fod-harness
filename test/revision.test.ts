@@ -181,7 +181,7 @@ it('판단 답의 치환 문자 보존, 문항 직접 편집 rev 증가, KST 날
   const answer = "1 조건 $' $& $` $$";
   expect((await answerJudgment(root, added.item.id, answer)).item.answer).toBe(answer);
   const path = join(root, 'docs/판단대기.md');
-  await writeFile(path, (await readFile(path, 'utf8')).replace('원래 질문', '수정한 질문'));
+  await writeFile(path, (await readFile(path, 'utf8')).replace(/^### A1 — 원래 질문/mu, '### A1 — 수정한 질문'));
   const read = await readJudgment(root, { answered: true });
   expect(read.items[0]).toMatchObject({ rev: 2, classification: { kind: 'revision-mismatch' } });
   expect((await readJudgment(root)).items[0].rev).toBe(2);

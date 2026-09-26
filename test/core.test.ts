@@ -166,7 +166,7 @@ describe('판단대기 문서', () => {
     await completeJudgment(path, 'A9', { interpretation: '유지', commit: 'abc123' });
     const text = await readFile(join(path, 'docs/판단대기.md'), 'utf8');
     expect(text).toContain('보류한 프로젝트는 유지한다.');
-    expect(parseJudgment(text).completed).toHaveLength(2);
+    expect((await readJudgment(path)).completed).toHaveLength(2);
     expect(text).toContain('상태 갱신');
   });
 });

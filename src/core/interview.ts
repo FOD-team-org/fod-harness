@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadConfig, getConfig } from './config.ts';
 import { readState } from './state.ts';
-import { addJudgment, parseJudgment } from './judgment.ts';
+import { addJudgment, parseJudgment, readArchive } from './judgment.ts';
 import { appendLedger } from './ledger.ts';
 import { atomicWrite, harnessPath, readJson, readText, withFileLock } from './storage.ts';
 import { projectPath, todayKst } from './template-values.ts';
@@ -49,7 +49,7 @@ export async function loadBank(root: string, interview?: Interview): Promise<Que
 const pending = (a?: Answer) => !a || a.status === 'open' || a.status === 'asked';
 async function view(root: string, data?: Interview) {
   const config = await loadConfig(root), bank = await loadBank(root, data);
-  const completed = parseJudgment(await readText(await projectPath(root, config.judgment.file))).completed;
+  const completed = [...parseJudgment(await readText(await projectPath(root, config.judgment.file))).completed, ...await readArchive(root)];
   const questions = Object.fromEntries(bank.map(q => {
     const answer = data?.questions[q.id] ?? { status: 'open' as const, askCount: 0 };
     const decision = answer.status === 'judgment' && completed.find(c => c.id === answer.judgmentId);

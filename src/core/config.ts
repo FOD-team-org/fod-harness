@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { commandParts } from '../provider/runner.ts';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { notify as sendNotification } from './notify.ts';
 
@@ -33,7 +33,7 @@ export interface HarnessConfig {
   budget: { dailyTurns: number; dailyHours: number };
   worktrees: { root: string; prefix: string; links: string[] };
   watch: { stallMinutes: number; childTimeoutMinutes: number; pollSeconds: number; stableSeconds: number; freeTextStableSeconds: number; tickSeconds: number };
-  judgment: { file: string };
+  judgment: { file: string; archive: string; recent: number };
   requiresApproval: string[];
   approvalRules: ApprovalRule[];
 }
@@ -173,6 +173,12 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     if (typeof v !== 'string' || !v.trim() || /[\0\r\n]/u.test(v) || isAbsolute(v) || relative(resolve(root), resolve(root, v)).startsWith('..')) throw new Error(`${key}은 프로젝트 내부 상대 경로여야 합니다`);
     return v;
   };
+  const archive = internal(judgment.archive, `${dirname(file)}/판단기록`, 'judgment.archive');
+  const archiveTarget = resolve(root, archive), judgmentTarget = resolve(root, file);
+  if (archive.split('/').includes('..') || judgmentTarget === archiveTarget || judgmentTarget.startsWith(archiveTarget + '/')) {
+    throw new Error('judgment.archive는 판단 파일 자신이나 조상일 수 없습니다');
+  }
+  const recent = bounded(judgment.recent, 5, 0, 20, 'judgment.recent');
   const docsRoot = internal(docs.root, 'docs', 'docs.root');
   const docsPathKey = (path: string) => process.platform === 'darwin' ? path.toLowerCase() : path;
   const docsTarget = docsPathKey(resolve(root, docsRoot));
@@ -201,6 +207,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
       || /[\\*?\[\]#!]/u.test(path) || path.startsWith('-') || path !== path.trim()
       || path.split('/').some(part => ['.git', '.pi', '.claude'].includes(docsPathKey(part)))
       || /^(?:\.env(?:\..*)?|\.envrc|\.dev\.vars(?:\..*)?|\.npmrc|\.netrc|\.pypirc|neon_api\.json|key\.properties)$|\.(?:pem|key|p8|p12|keystore|jks)$/i.test(path.split('/').at(-1)!)
+      || target === docsPathKey(archiveTarget) || target.startsWith(docsPathKey(archiveTarget) + '/') || docsPathKey(archiveTarget).startsWith(target + '/')
       || target === judgmentPath || target.startsWith(judgmentPath + '/') || judgmentPath.startsWith(target + '/');
   })) throw new Error('worktrees.links는 보호 경로를 제외한 중복 없는 root 상대 경로여야 합니다');
   const config: HarnessConfig = {
@@ -221,7 +228,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
     verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes') },
     notify: { channels: channels as HarnessConfig['notify']['channels'] },
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
-    delegate: delegation, worktrees: { root: wtRoot, prefix, links }, watch: watching, judgment: { file }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
+    delegate: delegation, worktrees: { root: wtRoot, prefix, links }, watch: watching, judgment: { file, archive, recent }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
   };
   const unknown = Object.keys(raw).filter(key => !Object.hasOwn(config, key) && key !== 'maxAutoTurns');
   for (const [prefix, values, known] of [

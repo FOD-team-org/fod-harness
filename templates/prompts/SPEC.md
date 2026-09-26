@@ -9,7 +9,7 @@ scaffold 결과의 `path`에 위임스펙을 채우고 구현 위임의 `--spec`
 위임 범위와 검증이 구체적이고 승인 미결이 없다.
 ## 다음 fodh 명령
 - 완료 → `fodh state transition IMPLEMENT --task {{taskId}}`
-- 판단 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" --blocks {{taskId}} --reclaim`
+- 판단 필요 → `fodh judgment add --title "<제목>" --background "<배경>" --options "선택1|선택2" --recommend "<추천>" [--detail <문서>] --blocks {{taskId}} --reclaim` 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 수행자에게 git·전체 테스트/빌드·비밀값·범위 밖 쓰기를 금지한다.

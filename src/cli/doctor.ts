@@ -1,3 +1,4 @@
+import { warnLegacyJudgment } from '../core/judgment.ts';
 import { unlink } from 'node:fs/promises';
 import { claudeMdMarker as expectedMarker } from '../core/claude-md.ts';
 import { loadConfig } from '../core/config.ts';
@@ -21,6 +22,7 @@ export async function doctor(root: string, options: {
     catch { throw new Error('Pi 세션이 잠금을 보유 중입니다. 세션에서 doctor 가 수행됩니다.'); }
   }
   try {
+    await warnLegacyJudgment(root);
     const config = await loadConfig(root), env = options.env ?? process.env;
     if (Number(env.BASH_DEFAULT_TIMEOUT_MS) > 0 && Number(env.BASH_DEFAULT_TIMEOUT_MS) < config.delegate.codex.waitMinutes * 60000) {
       const effective = waitLimitMinutes(config.delegate.codex.timeoutMinutes, config.brain.maxTurnMinutes, config.delegate.codex.waitMinutes, env);

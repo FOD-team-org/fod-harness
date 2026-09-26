@@ -35,7 +35,7 @@ async function setup() {
 }
 it('변경 후 안정화 경계·queued·해시·바이트 크기와 기존 판단 메타데이터 보존', async () => {
   const t = await setup(); const before = await readJson<any>(harnessPath(t.root, 'harness-watcher.json'), {});
-  await writeFile(t.path, t.text.replace('- 답:', '- 답: 1'));
+  await writeFile(t.path, t.text.replace(/^- 답:/mu, '- 답: 1'));
   expect((await tick(t.root, { now: now + 1000 })).emitted).toEqual([]);
   expect((await tick(t.root, { now: now + 10999 })).emitted).toEqual([]);
   const result = await tick(t.root, { now: now + 11000 });

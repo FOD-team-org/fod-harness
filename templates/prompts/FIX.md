@@ -13,7 +13,7 @@
 ## 다음 fodh 명령
 - 수정 완료 → `fodh state transition VERIFY --task {{taskId}}`
 - repair 초과 → 판단 등록 후 `fodh reclaim --task {{taskId}} --judgment <A번호>`
-- 같은 원인의 열린 판단이 있으면 `fodh judgment add --same-as A<n> --blocks {{taskId}} --reclaim` 으로 붙인다.
+- 같은 원인의 열린 판단이 있으면 `fodh judgment add --same-as A<n> --blocks {{taskId}} --reclaim` 으로 붙인다. 판단 등록 시 배경은 두 문장 안으로 쓴다. 긴 근거는 문서에 쓰고 `--detail <문서>`로 연결한다.
 ## 금지
 두뇌는 소스 파일을 쓰지 않는다. Write/Edit 는 docs/·CLAUDE.md 에만, 구현은 위임한다.
 검증 interrupted는 코드 결함으로 보지 말고 재검증한다. 대상 SHA가 바뀌면 검수 통과 무효. 수행자 git·전체 테스트/빌드·비밀값 금지.

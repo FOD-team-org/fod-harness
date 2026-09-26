@@ -413,7 +413,7 @@ it('P2: 실제 문서 직접 편집 → 안정화 tick → decideInbox → 프�
   await updateState(t.root, { state: 'WAIT_JUDGMENT', resumeState: 'INTERVIEW', pickJudgment: item.id, awaitingUser: true });
   const now = Date.now(); await tick(t.root, { now });
   const path = join(t.root, 'docs/판단대기.md');
-  await writeFile(path, (await readFile(path, 'utf8')).replace('- 답:', '- 답: 1'));
+  await writeFile(path, (await readFile(path, 'utf8')).replace(/^- 답:/mu, '- 답: 1'));
   expect((await tick(t.root, { now: now + 1000 })).emitted).toEqual([]);
   const { emitted } = await tick(t.root, { now: now + 11000 }); expect(emitted).toHaveLength(1);
   await decideInbox({ sendMessage: t.sendMessage } as unknown as ExtensionAPI, t.ctx as any, t.root, emitted);
@@ -752,7 +752,7 @@ it('R1 held 답의 자동 적용 차단·번호별 확인·다음 사용자 변�
   const expectedHash = JSON.parse(await readFile(join(t.root, '.pi/harness-watcher.json'), 'utf8')).judgment.expectedHash;
   await updateState(t.root, { state: 'WAIT_JUDGMENT' });
   await beginJudgmentSnapshot(t.root, { runId: 'brain', startedAt: new Date(now - 1000).toISOString() });
-  await writeFile(path, (await readFile(path, 'utf8')).replaceAll('- 답:', '- 답: 1'));
+  await writeFile(path, (await readFile(path, 'utf8')).replaceAll(/^- 답:/gmu, '- 답: 1'));
   await finishJudgmentSnapshot(t.root);
   await utimes(path, new Date(now), new Date(now));
   await tick(t.root, { now: now + 1, judgmentOnly: true });

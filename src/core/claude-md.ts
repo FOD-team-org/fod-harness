@@ -25,7 +25,7 @@ function replaceBlock(text: string, block: string) {
 // Hash only configuration rendered by this block; operational timeouts are excluded.
 export function claudeMdHash(config: HarnessConfig): string {
   const visible = { verify: { commands: config.verify.commands.map(redact), heavy: config.verify.heavy.map(redact) },
-    requiresApproval: config.requiresApproval, docsRoot: config.docs.root, judgmentFile: config.judgment.file,
+    requiresApproval: config.requiresApproval, docsRoot: config.docs.root, judgmentFile: config.judgment.file, judgmentArchive: config.judgment.archive,
     route: config.delegate.route, claudeModel: config.delegate.claude.subagentModel,
     workerModel: config.delegate.codex.workerModel, enforce: config.interview.enforce };
   return createHash('sha256').update(JSON.stringify(visible)).digest('hex').slice(0, 8);
@@ -38,14 +38,14 @@ export async function generateClaudeMd(root: string, options: { check?: boolean;
     const digest = claudeMdHash(config);
     const verification = `## 검증\n일반 명령: ${JSON.stringify(config.verify.commands.map(redact))}\nheavy 명령: ${JSON.stringify(config.verify.heavy.map(redact))} — VERIFY의 \`fodh verify run --heavy\` 로만 실행.\n`;
     const restrictions = `## 금지·승인 필수\n설정 requiresApproval: ${config.requiresApproval.join(', ')}\n${approvals.map((v, i) => `${i + 1}. ${v}`).join('\n')}\n전체 테스트는 VERIFY만. codex·git worktree 직접 실행 금지. 비밀값 출력·기록 금지.\n`;
-    const docs = `## 문서 위치\n| 폴더 | 내용 |\n|---|---|\n${['설계', '위임스펙', '검수', '조사', '결정기록'].map(v => `| ${config.docs.root}/${v}/ | ${v} 문서 |`).join('\n')}\nPRD: ${config.docs.root}/PRD.md, 작업일지: ${config.docs.root}/작업일지/YYYY-MM-DD.md\n백로그: docs/backlog.md (고정), 판단대기: ${config.judgment.file}\n`;
+    const docs = `## 문서 위치\n| 폴더 | 내용 |\n|---|---|\n| ${config.judgment.file} | 판단대기: 열린 판단, 사용자만 답 |\n| ${config.judgment.archive}/ | 판단기록: 지난 판단, 하네스만 씀 |\n${['설계', '위임스펙', '검수', '조사', '결정기록'].map(v => `| ${config.docs.root}/${v}/ | ${v} 문서 |`).join('\n')}\nPRD: ${config.docs.root}/PRD.md, 작업일지: ${config.docs.root}/작업일지/YYYY-MM-DD.md\n백로그: docs/backlog.md (고정), 판단대기: ${config.judgment.file}\n`;
     const sections = [
       '하네스 두뇌 세션 전용. 위임 수행자(Codex·Claude Agent)는 위임 프롬프트를 따르고 이 흐름표의 fodh 명령을 치지 않는다.',
       `- doctor 표식: ${claudeMdMarker(config)}`,
       '이 블록은 `fodh claude-md generate` 가 관리합니다. 직접 고치지 마세요. 설정 해시: '+digest,
       `## 역할\n두뇌는 소스 파일을 쓰지 않는다. design → Claude Agent(${config.delegate.claude.subagentModel}), 그 외 → \`fodh codex task\`(${config.delegate.codex.workerModel}). 인터뷰 가드: ${config.interview.enforce}.\n| 분류 | 수행자 |\n|---|---|\n${Object.entries(config.delegate.route).map(([k,v]) => `| ${k} | ${v} |`).join('\n')}`,
       '## 하네스 흐름\n| 상태 | 다음 fodh 명령 |\n|---|---|\n| INTERVIEW | fodh interview next |\n| RESEARCH | fodh docs scaffold research-q |\n| PRD_DRAFT | fodh docs scaffold prd |\n| ARCH | fodh docs scaffold arch |\n| PLANNING | fodh docs scaffold backlog-draft |\n| PICK | fodh pick |\n| SPEC | fodh docs scaffold spec |\n| IMPLEMENT·FIX | fodh codex task |\n| VERIFY | fodh verify run |\n| REVIEW | fodh docs scaffold review |\n| MERGE·DOCS | fodh backlog set |\n| CLEANUP | fodh cleanup run |\n| RECLAIM | fodh reclaim |\n| WAIT_JUDGMENT | fodh judgment apply |\n| recovering | fodh ledger list |\n턴 끝: `대기: 사용자`, `대기: 위임 <runId>`(마지막 비어 있지 않은 3줄 안), 마지막 줄 `상태: …`. 멈춤 상태에서는 조건 해소 전 새 작업을 시작하지 않는다.',
-      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
+      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset' || c.group === 'judgment' && c.action === 'migrate')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
       '## 백로그\n분류: design, non-design, docs, research. 상태: ready, doing, verify, review, fix, merge, done, blocked(A번호).\nDoD 6항: verify.ok, review.high=0, review.commit, merge.commit, docs.ok, cleanup.ok. 상태·증거는 CLI로만 쓴다.',
       verification, restrictions, docs,
       '## 설치된 하네스 스킬\n'+(installed.join(', ') || '없음'),
