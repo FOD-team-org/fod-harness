@@ -82,10 +82,10 @@ describe('프로바이더 실물 픽스처', () => {
     expect(next).toContain('둘째 사실'); expect(next).not.toContain('첫 사실'); expect(next).not.toContain('셋째 사실');
     expect((await listInbox(root)).map(item => item.status)).toEqual(['applied','delivered','applied']);
   });
-  it.each(['overage', 'overage-status'])('과금 %s 감지 시 중단·billing·알림 1회', async scenario => {
+  it.each(['overage', 'overage-status'])('사용량 %s는 계속 진행하고 과금 일시정지·알림 없이 기록', async scenario => {
     const root = await project(); const notices: string[] = [];
-    expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, scenario), notify: message => { notices.push(message); } })).toMatchObject({ reason: 'aborted', classification: 'billing' });
-    expect((await readState(root)).state).toBe('paused(billing)'); expect(notices).toHaveLength(1);
+    expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, scenario), notify: message => { notices.push(message); } })).toMatchObject({ reason: 'stop' });
+    expect((await readState(root)).state).not.toBe('paused(billing)'); expect(notices).toHaveLength(0);
     expect((await readState(root)).rateLimitInfo).toBeTruthy();
   });
   it('가짜 두뇌가 PATH로 fodh inbox ack 및 state get을 실행하고 인박스를 applied로 바꾼다', async () => {
@@ -102,19 +102,19 @@ describe('프로바이더 실물 픽스처', () => {
     expect(calls[0]).toMatchObject({ ids, ack: ids.map(id => ({ id, status: 'applied' })), state: { state: 'IDLE' } });
     expect(await buildPrompt(root, '다음 턴', randomUUID())).not.toContain('[인박스 ');
   });
-  it.each(['rate-limited', 'stderr-limit', 'rate-limited-text', 'rate-rejected'])('%s: switch 1회·재시도 1회 후 quota', async scenario => {
+  it.each(['rate-limited', 'stderr-limit', 'rate-limited-text', 'rate-rejected'])('%s: 전환·즉시 재시도 없이 quota', async scenario => {
     const root = await project();
     expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, scenario) })).toMatchObject({ reason: 'error', classification: 'quota' });
     expect((await readState(root)).state).toBe('paused(quota)');
-    expect(await records(root, 'fake-switch.jsonl')).toHaveLength(1); expect(await records(root, 'fake-calls.jsonl')).toHaveLength(2);
+    await expect(readFile(join(root, '.pi/fake-switch.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' }); expect(await records(root, 'fake-calls.jsonl')).toHaveLength(1);
     expect(await unknownEntries(root)).toHaveLength(0);
   });
-  it('이전 run unknown은 복구 안내에만 포함하고 이번 quota 전환을 허용', async () => {
+  it('이전 run unknown은 복구 안내에만 포함하고 이번 quota는 전환 없이 일시정지', async () => {
     const root = await project(); await appendLedger(root, { runId: '이전실행', action: 'side-effect', status: 'pre' });
     expect(await runTurn('진행', { root, model: 'haiku', env: environment(root, 'rate-limited') })).toMatchObject({ classification: 'quota' });
     expect((await readState(root)).state).toBe('paused(quota)');
-    expect(await records(root, 'fake-calls.jsonl')).toHaveLength(2);
-    expect(await records(root, 'fake-switch.jsonl')).toHaveLength(1);
+    expect(await records(root, 'fake-calls.jsonl')).toHaveLength(1);
+    await expect(readFile(join(root, '.pi/fake-switch.jsonl'))).rejects.toMatchObject({ code: 'ENOENT' });
     const prompt = (await records(root, 'fake-calls.jsonl'))[0].prompt;
     expect(prompt).toContain('이전실행'); expect(prompt).toContain('side-effect');
     expect(prompt).toContain('fodh ledger resolve');
@@ -141,7 +141,7 @@ describe('프로바이더 실물 픽스처', () => {
   });
   it('과금 알림 실패도 billing 상태를 유지', async () => {
     const root = await project();
-    expect(await runTurn('과금', { root, model: 'haiku', env: environment(root, 'overage'), notify: async () => { throw new Error('알림 실패'); } })).toMatchObject({ classification: 'billing' });
+    expect(await runTurn('과금', { root, model: 'haiku', env: environment(root, 'api-key'), notify: async () => { throw new Error('알림 실패'); } })).toMatchObject({ classification: 'billing' });
     expect((await readState(root)).state).toBe('paused(billing)');
   });
   it('사용자 abort도 그룹을 회수', async () => {

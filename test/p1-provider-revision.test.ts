@@ -81,12 +81,12 @@ it('M8: 프로젝트 훅 denial은 항목만 생성하고 프로젝트 상태를
   expect((await readState(root)).taskId).toBeUndefined();
   expect((await readLedger(root)).some(entry => entry.action.includes('RECLAIM'))).toBe(false);
 });
-it('H2: denial 없는 quota의 전환 재시도 소진은 taskId와 IMPLEMENT 재개 상태를 보존한다', async () => {
+it('H2: denial 없는 quota는 전환 없이 taskId와 IMPLEMENT 재개 상태를 보존한다', async () => {
   const { root, task } = await activeTask(); emulate([init, { ...done, is_error: true, result: 'usage limit reached' }]);
   expect(await runTurn('진행', options(root))).toMatchObject({ reason: 'error', classification: 'quota' });
   expect(await readState(root)).toMatchObject({ state: 'paused(quota)', taskId: task.id, resumeState: 'IMPLEMENT', lastPaused: 'quota' });
   expect((await getTask(root, task.id)).status).toBe('doing'); expect((await readJudgment(root)).items).toHaveLength(0);
-  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(1);
+  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(0);
 });
 it('H2: deadline 복구는 taskId와 IMPLEMENT 재개 상태 및 unknown 원장을 보존한다', async () => {
   const { root, task } = await activeTask(); emulate([init], { code: null, abortKind: 'deadline' });

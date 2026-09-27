@@ -101,276 +101,262 @@ async function executeTurn(latest: string, options: TurnOptions, display: TurnDi
     const initial = await readState(root);
     const prompt = options.doctor ? latest : await buildPrompt(root, latest, runId);
     const sessionId = options.doctor ? randomUUID() : initial.sessionId ?? randomUUID();
-    let resume = !options.doctor && !!initial.sessionId;
+    const resume = !options.doctor && !!initial.sessionId;
     const suppliedEnv = options.env ?? process.env;
     const env = { ...suppliedEnv, BASH_DEFAULT_TIMEOUT_MS: suppliedEnv.BASH_DEFAULT_TIMEOUT_MS ?? '600000',
       BASH_MAX_TIMEOUT_MS: suppliedEnv.BASH_MAX_TIMEOUT_MS ?? '600000', FODH_PACKAGE_ROOT: packageRoot, FODH_PROJECT_ROOT: root, FODH_BRAIN: '1', FODH_DOCS_ROOT: config.docs.root,
       FODH_PROTECTED_EXTRA: [config.interview.extraBankFile, config.docs.overrideDir].join(':') };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      reportText = '';
-      stateAtBrainExit = undefined;
-      const action = `brain:${attempt}`;
-      const brainTurn = { runId, startedAt: new Date().toISOString() };
-      let init: TurnResult['init'];
-      let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
-      let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
-      const toolInputs = new Map<string, { tool_name: string; tool_input: unknown }>();
-      const denials = new Map<string, any>();
-      const displayedDenialIds = new Map<string, string>();
-      const displayDenial = (denial: any, line?: string, toolUseId?: string) => {
-        const key = canonical({ tool: canonicalTool(denial.tool_name), input: denial.tool_input });
-        const id = toolUseId ?? denial.tool_use_id ?? displayedDenialIds.get(key) ?? `input:${key}`;
-        displayedDenialIds.set(key, id);
-        display.denial(id, line);
-      };
-      type DenialKind = 'approval' | 'boundary' | 'guard' | 'unknown';
-      const rememberDenial = (denial: any, kind: DenialKind = 'unknown', toolUseId?: string) => {
-        const safe = safeValue(denial), key = canonical({ tool: canonicalTool(safe.tool_name), input: safe.tool_input });
-        const previous = denials.get(key);
-        denials.set(key, { ...safe, kind: kind === 'unknown' ? previous?.kind ?? kind : kind,
-          tool_use_id: toolUseId ?? previous?.tool_use_id ?? safe.tool_use_id ?? `result-${denials.size}` });
-      };
-      const persistDenials = async () => {
-        if (options.doctor) return;
-        const state = await readState(root);
-        let firstId: string | undefined;
-        for (const [key, safe] of denials) {
-          const action = safe.kind === 'approval' ? `hook:${attempt}:${safe.tool_use_id}`
-            : `hook:${safe.kind}:${attempt}:${safe.tool_use_id}`;
-          await appendLedger(root, { runId, action, status: 'ok', evidence: safeValue(safe) });
-          if (safe.kind === 'unknown' && !unclassifiedLogged) {
-            await appendLedger(root, { runId, action: 'hook:unclassified', status: 'warn' });
-            unclassifiedLogged = true;
-          }
-          if (safe.kind !== 'approval') continue;
-          const dedupeKey = createHash('sha256').update(key).digest('hex');
-          const { item } = await addJudgment(root, {
-            title: `${safe.tool_name}: ${safe.tool_input?.command ?? JSON.stringify(safe.tool_input)}`,
-            background: 'Claude Code 훅이 실행을 거부했습니다. 승인이 필요한지 판단하세요.',
-            options: ['해당 동작 승인', '보류'], recommend: '승인 범위를 확인한 뒤 결정',
-            blocks: state.taskId ?? '', dedupeKey: `${dedupeKey}:${state.taskId ?? ''}`, requiresApproval: true,
-          });
-          firstId ??= item.id;
+    const attempt = 0;
+    reportText = '';
+    stateAtBrainExit = undefined;
+    const action = `brain:${attempt}`;
+    const brainTurn = { runId, startedAt: new Date().toISOString() };
+    let init: TurnResult['init'];
+    let result: Record<string, any> | undefined, initialized = false, toolSeen = false;
+    let partialText = false, lastPersisted = 0, lastEventAt: string | undefined;
+    const toolInputs = new Map<string, { tool_name: string; tool_input: unknown }>();
+    const denials = new Map<string, any>();
+    const displayedDenialIds = new Map<string, string>();
+    const displayDenial = (denial: any, line?: string, toolUseId?: string) => {
+      const key = canonical({ tool: canonicalTool(denial.tool_name), input: denial.tool_input });
+      const id = toolUseId ?? denial.tool_use_id ?? displayedDenialIds.get(key) ?? `input:${key}`;
+      displayedDenialIds.set(key, id);
+      display.denial(id, line);
+    };
+    type DenialKind = 'approval' | 'boundary' | 'guard' | 'unknown';
+    const rememberDenial = (denial: any, kind: DenialKind = 'unknown', toolUseId?: string) => {
+      const safe = safeValue(denial), key = canonical({ tool: canonicalTool(safe.tool_name), input: safe.tool_input });
+      const previous = denials.get(key);
+      denials.set(key, { ...safe, kind: kind === 'unknown' ? previous?.kind ?? kind : kind,
+        tool_use_id: toolUseId ?? previous?.tool_use_id ?? safe.tool_use_id ?? `result-${denials.size}` });
+    };
+    const persistDenials = async () => {
+      if (options.doctor) return;
+      const state = await readState(root);
+      let firstId: string | undefined;
+      for (const [key, safe] of denials) {
+        const action = safe.kind === 'approval' ? `hook:${attempt}:${safe.tool_use_id}`
+          : `hook:${safe.kind}:${attempt}:${safe.tool_use_id}`;
+        await appendLedger(root, { runId, action, status: 'ok', evidence: safeValue(safe) });
+        if (safe.kind === 'unknown' && !unclassifiedLogged) {
+          await appendLedger(root, { runId, action: 'hook:unclassified', status: 'warn' });
+          unclassifiedLogged = true;
         }
-        if (state.taskId && firstId) {
-          await reclaimTask(root, state.taskId, firstId, { suspended: true });
-          if (state.state === 'paused(billing)') await patchState({ state: 'paused(billing)' });
-        }
-      };
-      pendingDenials.push(persistDenials);
-      const text = (value: string) => display.text(value);
-      let outcome: ProcessResult;
-      turnsInProgress.add(resolve(root));
-      try {
-        await beginJudgmentSnapshot(root, brainTurn);
-        await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
-        outcome = await runProcess({ root, command: config.brain.command,
-          args: claudeArgs(root, model, sessionId, resume, options.doctor, config.brain.allowPlugins),
-          input: prompt, runId, maxMs: turnDeadlineMs(config.brain.maxTurnMinutes, options.doctor), env, signal: options.signal,
-          onEvent: async event => {
-            display.observe(event);
-            const child = !!event.parent_tool_use_id;
-            const parentText = (value: string) => child ? value.replace(/^/gmu, '↳ ') : value;
-            lastEventAt = new Date().toISOString();
-            if (Date.now() - lastPersisted >= 5000) {
-              await patchState({ lastEventAt, runId }); lastPersisted = Date.now();
-            }
-            if (event.type === 'system' && event.subtype === 'init') {
-              const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
-              init = { plugins: Array.isArray(event.plugins) ? event.plugins.flatMap((plugin: unknown) => plugin && typeof plugin === 'object' && 'source' in plugin && typeof plugin.source === 'string' ? [plugin.source] : []) : [],
-                agents: strings(event.agents), commands: strings(event.slash_commands), skills: strings(event.skills), memory_paths: strings(event.memory_paths && !Array.isArray(event.memory_paths) && typeof event.memory_paths === 'object' ? Object.values(event.memory_paths) : event.memory_paths) };
-              const evidence = safeValue({
-                session_id: event.session_id, model: event.model, permissionMode: event.permissionMode,
-                skills: init.skills, plugins: init.plugins.length, agents: init.agents.length, commands: init.commands.length, memory_paths: event.memory_paths, apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
-              });
-              await appendLedger(root, { runId, action: `system.init:${attempt}`, status: 'ok', evidence });
-              if (event.apiKeySource !== 'none') return 'billing';
-              const requestedModel = model;
-              if (typeof event.model !== 'string' || !matchesModel(requestedModel, event.model)
-                || !options.doctor && !config.brain.allowedModels.some(entry => matchesModel(entry, event.model))) {
-                await appendLedger(root, { runId, action: 'brain:model-rejected', status: 'fail',
-                  evidence: { requested: requestedModel, actual: event.model, allowed: config.brain.allowedModels } });
-                return 'configError';
-              }
-              if (event.permissionMode !== 'bypassPermissions' || event.session_id !== sessionId) return 'configError';
-              initialized = true;
-              if (!options.doctor) await patchState(current => ({
-                sessionId, actualModel: event.model, brain: {
-                  ...(current.brain as Record<string, unknown> | undefined), model,
-                },
-              }));
-            } else if (event.type === 'rate_limit_event') {
-              const info = event.rate_limit_info;
-              await patchState({ rateLimitInfo: safeValue(info ?? {}) });
-              const verdict = rateLimitVerdict(info);
-              if (verdict !== 'continue') return verdict;
-            } else if (event.type === 'stream_event') {
-              if (!child && event.event?.type === 'message_start') { partialText = false; reportText = ''; }
-              if (event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') {
-                if (!child) { reportText += event.event.delta.text; partialText = true; }
-                text(parentText(event.event.delta.text));
-              }
-            } else if (event.type === 'assistant') {
-              if (!child) reportText = (event.message?.content ?? []).filter((block: any) => block.type === 'text')
-                .map((block: any) => block.text).join('\n');
-              for (const block of event.message?.content ?? []) {
-                if (block.type === 'tool_use') {
-                  toolSeen = true; toolInputs.set(block.id, { tool_name: block.name, tool_input: block.input });
-                  text(toolBlock(parentText(`[tool] ${block.name}: ${JSON.stringify(block.input)}`)));
-                }
-                if (block.type === 'text' && (child || !partialText)) text(parentText(block.text));
-              }
-            } else if (event.type === 'user') {
-              for (const block of event.message?.content ?? []) if (block.type === 'tool_result') {
-                const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
-                const visible = redact(content);
-                const suffix = visible.length > 400 ? `… (${visible.length - 400}자 생략)` : '';
-                text(toolBlock(parentText(`[도구 결과] ${visible.slice(0, 400)}${suffix}`)));
-                await appendLedger(root, {
-                  runId, action: `tool_result:${attempt}:${block.tool_use_id}`, status: 'ok',
-                  evidence: { tool_use_id: block.tool_use_id, is_error: !!block.is_error,
-                    length: content.length, sha256: createHash('sha256').update(content).digest('hex') },
-                });
-                if (block.is_error && /hook error|PreToolUse/i.test(content)) {
-                  const label = /\[(승인|경계|보호)\]/u.exec(content)?.[1];
-                  const kind: DenialKind = label === '승인' ? 'approval' : label === '경계' ? 'boundary' : label === '보호' ? 'guard' : 'unknown';
-                  const message = {
-                    approval: '승인 필요: 판단대기 항목을 확인하세요.',
-                    boundary: '경계: 같은 동작을 다시 시도하지 말고 위임(fodh codex task / Claude Agent)으로 바꾸세요.',
-                    guard: '보호: 이 동작은 포기하세요.', unknown: '분류 없음: 원장을 확인하세요.',
-                  }[kind];
-                  const notice = `${HOOK_DENIAL_PREFIX}${message}`;
-                  const denial = toolInputs.get(block.tool_use_id);
-                  displayDenial(denial ?? {}, display.mode === 'full' ? parentText(notice) : notice, block.tool_use_id);
-                  if (denial) rememberDenial(denial, kind, block.tool_use_id);
-                  if (options.doctor) await appendLedger(root, { runId, action: `hook:${attempt}:${block.tool_use_id}`, status: 'ok',
-                    evidence: safeValue({ tool_use_id: block.tool_use_id, ...denial, kind }) });
-                }
-              }
-            } else if (event.type === 'result') {
-              result = event;
-              if (typeof event.result === 'string') reportText = event.result;
-              await appendLedger(root, { runId, action: `result:${attempt}`, status: event.is_error ? 'fail' : 'ok', evidence: safeValue({
-                model: (await readState(root)).actualModel, stop_reason: event.stop_reason, terminal_reason: event.terminal_reason,
-                is_error: event.is_error, api_error_status: event.api_error_status, permission_denials: event.permission_denials ?? [],
-                usage: event.usage,
-              }) });
-              for (const denial of event.permission_denials ?? []) {
-                const known = denials.has(canonical(safeValue({ tool: canonicalTool(denial.tool_name), input: denial.tool_input })));
-                displayDenial(denial, known ? undefined : `${HOOK_DENIAL_PREFIX}분류 없음: 원장을 확인하세요.`);
-                rememberDenial(denial);
-              }
-            }
-          },
+        if (safe.kind !== 'approval') continue;
+        const dedupeKey = createHash('sha256').update(key).digest('hex');
+        const { item } = await addJudgment(root, {
+          title: `${safe.tool_name}: ${safe.tool_input?.command ?? JSON.stringify(safe.tool_input)}`,
+          background: 'Claude Code 훅이 실행을 거부했습니다. 승인이 필요한지 판단하세요.',
+          options: ['해당 동작 승인', '보류'], recommend: '승인 범위를 확인한 뒤 결정',
+          blocks: state.taskId ?? '', dedupeKey: `${dedupeKey}:${state.taskId ?? ''}`, requiresApproval: true,
         });
-      } finally {
-        try { stateAtBrainExit = (await readState(root)).state; } catch { /* Fall back to current state at report time. */ }
-        try { await finishJudgmentSnapshot(root); }
-        catch (error) {
-          try { await appendLedger(root, { runId, action: 'judgment:snapshot-finish', status: 'fail',
-            evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
-          catch { /* Preserve the runner result even when diagnostic storage fails. */ }
-          turnsInProgress.delete(resolve(root));
-          try { await recoverJudgmentSnapshot(root); }
-          catch {
-            // A failed comparison must not leave the completed turn active indefinitely.
-            await updateState(root, current => current.brainTurn?.runId === runId && !current.brainTurn.endedAt
-              ? { brainTurn: { ...current.brainTurn, endedAt: new Date().toISOString() } } : {});
+        firstId ??= item.id;
+      }
+      if (state.taskId && firstId) {
+        await reclaimTask(root, state.taskId, firstId, { suspended: true });
+        if (state.state === 'paused(billing)') await patchState({ state: 'paused(billing)' });
+      }
+    };
+    pendingDenials.push(persistDenials);
+    const text = (value: string) => display.text(value);
+    let outcome: ProcessResult;
+    turnsInProgress.add(resolve(root));
+    try {
+      await beginJudgmentSnapshot(root, brainTurn);
+      await appendLedger(root, { runId, action, status: 'pre', taskId: initial.taskId, state: initial.state });
+      outcome = await runProcess({ root, command: config.brain.command,
+        args: claudeArgs(root, model, sessionId, resume, options.doctor, config.brain.allowPlugins),
+        input: prompt, runId, maxMs: turnDeadlineMs(config.brain.maxTurnMinutes, options.doctor), env, signal: options.signal,
+        onEvent: async event => {
+          display.observe(event);
+          const child = !!event.parent_tool_use_id;
+          const parentText = (value: string) => child ? value.replace(/^/gmu, '↳ ') : value;
+          lastEventAt = new Date().toISOString();
+          if (Date.now() - lastPersisted >= 5000) {
+            await patchState({ lastEventAt, runId }); lastPersisted = Date.now();
           }
-        }
-        if (lastEventAt) await patchState({ lastEventAt, runId });
-      }
-      if (!options.doctor) {
-        const suspicious = new Set<string>();
-        const worktrees = (await readState(root)).worktrees ?? [];
-        for (const tool of toolInputs.values()) {
-          if (denials.has(canonical(safeValue({ tool: canonicalTool(tool.tool_name), input: tool.tool_input })))) continue;
-          const audit = auditPathReport(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
-            root, docsRoot: config.docs.root, worktrees, ...(members ? { members } : {}),
-          });
-          for (const path of audit.boundary) suspicious.add(redact(path));
-          for (const raw of audit.unresolved) {
-            const path = redact(raw);
-            if (turnUnresolved.has(path)) continue;
-            turnUnresolved.add(path);
-            await appendLedger(root, { runId, action: 'audit:path-unresolved', status: 'info', evidence: { path } });
+          if (event.type === 'system' && event.subtype === 'init') {
+            const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+            init = { plugins: Array.isArray(event.plugins) ? event.plugins.flatMap((plugin: unknown) => plugin && typeof plugin === 'object' && 'source' in plugin && typeof plugin.source === 'string' ? [plugin.source] : []) : [],
+              agents: strings(event.agents), commands: strings(event.slash_commands), skills: strings(event.skills), memory_paths: strings(event.memory_paths && !Array.isArray(event.memory_paths) && typeof event.memory_paths === 'object' ? Object.values(event.memory_paths) : event.memory_paths) };
+            const evidence = safeValue({
+              session_id: event.session_id, model: event.model, permissionMode: event.permissionMode,
+              skills: init.skills, plugins: init.plugins.length, agents: init.agents.length, commands: init.commands.length, memory_paths: event.memory_paths, apiKeySource: event.apiKeySource, tools: event.tools, mcp_servers: event.mcp_servers,
+            });
+            await appendLedger(root, { runId, action: `system.init:${attempt}`, status: 'ok', evidence });
+            if (event.apiKeySource !== 'none') return 'billing';
+            const requestedModel = model;
+            if (typeof event.model !== 'string' || !matchesModel(requestedModel, event.model)
+              || !options.doctor && !config.brain.allowedModels.some(entry => matchesModel(entry, event.model))) {
+              await appendLedger(root, { runId, action: 'brain:model-rejected', status: 'fail',
+                evidence: { requested: requestedModel, actual: event.model, allowed: config.brain.allowedModels } });
+              return 'configError';
+            }
+            if (event.permissionMode !== 'bypassPermissions' || event.session_id !== sessionId) return 'configError';
+            initialized = true;
+            if (!options.doctor) await patchState(current => ({
+              sessionId, actualModel: event.model, brain: {
+                ...(current.brain as Record<string, unknown> | undefined), model,
+              },
+            }));
+          } else if (event.type === 'rate_limit_event') {
+            const info = event.rate_limit_info;
+            await patchState({ rateLimitInfo: safeValue(info ?? {}) });
+            const verdict = rateLimitVerdict(info);
+            if (verdict !== 'continue') return verdict;
+          } else if (event.type === 'stream_event') {
+            if (!child && event.event?.type === 'message_start') { partialText = false; reportText = ''; }
+            if (event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') {
+              if (!child) { reportText += event.event.delta.text; partialText = true; }
+              text(parentText(event.event.delta.text));
+            }
+          } else if (event.type === 'assistant') {
+            if (!child) reportText = (event.message?.content ?? []).filter((block: any) => block.type === 'text')
+              .map((block: any) => block.text).join('\n');
+            for (const block of event.message?.content ?? []) {
+              if (block.type === 'tool_use') {
+                toolSeen = true; toolInputs.set(block.id, { tool_name: block.name, tool_input: block.input });
+                text(toolBlock(parentText(`[tool] ${block.name}: ${JSON.stringify(block.input)}`)));
+              }
+              if (block.type === 'text' && (child || !partialText)) text(parentText(block.text));
+            }
+          } else if (event.type === 'user') {
+            for (const block of event.message?.content ?? []) if (block.type === 'tool_result') {
+              const content = typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? '');
+              const visible = redact(content);
+              const suffix = visible.length > 400 ? `… (${visible.length - 400}자 생략)` : '';
+              text(toolBlock(parentText(`[도구 결과] ${visible.slice(0, 400)}${suffix}`)));
+              await appendLedger(root, {
+                runId, action: `tool_result:${attempt}:${block.tool_use_id}`, status: 'ok',
+                evidence: { tool_use_id: block.tool_use_id, is_error: !!block.is_error,
+                  length: content.length, sha256: createHash('sha256').update(content).digest('hex') },
+              });
+              if (block.is_error && /hook error|PreToolUse/i.test(content)) {
+                const label = /\[(승인|경계|보호)\]/u.exec(content)?.[1];
+                const kind: DenialKind = label === '승인' ? 'approval' : label === '경계' ? 'boundary' : label === '보호' ? 'guard' : 'unknown';
+                const message = {
+                  approval: '승인 필요: 판단대기 항목을 확인하세요.',
+                  boundary: '경계: 같은 동작을 다시 시도하지 말고 위임(fodh codex task / Claude Agent)으로 바꾸세요.',
+                  guard: '보호: 이 동작은 포기하세요.', unknown: '분류 없음: 원장을 확인하세요.',
+                }[kind];
+                const notice = `${HOOK_DENIAL_PREFIX}${message}`;
+                const denial = toolInputs.get(block.tool_use_id);
+                displayDenial(denial ?? {}, display.mode === 'full' ? parentText(notice) : notice, block.tool_use_id);
+                if (denial) rememberDenial(denial, kind, block.tool_use_id);
+                if (options.doctor) await appendLedger(root, { runId, action: `hook:${attempt}:${block.tool_use_id}`, status: 'ok',
+                  evidence: safeValue({ tool_use_id: block.tool_use_id, ...denial, kind }) });
+              }
+            }
+          } else if (event.type === 'result') {
+            result = event;
+            if (typeof event.result === 'string') reportText = event.result;
+            await appendLedger(root, { runId, action: `result:${attempt}`, status: event.is_error ? 'fail' : 'ok', evidence: safeValue({
+              model: (await readState(root)).actualModel, stop_reason: event.stop_reason, terminal_reason: event.terminal_reason,
+              is_error: event.is_error, api_error_status: event.api_error_status, permission_denials: event.permission_denials ?? [],
+              usage: event.usage,
+            }) });
+            for (const denial of event.permission_denials ?? []) {
+              const known = denials.has(canonical(safeValue({ tool: canonicalTool(denial.tool_name), input: denial.tool_input })));
+              displayDenial(denial, known ? undefined : `${HOOK_DENIAL_PREFIX}분류 없음: 원장을 확인하세요.`);
+              rememberDenial(denial);
+            }
           }
+        },
+      });
+    } finally {
+      try { stateAtBrainExit = (await readState(root)).state; } catch { /* Fall back to current state at report time. */ }
+      try { await finishJudgmentSnapshot(root); }
+      catch (error) {
+        try { await appendLedger(root, { runId, action: 'judgment:snapshot-finish', status: 'fail',
+          evidence: { error: redact(error instanceof Error ? error.message : String(error)).slice(0, 200) } }); }
+        catch { /* Preserve the runner result even when diagnostic storage fails. */ }
+        turnsInProgress.delete(resolve(root));
+        try { await recoverJudgmentSnapshot(root); }
+        catch {
+          // A failed comparison must not leave the completed turn active indefinitely.
+          await updateState(root, current => current.brainTurn?.runId === runId && !current.brainTurn.endedAt
+            ? { brainTurn: { ...current.brainTurn, endedAt: new Date().toISOString() } } : {});
         }
-        for (const path of suspicious) {
-          if (turnSuspicions.has(path)) continue;
-          turnSuspicions.add(path);
-          await appendLedger(root, { runId, action: 'audit:path-boundary', status: 'warn', evidence: { path } });
-        }
       }
-      const configError = outcome.abortKind === 'configError'
-        || /requires --verbose|unknown (?:option|model)|invalid (?:settings|model)/i.test(outcome.stderr);
-      const quota = outcome.abortKind === 'quota' || result?.api_error_status === 429
-        || !!(result?.is_error && /(rate|usage) limit|limit reached|out of (?:extra )?usage|resets? at/i.test(result.result ?? ''))
-        || /rate limit|usage limit/i.test(outcome.stderr);
-      const uncertain = !outcome.cleaned || (!result && (toolSeen
-        || (!!outcome.abortKind && outcome.abortKind !== 'quota') || !configError && !quota));
-      await appendLedger(root, { runId, action,
-        status: uncertain ? 'unknown' : result?.is_error || outcome.code !== 0 || configError ? 'fail' : 'ok',
-        evidence: { code: outcome.code, abortKind: outcome.abortKind, cleaned: outcome.cleaned } });
-      if (outcome.abortKind === 'billing') {
-        await patchState({ state: 'paused(billing)' });
-        try { await options.notify?.('추가 사용 과금 가능성을 감지하여 두뇌를 중단했습니다.'); }
-        catch { await appendLedger(root, { runId, action: 'billing-notify', status: 'fail', evidence: { reason: '알림 콜백 실패' } }); }
-        return { reason: 'aborted', classification: 'billing', runId };
-      }
-      if (!outcome.cleaned) {
-        await patchState({ state: 'recovering' });
-        return { reason: 'error', classification: 'cleanupFailed', runId };
-      }
-      if (configError) {
-        await patchState({ state: 'paused(error)' });
-        return { reason: 'error', classification: 'configError', runId };
-      }
-      if (outcome.abortKind && outcome.abortKind !== 'quota') {
-        await patchState({ state: 'recovering' });
-        return { reason: outcome.abortKind === 'protocolError' ? 'error' : 'aborted', classification: outcome.abortKind, runId };
-      }
-      if (quota) {
-        if (options.doctor) return { reason: 'error', classification: 'configError: quota', runId };
-        if ((await unknownEntries(root)).some(entry => entry.runId === runId)) {
-          await patchState({ state: 'recovering' });
-          return { reason: 'error', classification: 'unknown', runId };
-        }
-        if (attempt === 0) {
-          await appendLedger(root, { runId, action: 'switch', status: 'pre' });
-          const switched = await runProcess({ root, command: config.brain.switchCommand, runId, kind: 'switch',
-            maxMs: Math.min(60000, config.brain.maxTurnMinutes * 60000), env, signal: options.signal });
-          await appendLedger(root, { runId, action: 'switch',
-            status: switched.abortKind || !switched.cleaned ? 'unknown' : switched.code === 0 ? 'ok' : 'fail' });
-          if (switched.abortKind || !switched.cleaned) {
-            await patchState({ state: 'recovering' });
-            return { reason: 'aborted', classification: 'switchAborted', runId };
-          }
-          if (switched.code === 0) { resume = initialized || resume; continue; }
-        }
-        await patchState({ state: 'paused(quota)' });
-        return { reason: 'error', classification: 'quota', runId };
-      }
-      if (options.doctor) {
-        const markerDenied = [...denials.values()].some(denial => denial.tool_name === 'Bash'
-          && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
-        const pathDenied = [...denials.values()].some(denial => denial.tool_name === 'Write'
-          && typeof denial.tool_input?.file_path === 'string'
-          && resolve(root, denial.tool_input.file_path) === resolve(root, 'src/FODH_DOCTOR_MARKER.ts'));
-        if (!initialized || !markerDenied || !pathDenied) return { reason: 'error', classification: 'configError', runId };
-        return { reason: 'stop', ...lastCallUsage(result ?? {}), runId, init, hookDenials: 2 };
-      }
-      if (!initialized || !result || outcome.code !== 0 || result.is_error) {
-        await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });
-        return { reason: 'error', classification: 'processError', runId };
-      }
-      const current = await readState(root);
-      if (current.awaitingSlot && !current.delegation && activeStates.has(current.state) && current.state !== 'recovering') {
-        await patchState({ state: 'paused(slot)' });
-      }
-      return { reason: 'stop', ...lastCallUsage(result), runId };
+      if (lastEventAt) await patchState({ lastEventAt, runId });
     }
-    return { reason: 'error', classification: 'quota', runId };
+    if (!options.doctor) {
+      const suspicious = new Set<string>();
+      const worktrees = (await readState(root)).worktrees ?? [];
+      for (const tool of toolInputs.values()) {
+        if (denials.has(canonical(safeValue({ tool: canonicalTool(tool.tool_name), input: tool.tool_input })))) continue;
+        const audit = auditPathReport(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
+          root, docsRoot: config.docs.root, worktrees, ...(members ? { members } : {}),
+        });
+        for (const path of audit.boundary) suspicious.add(redact(path));
+        for (const raw of audit.unresolved) {
+          const path = redact(raw);
+          if (turnUnresolved.has(path)) continue;
+          turnUnresolved.add(path);
+          await appendLedger(root, { runId, action: 'audit:path-unresolved', status: 'info', evidence: { path } });
+        }
+      }
+      for (const path of suspicious) {
+        if (turnSuspicions.has(path)) continue;
+        turnSuspicions.add(path);
+        await appendLedger(root, { runId, action: 'audit:path-boundary', status: 'warn', evidence: { path } });
+      }
+    }
+    const configError = outcome.abortKind === 'configError'
+      || /requires --verbose|unknown (?:option|model)|invalid (?:settings|model)/i.test(outcome.stderr);
+    const quota = outcome.abortKind === 'quota' || result?.api_error_status === 429
+      || !!(result?.is_error && /(rate|usage) limit|limit reached|out of (?:extra )?usage|resets? at/i.test(result.result ?? ''))
+      || /rate limit|usage limit/i.test(outcome.stderr);
+    const uncertain = !outcome.cleaned || (!result && (toolSeen
+      || (!!outcome.abortKind && outcome.abortKind !== 'quota') || !configError && !quota));
+    await appendLedger(root, { runId, action,
+      status: uncertain ? 'unknown' : result?.is_error || outcome.code !== 0 || configError ? 'fail' : 'ok',
+      evidence: { code: outcome.code, abortKind: outcome.abortKind, cleaned: outcome.cleaned } });
+    if (outcome.abortKind === 'billing') {
+      await patchState({ state: 'paused(billing)' });
+      try { await options.notify?.('API 키 과금 경로를 감지해 두뇌를 멈췄습니다. 구독 로그인으로 실행되는지 확인하세요(apiKeySource).'); }
+      catch { await appendLedger(root, { runId, action: 'billing-notify', status: 'fail', evidence: { reason: '알림 콜백 실패' } }); }
+      return { reason: 'aborted', classification: 'billing', runId };
+    }
+    if (!outcome.cleaned) {
+      await patchState({ state: 'recovering' });
+      return { reason: 'error', classification: 'cleanupFailed', runId };
+    }
+    if (configError) {
+      await patchState({ state: 'paused(error)' });
+      return { reason: 'error', classification: 'configError', runId };
+    }
+    if (outcome.abortKind && outcome.abortKind !== 'quota') {
+      await patchState({ state: 'recovering' });
+      return { reason: outcome.abortKind === 'protocolError' ? 'error' : 'aborted', classification: outcome.abortKind, runId };
+    }
+    if (quota) {
+      if (options.doctor) return { reason: 'error', classification: 'configError: quota', runId };
+      if ((await unknownEntries(root)).some(entry => entry.runId === runId)) {
+        await patchState({ state: 'recovering' });
+        return { reason: 'error', classification: 'unknown', runId };
+      }
+      await patchState({ state: 'paused(quota)' });
+      return { reason: 'error', classification: 'quota', runId };
+    }
+    if (options.doctor) {
+      const markerDenied = [...denials.values()].some(denial => denial.tool_name === 'Bash'
+        && typeof denial.tool_input?.command === 'string' && denial.tool_input.command.includes('FODH_DOCTOR_MARKER'));
+      const pathDenied = [...denials.values()].some(denial => denial.tool_name === 'Write'
+        && typeof denial.tool_input?.file_path === 'string'
+        && resolve(root, denial.tool_input.file_path) === resolve(root, 'src/FODH_DOCTOR_MARKER.ts'));
+      if (!initialized || !markerDenied || !pathDenied) return { reason: 'error', classification: 'configError', runId };
+      return { reason: 'stop', ...lastCallUsage(result ?? {}), runId, init, hookDenials: 2 };
+    }
+    if (!initialized || !result || outcome.code !== 0 || result.is_error) {
+      await patchState({ state: uncertain ? 'recovering' : 'paused(error)' });
+      return { reason: 'error', classification: 'processError', runId };
+    }
+    const current = await readState(root);
+    if (current.awaitingSlot && !current.delegation && activeStates.has(current.state) && current.state !== 'recovering') {
+      await patchState({ state: 'paused(slot)' });
+    }
+    return { reason: 'stop', ...lastCallUsage(result), runId };
   } catch (error) {
     if ((await readState(root)).state !== 'paused(billing)'
       && (await unknownEntries(root)).some(entry => entry.runId === runId)) {

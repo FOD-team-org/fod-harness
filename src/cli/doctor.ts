@@ -10,7 +10,7 @@ import { runTurn } from '../provider/turn.ts';
 import { updateState } from '../core/state.ts';
 import { acquireLock, ownerAt, isProcessAlive } from '../core/lock.ts';
 export function doctorFailureMessage(classification: string | undefined): string {
-  if (classification === 'billing') return 'configError: billing — 과금 보호로 doctor 두뇌 호출이 멈췄습니다. 초과 사용 신호를 확인하세요(/status 의 rateLimit)';
+  if (classification === 'billing') return 'configError: billing — 두뇌가 구독 로그인이 아니라 API 키로 실행됐습니다. API 키 환경변수·apiKeyHelper 를 확인하세요';
   if (classification === 'quota' || classification === 'configError: quota') return 'configError: quota — 사용 한도에 걸려 doctor 두뇌 호출을 끝내지 못했습니다';
   return `configError: 훅 실제 차단 시험에 실패했습니다(${classification}).`;
 }

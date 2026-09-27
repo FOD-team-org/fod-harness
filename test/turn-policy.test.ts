@@ -49,7 +49,7 @@ it('정책: 이전 run unknown은 전환 허용, 현재 run unknown은 전환 �
   await appendLedger(root, { runId: 'previous', action: 'effect', status: 'unknown' });
   emulate([init, { type: 'result', is_error: true, result: 'usage limit reached' }]);
   expect(await runTurn('검사', { root, model: 'haiku', env: environment(root) })).toMatchObject({ classification: 'quota' });
-  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(1);
+  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(0);
   emulate([init, { type: 'assistant', message: { content: [
     { type: 'tool_use', id: 'pending', name: 'Bash', input: { command: 'echo pending' } },
   ] } }, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', overageStatus: 'rejected' } }]);
@@ -57,11 +57,11 @@ it('정책: 이전 run unknown은 전환 허용, 현재 run unknown은 전환 �
   expect(await runTurn('검사', { root, model: 'haiku', env: environment(root) })).toMatchObject({ classification: 'unknown' });
   expect(vi.mocked(runProcess).mock.calls).toHaveLength(1);
 });
-it('정책: rejected rate event는 과금 중단 대신 quota 전환을 시도한다', async () => {
+it('정책: rejected rate event는 계정 전환 없이 quota로 일시정지한다', async () => {
   const root = await project();
   emulate([init, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } }]);
   expect(await runTurn('검사', { root, model: 'haiku', env: environment(root) })).toMatchObject({ classification: 'quota' });
-  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(1);
+  expect(vi.mocked(runProcess).mock.calls.filter(([call]) => call.kind === 'switch')).toHaveLength(0);
 });
 it('정책: API 과금 신호는 회수 확인 실패와 함께 발생해도 billing을 유지한다', async () => {
   const root = await project(); emulate([{ ...init, apiKeySource: 'ANTHROPIC_API_KEY' }], false);
