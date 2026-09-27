@@ -184,6 +184,13 @@ if (args.includes('--hang-orphan-child')) {
           if (scenario === 'overage') event.rate_limit_info.isUsingOverage = true;
           else event.rate_limit_info.overageStatus = 'allowed';
         }
+        if (['overage-warning', 'overage-warning-unknown'].includes(scenario) && event.type === 'rate_limit_event') {
+          delete event.rate_limit_info.overageStatus;
+          delete event.rate_limit_info.overageDisabledReason;
+          event.rate_limit_info.status = 'allowed_warning';
+          event.rate_limit_info.isUsingOverage = false;
+          if (scenario === 'overage-warning-unknown') delete event.rate_limit_info.isUsingOverage;
+        }
         emit(event);
       }
       if (scenario === 'eof-before-exit') {

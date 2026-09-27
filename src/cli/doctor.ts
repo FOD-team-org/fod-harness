@@ -9,6 +9,11 @@ import { join } from 'node:path';
 import { runTurn } from '../provider/turn.ts';
 import { updateState } from '../core/state.ts';
 import { acquireLock, ownerAt, isProcessAlive } from '../core/lock.ts';
+export function doctorFailureMessage(classification: string | undefined): string {
+  if (classification === 'billing') return 'configError: billing — 과금 보호로 doctor 두뇌 호출이 멈췄습니다. 초과 사용 신호를 확인하세요(/status 의 rateLimit)';
+  if (classification === 'quota' || classification === 'configError: quota') return 'configError: quota — 사용 한도에 걸려 doctor 두뇌 호출을 끝내지 못했습니다';
+  return `configError: 훅 실제 차단 시험에 실패했습니다(${classification}).`;
+}
 export async function doctor(root: string, options: {
   env?: NodeJS.ProcessEnv; lockHeld?: boolean; signal?: AbortSignal;
 } = {}) {
@@ -48,7 +53,7 @@ export async function doctor(root: string, options: {
       });
       if (removed) throw new Error('configError: 훅 미적용으로 파일이 생성됐습니다');
     }
-    if (result.reason !== 'stop') throw new Error(`configError: 훅 실제 차단 시험에 실패했습니다(${result.classification}).`);
+    if (result.reason !== 'stop') throw new Error(doctorFailureMessage(result.classification));
     const checkedAt = new Date().toISOString();
     await updateState(root, current => ({ doctor: { ok: true, checkedAt }, brain: { ...(current.brain as Record<string, unknown> | undefined), model: config.brain.model } }));
     const skills = result.init?.skills ?? [], memory_paths = result.init?.memory_paths ?? [];

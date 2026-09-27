@@ -15,6 +15,7 @@ import { reclaimTask } from '../core/reclaim.ts';
 import { addJudgment, beginJudgmentSnapshot, finishJudgmentSnapshot, recoverJudgmentSnapshot } from '../core/judgment.ts';
 import { runProcess, type ProcessResult } from './runner.ts';
 import { checkBillingEnvironment } from './preflight.ts';
+import { rateLimitVerdict } from './rate-limit.ts';
 import { redact, safeValue } from './privacy.ts';
 const notifiedAuditPaths = new Set<string>();
 export const packageRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -201,9 +202,8 @@ async function executeTurn(latest: string, options: TurnOptions, display: TurnDi
             } else if (event.type === 'rate_limit_event') {
               const info = event.rate_limit_info;
               await patchState({ rateLimitInfo: safeValue(info ?? {}) });
-              if (info?.status === 'rejected' && info?.isUsingOverage !== true
-                && (info?.overageStatus === undefined || info.overageStatus === 'rejected')) return 'quota';
-              if (info?.isUsingOverage === true || info?.overageStatus !== 'rejected') return 'billing';
+              const verdict = rateLimitVerdict(info);
+              if (verdict !== 'continue') return verdict;
             } else if (event.type === 'stream_event') {
               if (!child && event.event?.type === 'message_start') { partialText = false; reportText = ''; }
               if (event.event?.type === 'content_block_delta' && event.event.delta?.type === 'text_delta') {
