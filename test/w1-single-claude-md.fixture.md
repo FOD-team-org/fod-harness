@@ -27,7 +27,8 @@
 | IMPLEMENT·FIX | fodh codex task |
 | VERIFY | fodh verify run |
 | REVIEW | fodh docs scaffold review |
-| MERGE·DOCS | fodh backlog set |
+| MERGE | fodh worktree merge |
+| DOCS | fodh backlog set |
 | CLEANUP | fodh cleanup run |
 | RECLAIM | fodh reclaim |
 | WAIT_JUDGMENT | fodh judgment apply |
@@ -46,6 +47,7 @@
 - fodh slots status
 - fodh worktree create
 - fodh worktree commit
+- fodh worktree merge
 - fodh worktree remove
 - fodh worktree list
 - fodh config get

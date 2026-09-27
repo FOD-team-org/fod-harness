@@ -1,3 +1,4 @@
+import { formatTaskLabel } from './task-label.ts';
 import { checkMergeResume } from './merge-base.ts';
 import { loadConfig } from './config.ts';
 import { workspaceBranchWarnings } from './workspace-task.ts';
@@ -9,7 +10,7 @@ import { harnessPath, withFileLock } from './storage.ts';
 export interface PickResources { slots: 'ok' | 'unavailable' | boolean; now?: number }
 export interface PickDecision {
   outcome: 'RESUME' | 'SPEC' | 'EMPTY' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
-  warnings?: string[]; task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
+  taskLabel?: string; warnings?: string[]; task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
   retry?: { count: number; nextAt?: string }; exhausted?: boolean;
 }
 const inProgress = (task: Task) => ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status);
@@ -118,7 +119,8 @@ export async function runPick(root: string, resources: PickResources = { slots: 
       const config = await loadConfig(root);
       if (!config.workspace) return value;
       const warnings = await workspaceBranchWarnings(root, config);
-      return warnings.length ? { ...value, warnings } : value;
+      return { ...value, ...(value.task ? { taskLabel: formatTaskLabel(value.task.id, value.task.repo) } : {}),
+        ...(warnings.length ? { warnings } : {}) };
     };
     if (decision.outcome !== 'WAIT_RESOURCE') await updateState(root, { lastPaused: undefined });
     if (taskStates.includes(state.state)) {

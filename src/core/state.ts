@@ -119,7 +119,7 @@ export async function updateState(
     } catch (error) { await recordFailure('cleanup:processes', error); }
   }
   if (stateChanged && (next.state.startsWith('WAIT_') || isPaused(next.state) || ['PROJECT_READY', 'DONE_ALL', 'CLEANUP_FAILED'].includes(next.state))) {
-    try { await notify(root, { key: `state:${next.state}`, title: '하네스 상태', body: next.state === 'PROJECT_READY'
+    try { await notify(root, { key: `state:${next.state}`, taskId: next.taskId, title: '하네스 상태', body: next.state === 'PROJECT_READY'
       ? '프로젝트 준비 완료 — `/develop-start` 로 개발을 시작하세요' : `하네스 상태: ${next.state}${cleanupLine}`,
       level: isPaused(next.state) || next.state === 'CLEANUP_FAILED' ? 'warning' : 'info' }); }
     catch (error) { await recordFailure(`notify:state:${next.state}`, error); }

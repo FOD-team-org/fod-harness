@@ -91,7 +91,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     }
     if (state.awaitingDelegation) return { skipped: 'delegation' };
     if (!active.has(state.state)) {
-      if (state.state.startsWith('WAIT_') || state.state.startsWith('paused(') || state.state === 'DONE_ALL' || state.state === 'CLEANUP_FAILED') await notify(root, { key: `state:${state.state}`, title: '하네스 상태', body: `하네스 상태: ${state.state}`, level: state.state.startsWith('paused(') ? 'warning' : 'info' }, ctxLike);
+      if (state.state.startsWith('WAIT_') || state.state.startsWith('paused(') || state.state === 'DONE_ALL' || state.state === 'CLEANUP_FAILED') await notify(root, { key: `state:${state.state}`, taskId: state.taskId, title: '하네스 상태', body: `하네스 상태: ${state.state}`, level: state.state.startsWith('paused(') ? 'warning' : 'info' }, ctxLike);
       return { skipped: 'inactive' };
     }
     if (state.state === 'recovering' && state.recoveryAutoResumed === true) return { skipped: 'recovery-limit' };
@@ -100,7 +100,7 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     if (!Number.isSafeInteger(maxAutoTurns) || Number(maxAutoTurns) < 1) throw new Error('maxAutoTurns는 1 이상의 정수여야 합니다');
     if (Number(state.autoTurns ?? 0) >= Number(maxAutoTurns)) {
       await stopForJudgment(root);
-      await notify(root, { key: 'stopForJudgment', title: '진행 정체', body: '진행 정체를 판단대기에 등록했습니다.', level: 'warning' }, ctxLike);
+      await notify(root, { key: 'stopForJudgment', taskId: state.taskId, title: '진행 정체', body: '진행 정체를 판단대기에 등록했습니다.', level: 'warning' }, ctxLike);
       return { stopped: true };
     }
     let content: string;

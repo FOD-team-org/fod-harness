@@ -12,7 +12,8 @@ description: 하네스 상태 진행이 막혔을 때 다음 명령과 대기·�
 | IMPLEMENT·FIX | `fodh codex task --spec <파일>` 또는 design의 Claude Agent |
 | VERIFY | `fodh verify run` |
 | REVIEW | 만든 쪽과 다른 수행자에게 검수 위임 |
-| MERGE·DOCS | 실제 증거를 `fodh backlog set <T>`에 기록 |
+| MERGE | `fodh worktree merge <T>`(비-git 은 `fodh backlog set <T> --merge-commit none`) 뒤 `fodh state transition DOCS`, 실패 → `fodh judgment add … --blocks <T> --reclaim` |
+| DOCS | 실제 증거를 `fodh backlog set <T>`에 기록 |
 | CLEANUP | `fodh cleanup run` |
 | PICK | `fodh pick` |
 | recovering | `fodh ledger list --unknown` |

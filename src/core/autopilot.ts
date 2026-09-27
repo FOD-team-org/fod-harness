@@ -1,3 +1,6 @@
+import { basename } from 'node:path';
+import { shellCommands, commandWords } from '../../hooks/shell-commands.mjs';
+import { approvalForms } from '../../hooks/approval-normalize.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { assertNotBrain } from './brain-guard.ts';
@@ -100,12 +103,30 @@ export function autopilotBlocked(item: JudgmentItem, config: HarnessConfig): boo
   const text = `${item.title} ${item.background} ${item.options.join(' ')} ${item.recommend} ${item.detail ?? ''}`;
   if (approvalRequired({ ...item, background: text }, config.requiresApproval)) return true;
   if (/마이그레이션|배포|운영|릴리스|출시|삭제|되돌리|태그|토큰|시크릿|키|과금|비용|요금|계정|권한|게시|공개|발송|이메일|SMS|알림 발송|\b(?:tags?|prod(?:uction)?|drop\w*|reset\w*|force\w*|tokens?|deploy\w*|migrat\w*|release\w*|publish\w*|delet\w*|revert\w*|secrets?|billing|permissions?)\b/iu.test(text)) return true;
-  return config.requiresApproval.some(name => {
+  if (config.requiresApproval.some(name => {
     if (text.toLowerCase().includes(name.toLowerCase())) return true;
     const rule = config.approvalRules.find(rule => rule.id === name);
     if (!rule) return false;
     if (rule.description && text.toLowerCase().includes(rule.description.toLowerCase())) return true;
     try { return new RegExp(rule.pattern, 'i').test(text); } catch { return false; }
+  })) return true;
+  return config.workspace ? workspaceApprovalHit(text, config, item) : false;
+}
+function workspaceApprovalHit(text: string, config: HarnessConfig, item: JudgmentItem): boolean {
+  const rules = [...config.approvalRules, ...Object.values(config.workspace!.repos).flatMap(member => member.approvalRules ?? [])];
+  const candidates = [text];
+  const fields = [item.title, item.background, ...item.options, item.recommend, item.detail ?? ''];
+  for (const field of fields) for (const [, span] of field.matchAll(/`([^`\n]+)`/gu)) {
+    try {
+      const words = shellCommands(span, { recoverUnterminated: true }).entries.map(entry => entry.words).filter(words => words.length);
+      const normalized = words.flatMap(words => basename(commandWords(words)[0] ?? '') === 'fodh' ? [] : approvalForms(words));
+      candidates.push(...normalized.map(form => form.raw ? form[0] : [basename(form[0] ?? ''), ...form.slice(1)].join(' ')));
+    } catch { candidates.push(span); }
+  }
+  return rules.some(rule => {
+    if (rule.description && text.toLowerCase().includes(rule.description.toLowerCase())) return true;
+    try { const pattern = new RegExp(rule.pattern, 'i'); return candidates.some(candidate => pattern.test(candidate)); }
+    catch { return false; }
   });
 }
 export function normalizeTitle(title: string): string {

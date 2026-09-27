@@ -1,3 +1,4 @@
+import { formatTaskLabel, taskLabel } from '../core/task-label.ts';
 import { autopilotOn, autopilotOff, autopilotStatus, readAutopilot, parseAutopilotCommand, recommendedOption } from '../core/autopilot.ts';
 import { initWorkspace, addWorkspaceMember, removeWorkspaceMember, listWorkspace } from '../core/workspace.ts';
 import { initProject } from './init.ts';
@@ -149,7 +150,13 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     }
     else if (group === 'watch' && action === 'tick') { exact(0); result = await tick(root); }
     else if (group === 'watch' && action === 'status') { exact(0); result = await watcherStatus(root); }
-    else if (group === 'state' && action === 'get') { exact(0); result = await readState(root); }
+    else if (group === 'state' && action === 'get') {
+      exact(0); const state = await readState(root); result = state;
+      try {
+        const label = await taskLabel(root, await loadConfig(root, undefined, { dryRun: true }), state.taskId);
+        if (label) result = { ...state, taskLabel: label };
+      } catch { /* Optional display metadata must not fail state get. */ }
+    }
     else if (group === 'state' && action === 'await-user') { exact(0); await assertNotBrain(root, '사용자 대기 표시'); result = await updateState(root, { awaitingUser: true, autoTurns: 0 }); }
     else if (group === 'state' && action === 'transition') {
       exact(1);
@@ -206,7 +213,14 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (values['merge-commit'] !== undefined) patch.merge = { commit: values['merge-commit'] };
       if (values['spec-rev'] !== undefined) patch.spec = { rev: integer(values['spec-rev'], 'spec.rev') };
       result = await setTask(root, rest[0], patch);
-    } else if (group === 'pick' && !action) result = values.dry ? decidePick(await listBacklog(root), await readState(root), { slots: 'ok', now: Date.now() }) : await runPick(root);
+    } else if (group === 'pick' && !action) {
+      const decision = values.dry ? decidePick(await listBacklog(root), await readState(root), { slots: 'ok', now: Date.now() }) : await runPick(root);
+      result = decision;
+      if (values.dry) try {
+        const config = await loadConfig(root, undefined, { dryRun: true });
+        if (config.workspace && decision.task) result = { ...decision, taskLabel: formatTaskLabel(decision.task.id, decision.task.repo) };
+      } catch { /* Keep the existing pick result if display configuration is unavailable. */ }
+    }
     else if (group === 'reclaim' && !action) {
       if (!values.task || !values.judgment) throw new Error('--task 및 --judgment가 필요합니다');
       result = await reclaimTask(root, values.task, values.judgment);

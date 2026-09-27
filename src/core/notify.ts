@@ -1,3 +1,4 @@
+import { taskLabel } from './task-label.ts';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open } from 'node:fs/promises';
@@ -6,7 +7,7 @@ import { resolve } from 'node:path';
 import { loadConfig, type HarnessConfig } from './config.ts';
 import { appendLedger } from './ledger.ts';
 import { redact } from '../provider/privacy.ts';
-export interface Notification { key: string; level: 'info' | 'warning' | 'error'; title: string; body: string }
+export interface Notification { taskId?: string; key: string; level: 'info' | 'warning' | 'error'; title: string; body: string }
 export interface NotifyContext { hasUI?: boolean; notify?: (message: string, level: Notification['level']) => void }
 const cacheKey = Symbol.for('fod-harness.notify.last');
 const shared = globalThis as typeof globalThis & { [cacheKey]?: Map<string, number> };
@@ -41,11 +42,12 @@ export async function notify(root: string, message: Notification, ctxLike?: Noti
   options: { now?: number; exec?: (file: string, args: string[]) => Promise<unknown>; config?: HarnessConfig; dedupe?: boolean } = {}) {
   // Configuration diagnostics may notify; load before taking the notification lock.
   const config = options.config ?? await loadConfig(root);
+  const label = await taskLabel(root, config, message.taskId);
   return withFileLock(harnessPath(root, 'harness-notify'), async () => {
     ctxLike ??= contexts.get(resolve(root));
     message = { ...message, key: redact(message.key).slice(0, 200) };
     const now = options.now ?? Date.now(), key = `${resolve(root)}:${message.key}`;
-    const title = redact(message.title).slice(0, 200), body = redact(message.body).slice(0, 200);
+    const title = redact(label ? `${label} ${message.title}` : message.title).slice(0, 200), body = redact(message.body).slice(0, 200);
     const recent = await recentNotifications(root);
     const inWindow = (at: number) => now >= at && now - at < 60000;
     const limited = options.dedupe !== false && (last.has(key) && inWindow(last.get(key)!)

@@ -1,3 +1,5 @@
+import { refreshTaskStatus } from './task-status.ts';
+import { taskLabel } from '../../src/core/task-label.ts';
 import { runAutopilot } from './autopilot.ts';
 export { runAutopilot } from './autopilot.ts';
 import { autopilotOn, autopilotOff, autopilotStatus, parseAutopilotCommand, autopilotChat, resetAutopilotChat } from '../../src/core/autopilot.ts';
@@ -96,6 +98,7 @@ export async function startDevelopment(pi: ExtensionAPI, ctx: ExtensionContext, 
   }
   if (state.state !== 'PICK') await transitionState(root, 'PICK');
   const result = await runPick(root);
+  await refreshTaskStatus(ctx);
   if (result.outcome === 'EMPTY') { ctx.ui.notify(result.reason, 'info'); return; }
   state = await readState(root);
   if (active.has(state.state)) await send(pi, root, state);
@@ -150,6 +153,7 @@ export default function orchestrator(pi: ExtensionAPI, options: { now?: () => Da
         body: `CLAUDE.md 작업일지 규약 갱신 실패: ${redact(error instanceof Error ? error.message : String(error))}` }, resumeContext(ctx)); }
       catch { /* Keep startup usable if migration diagnostics fail. */ }
     }
+    await refreshTaskStatus(ctx);
   });
   pi.on('session_shutdown', async (_event, ctx) => { setNotifyContext(ctx.cwd); });
   pi.on('input', async (event, ctx) => {
@@ -199,7 +203,11 @@ export default function orchestrator(pi: ExtensionAPI, options: { now?: () => Da
       const delegationMeta = state.delegation ? await readMeta(ctx.cwd, state.delegation.runId) : undefined;
       const delegation = state.delegation ? { ...state.delegation, status: delegationMeta?.status ?? 'unknown',
         minutes: Math.max(0, (Date.now() - Date.parse(state.delegation.startedAt)) / 60000) } : null;
-      ctx.ui.notify(JSON.stringify({ delegation, state: state.state, task: state.taskId ?? null,
+      await refreshTaskStatus(ctx);
+      let label: string | undefined;
+      try { label = await taskLabel(ctx.cwd, await loadConfig(ctx.cwd, undefined, { dryRun: true }), state.taskId); }
+      catch { /* Optional label only. */ }
+      ctx.ui.notify(JSON.stringify({ delegation, state: state.state, task: state.taskId ?? null, ...(label ? { taskLabel: label } : {}),
         inbox: inbox.filter(item => item.status !== 'applied'), unknown, watcher, rateLimit: state.rateLimitInfo ?? null }), 'info');
     },
   });
@@ -248,6 +256,7 @@ export default function orchestrator(pi: ExtensionAPI, options: { now?: () => Da
   pi.on('agent_end', async (event, ctx) => {
     const context = resumeContext(ctx);
     const holdAtStart = await readState(ctx.cwd);
+    await refreshTaskStatus(ctx);
     try {
       const last = [...event.messages].reverse().find(message => message.role === 'assistant');
       if (last?.role === 'assistant' && last.stopReason === 'aborted') { await updateState(ctx.cwd, { userAborted: true }); return; }
@@ -440,9 +449,9 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
         });
         if (matching.length) {
           for (const record of matching) {
-            if (record.supervisorLost) await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, level: 'warning', title: '위임 완료', body: '감독 사망 뒤 추정한 성공 — 결과를 직접 확인' }, context);
+            if (record.supervisorLost) await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, taskId: typeof record.taskId === 'string' ? record.taskId : undefined, level: 'warning', title: '위임 완료', body: '감독 사망 뒤 추정한 성공 — 결과를 직접 확인' }, context);
             else if (['fail', 'timeout', 'lost'].includes(String(record.codexStatus))) {
-              await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, level: 'warning', title: '위임 실패', body: `Codex 위임 ${record.codexRunId ?? record.runId}: ${record.codexStatus} — 결과를 확인하세요` }, context);
+              await notify(root, { key: `codex:${record.codexRunId ?? record.runId}`, taskId: typeof record.taskId === 'string' ? record.taskId : undefined, level: 'warning', title: '위임 실패', body: `Codex 위임 ${record.codexRunId ?? record.runId}: ${record.codexStatus} — 결과를 확인하세요` }, context);
             }
           }
           resumed = (await autoResume(pi, root, context, kind)).resumed === true;
@@ -500,7 +509,10 @@ export async function decideInbox(pi: ExtensionAPI, ctx: ExtensionContext, root:
           && doctorFresh(state, (await loadConfig(root)).brain.doctorTtlHours)) {
           resumed = (await autoResume(pi, root, context, kind)).resumed === true; handled = resumed;
         } else {
-          context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${state.taskId}` : ''} — ${resumeHint(state.state, (await readJudgment(root)).items)}`, 'info');
+          let label: string | undefined;
+          try { label = await taskLabel(root, await loadConfig(root, undefined, { dryRun: true }), state.taskId); }
+          catch { /* Optional label only. */ }
+          context.notify(`이전 세션 상태: ${state.state}${state.taskId ? ` /${label ?? state.taskId}` : ''} — ${resumeHint(state.state, (await readJudgment(root)).items)}`, 'info');
         }
         resolve = true;
       }

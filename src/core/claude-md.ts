@@ -8,6 +8,7 @@ import { readState } from './state.ts';
 import { skillsStatus } from './skills.ts';
 import { atomicWrite, harnessPath, readText, withFileLock } from './storage.ts';
 import { projectPath } from './template-values.ts';
+const cell = (v: string) => v.replace(/\r?\n/gu, ' ').replace(/\|/gu, '\\|');
 const begin = '<!-- fodh:managed:begin v1 -->', end = '<!-- fodh:managed:end -->';
 const approvals = [
   '프로덕션 DB 마이그레이션', '프로덕션 데이터 삭제·이관', '스토어 업로드·심사 제출·답변', '결제·광고·구독 설정 변경',
@@ -28,7 +29,11 @@ export function claudeMdHash(config: HarnessConfig): string {
   const visible = { verify: { commands: config.verify.commands.map(redact), heavy: config.verify.heavy.map(redact) },
     requiresApproval: config.requiresApproval, docsRoot: config.docs.root, judgmentFile: config.judgment.file, judgmentArchive: config.judgment.archive,
     route: config.delegate.route, claudeModel: config.delegate.claude.subagentModel,
-    workerModel: config.delegate.codex.workerModel, enforce: config.interview.enforce };
+    workerModel: config.delegate.codex.workerModel, enforce: config.interview.enforce,
+    ...(config.workspace ? { workspace: Object.entries(config.workspace.repos).map(([name, member]) => ({
+      name, path: member.path, baseBranch: member.baseBranch,
+      verify: { commands: member.verify.commands.map(redact), heavy: (member.verify.heavy ?? []).map(redact) },
+    })) } : {}) };
   return createHash('sha256').update(JSON.stringify(visible)).digest('hex').slice(0, 8);
 }
 export const claudeMdMarker = (config: HarnessConfig): string => `FODH-DOC-${claudeMdHash(config)}`;
@@ -37,7 +42,10 @@ export async function generateClaudeMd(root: string, options: { check?: boolean;
     const config = await loadConfig(root, undefined, { dryRun: options.onlyMissing }), state = await readState(root), status = await skillsStatus(root);
     const installed = [...status.updated, ...status.unchanged].sort();
     const digest = claudeMdHash(config);
-    const verification = `## 검증\n일반 명령: ${JSON.stringify(config.verify.commands.map(redact))}\nheavy 명령: ${JSON.stringify(config.verify.heavy.map(redact))} — VERIFY의 \`fodh verify run --heavy\` 로만 실행.\n`;
+    const verification = config.workspace
+      ? '## 검증\n명령은 하네스가 task 레포의 등록 워크트리에서 `fodh verify run` 으로 돌린다. heavy 는 VERIFY의 `fodh verify run --heavy` 로만 실행.\n| 멤버 | 일반 명령 | heavy 명령 |\n|---|---|---|\n'
+        + Object.entries(config.workspace.repos).map(([name, member]) => `| ${cell(name)} | ${cell(JSON.stringify(member.verify.commands.map(redact)))} | ${cell(JSON.stringify((member.verify.heavy ?? []).map(redact)))} |`).join('\n') + '\n'
+      : `## 검증\n일반 명령: ${JSON.stringify(config.verify.commands.map(redact))}\nheavy 명령: ${JSON.stringify(config.verify.heavy.map(redact))} — VERIFY의 \`fodh verify run --heavy\` 로만 실행.\n`;
     const restrictions = `## 금지·승인 필수\n설정 requiresApproval: ${config.requiresApproval.join(', ')}\n${approvals.map((v, i) => `${i + 1}. ${v}`).join('\n')}\n전체 테스트는 VERIFY만. codex·git worktree 직접 실행 금지. 비밀값 출력·기록 금지.\n`;
     const docs = `## 문서 위치\n| 폴더 | 내용 |\n|---|---|\n| ${config.judgment.file} | 판단대기: 열린 판단, 사용자만 답 |\n| ${config.judgment.archive}/ | 판단기록: 지난 판단, 하네스만 씀 |\n${['설계', '위임스펙', '검수', '조사', '결정기록'].map(v => `| ${config.docs.root}/${v}/ | ${v} 문서 |`).join('\n')}\nPRD: ${config.docs.root}/PRD.md, 작업일지: ${config.docs.root}/작업일지/YYYY-MM-DD.md\n백로그: docs/backlog.md (고정), 판단대기: ${config.judgment.file}\n`;
     const sections = [
@@ -45,8 +53,11 @@ export async function generateClaudeMd(root: string, options: { check?: boolean;
       `- doctor 표식: ${claudeMdMarker(config)}`,
       '이 블록은 `fodh claude-md generate` 가 관리합니다. 직접 고치지 마세요. 설정 해시: '+digest,
       `## 역할\n두뇌는 소스 파일을 쓰지 않는다. design → Claude Agent(${config.delegate.claude.subagentModel}), 그 외 → \`fodh codex task\`(${config.delegate.codex.workerModel}). 인터뷰 가드: ${config.interview.enforce}.\n| 분류 | 수행자 |\n|---|---|\n${Object.entries(config.delegate.route).map(([k,v]) => `| ${k} | ${v} |`).join('\n')}`,
-      '## 하네스 흐름\n| 상태 | 다음 fodh 명령 |\n|---|---|\n| INTERVIEW | fodh interview next |\n| RESEARCH | fodh docs scaffold research-q |\n| PRD_DRAFT | fodh docs scaffold prd |\n| ARCH | fodh docs scaffold arch |\n| PLANNING | fodh docs scaffold backlog-draft |\n| PICK | fodh pick |\n| SPEC | fodh docs scaffold spec |\n| IMPLEMENT·FIX | fodh codex task |\n| VERIFY | fodh verify run |\n| REVIEW | fodh docs scaffold review |\n| MERGE·DOCS | fodh backlog set |\n| CLEANUP | fodh cleanup run |\n| RECLAIM | fodh reclaim |\n| WAIT_JUDGMENT | fodh judgment apply |\n| recovering | fodh ledger list |\n턴 끝: `대기: 사용자`, `대기: 위임 <runId>`(마지막 비어 있지 않은 3줄 안), 마지막 줄 `상태: …`. 멈춤 상태에서는 조건 해소 전 새 작업을 시작하지 않는다.',
-      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'worktree' && c.action === 'merge' || c.group === 'autopilot' || c.group === 'init' || c.group === 'workspace' && !(config.workspace && c.action === 'list') || c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset' || c.group === 'judgment' && c.action === 'migrate')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
+      ...(config.workspace ? ["## 워크스페이스\n이 폴더는 멤버 git 저장소를 묶은 워크스페이스다. 루트는 하네스 상태·문서만 가진다.\n| 멤버 | 경로 | 기준 브랜치 |\n|---|---|---|\n"
+        + Object.entries(config.workspace.repos).map(([name, member]) => `| ${cell(name)} | ${cell(member.path)} | ${cell(member.baseBranch ?? 'main')} |`).join('\n')
+        + "\n- 멤버 레포 규칙은 `<경로>/CLAUDE.md`·`<경로>/AGENTS.md` 를 먼저 읽는다. 여러 레포에 걸친 원본 규칙은 이 파일의 관리 블록 밖 절을 따른다.\n- task 하나 = 레포 하나. `fodh backlog add` 에는 `--repo <멤버>` 가 필수다. 두 레포를 고쳐야 하면 레포별 task 로 쪼개고 `--depends` 로 잇는다.\n- 멤버 main(기준 브랜치 체크아웃)은 읽기만 한다. 바꾸는 일은 task 위임으로 하고, 병합은 MERGE 에서 `fodh worktree merge <T>` 로만 한다.\n- 멤버는 `git -C <경로> …` 나 경로 인자로 읽는다. 상태는 `git --no-optional-locks -C <경로> status` 로 본다.\n- 한 줄에 `cd <멤버>` 와 다른 명령을 섞지 않는다. `cd`·`git -C`·`--prefix` 에는 리터럴 경로를 쓴다(변수·치환 금지)."] : []),
+      '## 하네스 흐름\n| 상태 | 다음 fodh 명령 |\n|---|---|\n| INTERVIEW | fodh interview next |\n| RESEARCH | fodh docs scaffold research-q |\n| PRD_DRAFT | fodh docs scaffold prd |\n| ARCH | fodh docs scaffold arch |\n| PLANNING | fodh docs scaffold backlog-draft |\n| PICK | fodh pick |\n| SPEC | fodh docs scaffold spec |\n| IMPLEMENT·FIX | fodh codex task |\n| VERIFY | fodh verify run |\n| REVIEW | fodh docs scaffold review |\n| MERGE | fodh worktree merge |\n| DOCS | fodh backlog set |\n| CLEANUP | fodh cleanup run |\n| RECLAIM | fodh reclaim |\n| WAIT_JUDGMENT | fodh judgment apply |\n| recovering | fodh ledger list |\n턴 끝: `대기: 사용자`, `대기: 위임 <runId>`(마지막 비어 있지 않은 3줄 안), 마지막 줄 `상태: …`. 멈춤 상태에서는 조건 해소 전 새 작업을 시작하지 않는다.',
+      '## 쓸 수 있는 fodh 명령\n'+commandTable.filter(c => !(c.group === 'autopilot' || c.group === 'init' || c.group === 'workspace' && !(config.workspace && c.action === 'list') || c.group === 'config' && c.action === 'set' || c.group === 'memory' && c.action === 'reset' || c.group === 'judgment' && c.action === 'migrate')).map(c => `- fodh ${c.group}${c.action ? ' '+c.action : ''}`).join('\n'),
       '## 백로그\n분류: design, non-design, docs, research. 상태: ready, doing, verify, review, fix, merge, done, blocked(A번호).\nDoD 6항: verify.ok, review.high=0, review.commit, merge.commit, docs.ok, cleanup.ok. 상태·증거는 CLI로만 쓴다.',
       verification, restrictions, docs,
       '## 설치된 하네스 스킬\n'+(installed.join(', ') || '없음'),
