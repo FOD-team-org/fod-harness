@@ -8,7 +8,7 @@ import { createWorktree, commitWorktree } from '../src/core/worktree.ts';
 export { git, writeConfig };
 export async function workspace(names = ['web', 'backend', 'app']) {
   const f = await fixture(names);
-  vi.stubEnv('FODH_NOTIFY_OS', 'off'); vi.stubEnv('FODH_SLOTS_DIR', join(f.parent, 'slots'));
+  vi.stubEnv('FODH_NOTIFY_OS', 'off');
   for (const repo of Object.values(f.repos)) repo.verify.commands = [`${process.execPath} -e "process.exit(0)"`];
   await writeConfig(f.root, { ...f.candidate, notify: { channels: ['ledger'] }, delegate: { codex: { externalGuard: false } } });
   await updateState(f.root, { state: 'PICK', doctor: { ok: true, checkedAt: new Date().toISOString() } });

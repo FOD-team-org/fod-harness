@@ -116,7 +116,7 @@ Codex 수행자 기본값 `gpt-6-sol`은 판단 A11 로 확정되었습니다.
 
 - `fodh codex task|review|research --spec <파일> [--task T01] [--resume last] [--wait]`: 비동기 위임. `status [runId]`, `result <runId>`, `cancel <runId>`로 조회·회수한다. 완료는 `codex-done` 인박스로 전달된다.
 - `fodh worktree create <T> [--base <ref>]`, `remove <T> [--force]`, `list`: 하네스 등록 워크트리를 관리한다.
-- `fodh slots status`: 머신 전역 Codex 슬롯과 생존 여부를 확인한다.
+- `fodh slots status`: 현재 프로젝트의 Codex·heavy 슬롯과 생존 여부, 슬롯 파일 `path`를 확인한다. 파일은 `<root>/.pi/harness-slots.json`이다.
 - 프로젝트 `.gitignore`에 `.pi/codex/`를 추가한다(위임 프롬프트·실행 로그·결과 파일).
 
 P3 위임 복구: 감독이 죽어도 그룹 구성원 중 기록된 Codex 자식의 PID·시작 시각이 일치하면 슬롯을 유지하고, 워처는 60초 후 별도 그룹의 도구 자손까지 회수한 뒤 lost로 마감한다. 감독 그룹이 없고 기록된 도구 그룹도 회수했으며 `turn.completed`가 있으면 `ok` 및 `supervisorLost:true`로 기록한다. meta 없는 위임도 대기 교착 없이 취소·복구한다. 런처는 15초 안에 감독 준비가 확인되지 않으면 타임아웃 오류를 반환한다. 감독 stderr는 결과 디렉터리의 `supervisor.log`(0600)에 남는다. review·research는 task의 구현 재개 스레드를 덮어쓰지 않는다.
@@ -131,14 +131,16 @@ P3 위임 복구: 감독이 죽어도 그룹 구성원 중 기록된 Codex 자�
 | `worktrees.links` | `[]` | root 의 의존성을 워크트리에 링크. 예: `["node_modules"]`. 무시되지 않는 링크는 공통 Git info/exclude 에 추가 |
 | `worktrees.setup` | `[]` | 링크 뒤 순차 실행하는 승인 전용 준비 명령. 실패한 등록 워크트리는 다음 create·Codex 위임 때 준비만 재시도 |
 | `worktrees.setupTimeoutMinutes` | 10 | 명령별 제한 시간(1~60분). 시간 초과 시 자손을 포함한 그룹 종료 |
-| `delegate.codex.externalGuard` | `true` | 슬롯 획득 전 외부 실행 중 Codex 감지. 변경은 사용자 승인 필요 |
+| `delegate.codex.externalGuard` | `true` | 프로젝트 슬롯 획득 전 이 프로젝트 영역에서 실행 중인 외부 Codex 감지. 변경은 사용자 승인 필요 |
 | `secrets.readDeny` / `secrets.readAllow` | 기본 비밀 경로 / 예제·공개키 예외 | 사용자 목록을 기본 목록에 합침. 두 키 모두 승인 필요 |
 | `secrets.defaults` | `true` | false이면 기본 비밀 경로·예외 목록을 빼고 사용자 목록만 사용(승인 필요) |
 | `delegate.codex.waitMinutes` | 8 | CLI 대기 상한(양의 정수, 분) |
 
 Flutter app 준비 예시: 사용자 터미널에서 `fodh config set worktrees.setup '["flutter pub get --enforce-lockfile --offline"]' --approve`. `.dart_tool`은 링크하지 않습니다. 준비 명령은 워크트리를 cwd로, `FODH_WORKTREE`·`FODH_TASK` 환경에서 실행됩니다. 출력은 redact 후 `.pi/worktree-setup/<task>-<runId>.log`에 저장하며, 원장에는 순번·종료 코드·소요 시간·로그 경로가 남습니다. 성공하면 `worktree list`에 `setupOk: true`가 표시됩니다. 메모리 중단 중에는 준비 명령을 실행하지 않습니다.
 
-외부 Codex는 companion task 또는 codex exec 중 하네스 감독·ChatGPT.app·Codex.app 자손 및 현재 프로세스의 조상·자손을 제외한 프로세스입니다. 유휴 app-server는 제외합니다. 슬롯에는 `external: true`와 PID·시작 시각을 기록하며 `codex cancel`의 대상이 아닙니다. 종료 후 기존 slot-free 경로로 자동 재개합니다. ps 조회 실패는 `slot:external-scan fail`만 남기고 기존 슬롯 검사로 진행합니다.
+외부 Codex는 companion task 또는 codex exec 중 하네스 감독·ChatGPT.app·Codex.app 자손 및 현재 프로세스의 조상·자손을 제외한 프로세스입니다. 유휴 app-server는 제외합니다. 프로젝트 영역은 하네스 루트, 워크스페이스 멤버 레포, 각 레포의 `worktrees.root` 바로 아래에서 `worktrees.prefix`로 시작하는 디렉터리, `listWorktrees(root).worktrees`에 하네스가 등록한 워크트리이며 각 경로의 하위도 포함합니다. 경로는 realpath(없는 경로는 기존 조상의 realpath)로 비교합니다. `-C`·`--cd`·`--cwd`·`--root`·`--project-root` 인자가 없으면 lsof cwd를 조회하고 상대 인자는 그 cwd로 풉니다. 래퍼와 자식이 함께 후보이면 가장 안쪽 후보만 셉니다. 위치 플래그는 Codex 명령 뒤에서 찾으며, 따옴표 없는 공백 경로는 원문의 공백을 보존해 실제로 존재하는 가장 긴 경로를 선택합니다. 존재하는 경로가 없으면 단일 단어만 기존 조상 기준으로 풀고 여러 단어는 위치 모름으로 처리합니다. 남은 후보 중 영역 안의 첫 프로세스만 슬롯을 막습니다. 영역 밖·위치 모름은 세지 않으며 위치 모름은 `slot:external-unlocated` 원장에 남깁니다. 영역 항목 오류는 해당 항목만 건너뛰고 나머지 영역은 유지합니다. 설정 읽기 오류는 하네스 루트만 사용하며, 실패 원장에는 `stage: config|ps|areas`와 redact 후 200자 이내 오류를 남깁니다. 슬롯에는 `external: true`와 PID·시작 시각을 기록하며 `codex cancel`의 대상이 아닙니다. 종료 후 기존 slot-free 경로로 자동 재개합니다. ps 조회 실패는 `slot:external-scan fail`만 남기고 기존 슬롯 검사로 진행합니다.
+
+프로젝트가 여럿이면 Codex 가 프로젝트 수만큼 동시에 돌 수 있다. 머신 전체 상한은 없고 메모리 워치독이 막는다. 기존 `assertCodexMemory`도 유지한다. 옛 전역 슬롯 파일은 읽거나 쓰거나 이관하지 않으며 `FODH_SLOTS_DIR`는 지원하지 않는다.
 
 사용자 승인 규칙은 `^` 로 명령 시작을 앵커한다. 앵커가 없으면 `git log --grep=db:migrate` 같은 읽기 명령도 걸린다. 패턴은 200자 이하만 허용하며 역참조와 중첩 수량자는 거부한다. 정적 검사가 모든 정규식의 실행 비용을 보장하지는 않으므로 복잡한 패턴을 피한다.
 
@@ -155,7 +157,7 @@ npm 별칭·옵션 형태(`npm run-script db:migrate`, `npm --prefix . run db:mi
 감독 PID 재사용은 신호 없이 위임을 마감하고 `pid-reused`, 자식 신원이 맞지 않는 생존 그룹은 `group-unverified`를 원장에 남긴다. 도구 그룹은 30초 표본 때 meta.toolGroups에 누적해 정상 종료·cancel·lost·reclaim에서 함께 회수한다. 회수 실패 원장은 runId별 첫 1건과 10분마다 1건만 기록한다. `supervisorLost`는 결과·인박스에 전달하며 추정 성공 경고를 표시한다. 사용자 대기 표지는 본문 어느 줄이든, 위임 표지는 마지막 비어 있지 않은 3줄에서 인정한다. Codex 자식은 프로젝트 루트 env를 받지 않으며 `FODH_CODEX_CHILD=1`로 fodh 실행이 거부된다.
 
 - `fodh cleanup run [--scope processes|storage|worktrees|all] [--task T] [--dry-run]`: 등록 프로세스·프로젝트 재생성 경로·완료 또는 현재 CLEANUP 작업의 워크트리 정리, `.pi/cleanup-last.json` 보고서. 공유 캐시는 보고만 한다.
-- `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 순차 실행한다. heavy 슬롯과 Codex 슬롯은 상호 배타다.
+- `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 순차 실행한다. 프로젝트마다 heavy 1개·Codex 1개 슬롯을 두며 같은 프로젝트 안에서 상호 배타다. 워크스페이스는 멤버별이 아닌 워크스페이스 루트 하나의 슬롯을 쓴다.
 - `fodh notify send --title … --body … [--level info|warning|error]`: TUI/macOS/원장 알림. 같은 키 60초 제한, Slack은 skip 기록만 남긴다.
 - `fodh memory status`: 현재 메모리 표본과 60초 워치독 상태. 스왑 초과 5분은 paused(memory)(DOCS·CLEANUP은 계속하고 다음 PICK에서 WAIT_RESOURCE), 경고치−2 GB 미만 5분은 자동 재개다.
 
@@ -237,7 +239,7 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 | Codex 수행자의 비밀 파일 읽기 | Codex는 Claude 훅 범위 밖이며 샌드박스가 읽기를 막지 못한다. 수행자 머리말에 비밀 파일 열기·출력 금지를 명시한다. |
 | Grep 디렉터리·일반 glob | 일반 확장자 glob과 `*`는 허용하고 `.env*`·`*.pem` 등 명시 비밀 glob은 막는다. 로컬 rg는 명시적인 `-g '*.ts'`로 `.env.ts`도 선택한다. 따라서 일반 glob이나 디렉터리 검색으로 gitignore 밖 비밀 파일이 노출될 수 있다. doctor의 `secretsNotIgnored` 경고로 보완한다. |
 | 재귀 읽기 탐색 | 깊이 8 아래는 검사하지 않으며 깊이 도달만으로 거부하지 않는다. 항목 20,000개 초과는 거부한다. `.git`은 항상 제외하고, rg/ag가 ignore를 따를 때 무시된 디렉터리는 깊이별 일괄 Git 조회로 가지치기한다. 방문한 디렉터리의 비밀 파일은 ignore 여부와 별개로 보수적으로 검사한다. `--no-ignore`로 큰 의존성 트리를 훑으면 항목 상한에 걸릴 수 있다. |
-| 외부 Codex 감지 | 획득 직전의 스냅샷이며, 그 뒤 시작한 외부 프로세스를 예약/차단하지 않는다. ps 실패 시 기존 슬롯만 확인한다. root는 명령 인자, lsof의 cwd, 감지한 하네스 root 순으로 사용한다. |
+| 외부 Codex 감지 | 획득 직전의 스냅샷이며, 그 뒤 시작한 외부 프로세스를 예약/차단하지 않는다. ps 실패 시 기존 슬롯만 확인한다. 위치는 명령 인자 또는 lsof cwd로 확인하며 상대 경로 인자는 해당 프로세스 cwd 기준이다. 영역 밖·위치 모름은 세지 않는다. |
 | 워크트리 준비 | Codex 위임 준비는 슬롯 획득 후 시작한다. 부모 exit·SIGTERM·SIGINT·SIGHUP 시 준비 그룹을 종료하고, 명령 exit 뒤 파이프는 최대 150ms 더 수집한다. SIGKILL과 의도적으로 그룹을 떠난 자손은 회수를 보장하지 않는다. 출력은 redact하며 8 MiB를 넘으면 그룹을 종료한다(exit 125). 임의 형식의 비밀값은 식별하지 못한다. |
 | 작업일지 규약 이행 | 기존 `docs/작업일지.md`는 읽거나 변경·삭제하지 않고 날짜별 새 규약만 사용한다. `fodh claude-md generate` 또는 session_start의 옛 작업일지 문구 감지 시 관리 블록만 재생성하며 사용자 영역은 보존한다. |
 | task 검수 면제(L4) | REVIEW→MERGE는 해당 task의 `kind: task, status: ok` meta 존재만으로 검수를 면제하며 시간 경계가 없다. 사소한 `codex task` 한 번으로도 면제될 수 있다. 라이브 T02에서는 Codex 구현 meta로 면제되어 haiku 두뇌가 직접 쓴 검수도 통과했다. Claude Agent 검수 경로에서는 하네스가 검수 증거를 만들 수 없기 때문이다. 후속 P8 후보는 `fodh review record`(검수 문서 경로·대상 커밋·모델 증거)로 Claude Agent 검수도 증거화하는 것이며 현재 제공되는 명령은 아니다 |
@@ -288,7 +290,7 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 검수 커밋은 등록 브랜치의 워크트리 HEAD이며 생성 base 이후 커밋이 1개 이상이고 미커밋 변경이 없어야 한다. 병합 커밋은 검수 커밋을 포함하고 루트 HEAD의 조상이어야 한다. REVIEW→MERGE 때 기록한 루트 HEAD(mergeBase)도 병합 커밋의 조상이어야 한다(구형 mergeBase 누락은 경고 원장). 비-FF 병합은 부모 중 하나가 검수 커밋이어야 하며, FF는 병합 SHA와 검수 SHA가 같아야 한다. 루트 clean 검사는 요구하지 않는다. 검수 커밋 자체를 쓰는 경우에는 루트 HEAD도 같아야 한다(fast-forward). 루트는 생성 시 기록한 baseBranch 위에 있어야 하며, 업그레이드 전 등록에 baseBranch가 없으면 이 검사만 생략하고 경고 원장을 남긴다. 같은 task의 성공한 VERIFY 진입 이후 검증 증거와 verify.head는 필수이며 검수 커밋은 그 HEAD와 같아야 한다(짧은 SHA는 전체 SHA로 정규화). 비-git 프로젝트만 `none`을 쓴다. `fodh worktree commit T -m "메시지"`는 등록 브랜치에서 diff 추가 줄과 1 MB 이하 텍스트 새 파일의 비밀 패턴을 검사한다. 큰 파일·바이너리는 이름만 원장에 남기고, `.pi/`를 add에서 제외하며 변경이 없으면 안내 결과를 반환한다.
 
-Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 소유자의 생존을 확인한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.
+Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 시작하지 못한 정상 턴은 `paused(slot)`으로 멈추고, 워처가 60초 간격으로 현재 프로젝트 슬롯 파일의 소유자 생존을 확인한다. 현재 파일에 살아 있는 소유자가 없으면 이전 전역 파일에서 온 다른 프로젝트의 살아 있는 소유자 표지도 정리하고 재개한다. 슬롯 해제 인박스 뒤 PICK의 RESUME으로 원래 task 또는 프로젝트 RESEARCH·REVIEW에 복귀한다. 두뇌는 `대기: 슬롯 codex`로 턴을 끝낸다.
 
 두뇌 훅은 모든 상태에서 `branch -f/-D/-M/-C`, `branch --move --force/--copy --force`, `checkout -B`, `switch -C/--force-create`, `update-ref`, 인자 있는 `reset`, `rebase`, `filter-branch`, `reflog expire`, `fetch/push`의 `+` refspec, `merge -s ours/-X ours`(긴 옵션 포함)를 `[보호]`로 차단한다. 부모 검사는 내용을 버리는 ours 병합을 구분하지 못하므로 해당 훅 차단이 1차 방어다.
 

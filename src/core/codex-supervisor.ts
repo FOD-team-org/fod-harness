@@ -76,7 +76,7 @@ export async function supervise(root: string, runId: string): Promise<void> {
           current.processStartedAt = observed;
           await writeMeta(root, current);
         }
-        await updateSlot('codex', runId, { pid: process.pid,
+        await updateSlot(root, 'codex', runId, { pid: process.pid,
           startedAt: observed ?? current.processStartedAt ?? `spawn:${current.startedAt}` });
         return current;
       });
@@ -96,7 +96,7 @@ export async function supervise(root: string, runId: string): Promise<void> {
       const current = await readMeta(root, runId);
       if (current && !current.finishedAt) await writeMeta(root, { ...current, childPid, childStartedAt });
     });
-    await updateSlot('codex', runId, { childPid, childStartedAt });
+    await updateSlot(root, 'codex', runId, { childPid, childStartedAt });
     timer = setTimeout(() => stop('timeout'), Math.max(1, meta.timeoutMinutes * 60000 - (Date.now() - Date.parse(meta.startedAt))));
     const sample = () => {
       if (sampling) return sampling;

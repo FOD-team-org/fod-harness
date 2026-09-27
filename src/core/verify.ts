@@ -95,7 +95,7 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
         pid = child.pid;
         if (pid) {
           timer = setTimeout(() => { timedOut = true; void stop(); }, (member.verify.timeoutMinutes ?? 30) * 60000);
-          if (options.heavy) await updateSlot('heavy', runId, { childPid: pid, childStartedAt: await processStartedAt(pid) });
+          if (options.heavy) await updateSlot(root, 'heavy', runId, { childPid: pid, childStartedAt: await processStartedAt(pid) });
           await registerProc(root, { pid, pgid: pid, runId, kind: 'verify', ownerPid: process.pid, ownerStartedAt, taskId: state.taskId, cmd: redact(cmd).slice(0, 200),
             startedAt: await processStartedAt(pid) ?? `spawn:${new Date().toISOString()}` });
           const sample = () => sampling ??= (async () => {
@@ -132,5 +132,5 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
     const report = { runId, commands: results, ...(results.some(r => r.interrupted) ? { interrupted: 'signal' as const } : {}), peakRssMB, swapBeforeGB: before?.swapUsedGB, swapAfterGB: after?.swapUsedGB, ok };
     await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: ok ? 'ok' : 'fail', evidence: { ...repo, ...report } });
     return await finish(report);
-  } finally { if (options.heavy) await releaseSlot('heavy', runId); }
+  } finally { if (options.heavy) await releaseSlot(root, 'heavy', runId); }
 }

@@ -132,7 +132,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.'); result = await codexStatus(root, rest[0]);
     } else if (group === 'codex' && action === 'result') { exact(1); result = await codexResult(root, rest[0]); }
     else if (group === 'codex' && action === 'cancel') { exact(1); result = await cancelCodex(root, rest[0]); }
-    else if (group === 'slots' && action === 'status') { exact(0); result = await slotsStatus(); }
+    else if (group === 'slots' && action === 'status') { exact(0); result = await slotsStatus(root); }
     else if (group === 'worktree' && action === 'create') { exact(1); result = await createWorktree(root, rest[0], values.base); }
     else if (group === 'worktree' && action === 'commit') { exact(1); result = await commitWorktree(root, rest[0], values.message ?? ''); }
     else if (group === 'worktree' && action === 'merge') { exact(1); result = await mergeWorktree(root, rest[0]); }

@@ -104,7 +104,7 @@ export async function finishRun(root: string, runId: string, patch: Partial<Code
       try { await setTask(root, next.taskId, { codexThread: next.threadId }); }
       catch (error) { next.error = redact((error as Error).message); next.status = next.status === 'ok' ? 'fail' : next.status; }
     }
-    await releaseSlot('codex', runId);
+    await releaseSlot(root, 'codex', runId);
     if (meta.pid) await removeProc(root, meta.pid, runId);
     if (!meta.finishedAt) await writeMeta(root, next);
     await appendLedgerOnce(root, { runId, taskId: meta.taskId, state: meta.state, action: `codex:${meta.kind}`,

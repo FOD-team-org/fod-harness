@@ -12,7 +12,6 @@ const spawned: number[] = [];
 afterEach(() => { for (const pid of spawned.splice(0)) { try { process.kill(pid, 'SIGKILL'); } catch {} } });
 it.each([false, true])('R3 실제 멈춘 런처 timeout, 알려진 감독 pid=%s도 회수', async supervisor => {
   const root = await project('RESEARCH'), bin = join(root, 'launcher.mjs');
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   await writeFile(join(root, 'spec.md'), 'stub');
   await writeFile(bin, `
     import { spawn } from 'node:child_process';
@@ -31,7 +30,7 @@ it.each([false, true])('R3 실제 멈춘 런처 timeout, 알려진 감독 pid=%s
     spawned.push(...JSON.parse(await readFile(join(root, 'pids.json'), 'utf8')));
     const [id] = await readdir(join(root, '.pi/codex'));
     expect(await readMeta(root, id)).toMatchObject({ status: 'fail', finishedAt: expect.any(String) });
-    expect((await slotsStatus()).codex).toBeNull();
+    expect((await slotsStatus(root)).codex).toBeNull();
     expect((await readState(root)).delegation).toBeUndefined();
     for (let i = 0; i < 50 && spawned.some(isProcessAlive); i++) await delay(20);
     expect(spawned.some(isProcessAlive)).toBe(false);

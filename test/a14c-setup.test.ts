@@ -75,9 +75,8 @@ it('R9 슬롯 거부는 준비 미실행·메모리 거부 (실제 수행자 실
   await setConfig(root, 'worktrees.setup', '["echo prepared > prepared"]');
   await updateState(root, { state: 'IMPLEMENT', taskId: task.id });
   await writeFile(join(root, 'spec.md'), 'fixture spec');
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue('fixture');
-  const snapshot = vi.spyOn(tree, 'commandSnapshot').mockResolvedValue([{ pid: 8001, ppid: 1, startedAt: 'fixture', command: 'codex exec' }]);
+  const snapshot = vi.spyOn(tree, 'commandSnapshot').mockResolvedValue([{ pid: 8001, ppid: 1, startedAt: 'fixture', command: `codex exec -C ${JSON.stringify(root)}` }]);
   await expect(startCodex(root, 'task', { taskId: task.id, spec: 'spec.md' })).rejects.toThrow('슬롯 사용 중');
   expect(await readFile(join(path, 'prepared'), 'utf8').catch(() => undefined)).toBeUndefined();
   expect(snapshot).toHaveBeenCalledOnce();
@@ -101,14 +100,13 @@ it('H12·H11·P4 설정 기본값·승인 키·두뇌 변경 거부·링크 비�
 
 it('R9 슬롯 획득 후 준비 실패는 슬롯 해제·감독 실행 없음', async () => {
   const { root, task } = await gitProject();
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue('fixture');
   const snapshot = vi.spyOn(tree, 'commandSnapshot').mockResolvedValue([]);
-  const check = "const fs = require('fs'); const slot = JSON.parse(fs.readFileSync(process.env.FODH_SLOTS_DIR + '/slots.json')); process.exit(slot.codex?.runId ? 7 : 8)";
+  const check = "const fs = require('fs'); const slot = JSON.parse(fs.readFileSync(" + JSON.stringify(join(root, ".pi/harness-slots.json")) + ")); process.exit(slot.codex?.runId ? 7 : 8)";
   await setConfig(root, 'worktrees.setup', JSON.stringify([`${shQuote(process.execPath)} -e ${shQuote(check)}`]));
   await updateState(root, { state: 'IMPLEMENT', taskId: task.id }); await writeFile(join(root, 'spec.md'), 'fixture spec');
   await expect(startCodex(root, 'task', { taskId: task.id, spec: 'spec.md' })).rejects.toThrow('exit 7');
   expect(snapshot).toHaveBeenCalledOnce();
-  expect(JSON.parse(await readFile(join(root, 'slots/slots.json'), 'utf8')).codex).toBeNull();
+  expect(JSON.parse(await readFile(join(root, '.pi/harness-slots.json'), 'utf8')).codex).toBeNull();
   expect(await readdir(join(root, '.pi/codex')).catch(() => [])).toEqual([]);
 });

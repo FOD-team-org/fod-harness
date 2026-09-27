@@ -133,7 +133,7 @@ export async function tick(root: string, options: TickOptions = {}): Promise<{ e
         delete watch.slotCheck;
       } else if (waiting && slotWait(state) && (watch.slotCheck?.since !== waiting.since || watch.slotCheck.ownerRunId !== waiting.owner.runId
         || now - Date.parse(watch.slotCheck.at) >= 60000)) {
-        const slots = await readJson<Slots>(slotsPath(), { codex: null, heavy: null, claude: null });
+        const slots = await readJson<Slots>(slotsPath(root), { codex: null, heavy: null, claude: null });
         let owner = waiting.owner, identity = 'gone';
         for (const kind of ['heavy', 'codex'] as const) {
           const held = slots[kind];

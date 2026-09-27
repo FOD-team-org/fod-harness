@@ -17,7 +17,7 @@ const roots: string[] = [], startedAt = '2026-09-24T00:00:00Z';
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'fodh-cleanup-third-'))); roots.push(root);
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots')); await setConfig(root, 'notify.channels', '["ledger"]'); return root;
+ await setConfig(root, 'notify.channels', '["ledger"]'); return root;
 }
 it.each(['owned', 'dead', 'foreign', 'unknown', 'missing'] as const)('N1: verify 소유 CLI %s일 때만 보호 조건을 판정한다', async ownerIdentity => {
   const root = await setup(), record = { pid: 100001, pgid: 100001, runId: 'verify', kind: 'verify', startedAt,

@@ -39,7 +39,6 @@ afterEach(async () => {
 });
 async function setup(state = 'IMPLEMENT') {
   const root = await mkdtemp(join(tmpdir(), 'fodh-codex-')); roots.push(root);
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   await configs.setConfig(root, 'delegate.codex.command', JSON.stringify([process.execPath, resolve('test/fake-codex/codex')]));
   const task = await addTask(root, { title: '시험', category: 'non-design' });
   await updateState(root, { state, taskId: task.id });
@@ -142,7 +141,7 @@ it('--wait fake 완료: 원장·thread·슬롯·레지스트리·결과·인박�
   expect((await readMeta(root, output.runId))?.status).toBe('ok');
   expect(await getTask(root, task.id)).toMatchObject({ delegate: 'codex', codexThread: output.threadId });
   expect((await readLedger(root)).filter(item => item.action === 'codex:task').map(item => item.status)).toEqual(['pre', 'ok']);
-  expect((await listProcs(root))).toEqual([]); expect((await slotsStatus()).codex).toBeNull(); expect((await readState(root)).delegation).toBeUndefined();
+  expect((await listProcs(root))).toEqual([]); expect((await slotsStatus(root)).codex).toBeNull(); expect((await readState(root)).delegation).toBeUndefined();
   expect(await readFile(join(root, 'stdin.md'), 'utf8')).toContain('수용 기준 본문');
   expect(JSON.parse(await readFile(join(root, 'args.json'), 'utf8')).at(-1)).toBe('-');
   const done = (await tick(root)).emitted.find(item => item.kind === 'codex-done');
@@ -201,7 +200,7 @@ it('timeout: fake와 stubborn 자손 그룹 잔존 0 (실제 ps 필요)', async 
   const run = await launch(root); const tool = await detachedPid(root); const meta = await finished(root, run.runId, 14000);
   expect(isProcessAlive(tool)).toBe(false);
   expect(meta).toMatchObject({ status: 'timeout' }); expect(meta.error).toBeUndefined();
-  await delay(100); expect(groupAlive(run.pid)).toBe(false); expect((await slotsStatus()).codex).toBeNull();
+  await delay(100); expect(groupAlive(run.pid)).toBe(false); expect((await slotsStatus(root)).codex).toBeNull();
 }, 20000);
 it('cancel: 시작 시각 대조·회수·cancelled 원장·delegation 해제 (실제 ps 필요)', async () => {
   await promisify(execFile)('/bin/ps', ['-p', String(process.pid), '-o', 'lstart=']);
@@ -210,7 +209,7 @@ it('cancel: 시작 시각 대조·회수·cancelled 원장·delegation 해제 (�
   const run = await launch(root); const tool = await detachedPid(root);
   expect(await cancel(root, run.runId)).toMatchObject({ status: 'cancelled' });
   expect(isProcessAlive(tool)).toBe(false);
-  expect((await readState(root)).delegation).toBeUndefined(); expect((await slotsStatus()).codex).toBeNull();
+  expect((await readState(root)).delegation).toBeUndefined(); expect((await slotsStatus(root)).codex).toBeNull();
   expect((await readLedger(root)).filter(item => item.action === 'codex:task')).toEqual([
     expect.objectContaining({ status: 'pre' }), expect.objectContaining({ status: 'fail', evidence: expect.objectContaining({ cancelled: true }) }),
   ]);
@@ -226,7 +225,7 @@ it('cancel은 시작 시각을 검증할 수 없으면 신호 없이 기존 위�
   await expect(readFile(join(resultDir(root, run.runId), 'cancel.json'))).rejects.toMatchObject({ code: 'ENOENT' });
   expect((await readMeta(root, run.runId))?.finishedAt).toBeUndefined();
   expect((await readState(root)).delegation?.runId).toBe(run.runId);
-  expect((await slotsStatus()).codex?.runId).toBe(run.runId);
+  expect((await slotsStatus(root)).codex?.runId).toBe(run.runId);
   await finished(root, run.runId);
 });
 it('task는 등록된 워크트리에서 실행하고 design도 routeHint만 반환한다', async () => {
@@ -308,7 +307,7 @@ it.each(['watcher', 'cancel', 'cancel-without-registry', 'reclaim'] as const)('�
   vi.stubEnv('FAKE_CODEX_DETACHED_CHILD', '1'); vi.stubEnv('FAKE_CODEX_DETACHED_FILE', join(root, 'detached.pid'));
   const run = await launch(root); const tool = await detachedPid(root);
   for (let i = 0; i < 100 && !(await readMeta(root, run.runId))?.childStartedAt; i++) await delay(20);
-  const owner = (await slotsStatus()).codex!;
+  const owner = (await slotsStatus(root)).codex!;
   expect(owner.childPid).toEqual(expect.any(Number)); expect(owner.childStartedAt).toEqual(expect.any(String));
   process.kill(run.pid, 'SIGKILL');
   for (let i = 0; i < 100 && isProcessAlive(run.pid); i++) await delay(20);
@@ -383,7 +382,7 @@ it.each(['foreign', 'unverified'] as const)('%s 소유권이면 cancel은 신호
   const expected = scenario === 'foreign' ? 'pid-reused' : 'group-unverified';
   expect(await cancel(root, 'reused')).toMatchObject({ status: scenario === 'foreign' ? 'cancelled' : 'lost' });
   expect(reap).not.toHaveBeenCalled(); expect((await readState(root)).delegation).toBeUndefined();
-  expect((await slotsStatus()).codex).toBeNull();
+  expect((await slotsStatus(root)).codex).toBeNull();
   expect(await readLedger(root)).toContainEqual(expect.objectContaining({ evidence: expect.objectContaining({ reason: expected }) }));
 });
 it('정상 종료 뒤 남긴 background 도구 그룹을 표본에 기록하고 회수한다 (실제 ps 필요)', async () => {
@@ -415,7 +414,7 @@ it.each(['start', 'group'] as const)('자식 %s ps 조회 실패 시 cancel은 t
   expect(reap).not.toHaveBeenCalled();
   expect(await readMeta(root, 'unknown-child')).toMatchObject({ status: 'running' });
   expect((await readState(root)).delegation?.runId).toBe('unknown-child');
-  expect((await slotsStatus()).codex?.runId).toBe('unknown-child');
+  expect((await slotsStatus(root)).codex?.runId).toBe('unknown-child');
   expect(await listProcs(root)).toHaveLength(1);
 });
 
@@ -439,7 +438,7 @@ it.each(['available', 'unavailable', 'already-real'] as const)('감독 시작 �
     const expected = scenario === 'unavailable' ? initial : observed;
     expect(await readMeta(root, runId)).toMatchObject({ status: 'running', processStartedAt: expected });
     expect(await listProcs(root)).toContainEqual(expect.objectContaining({ pid: process.pid, runId, startedAt: expected }));
-    expect((await slotsStatus()).codex).toMatchObject({ runId, startedAt: expected });
+    expect((await slotsStatus(root)).codex).toMatchObject({ runId, startedAt: expected });
   } finally { await running; }
   expect(await readMeta(root, runId)).toMatchObject({ status: 'ok', exit: 0 });
 });

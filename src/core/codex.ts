@@ -151,7 +151,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
       if (!pid) throw new Error('감독 pid가 없습니다');
       const identity = await processStartedAt(pid) ?? `spawn:${new Date().toISOString()}`;
       await registerProc(root, { pid, pgid: pid, startedAt: identity, runId, kind: 'codex', taskId: task?.id, protectedUntil: new Date(Date.now() + 60000).toISOString(), cmd: `fodh-codex-supervisor ${runId}` });
-      await updateSlot('codex', runId, { pid, startedAt: identity });
+      await updateSlot(root, 'codex', runId, { pid, startedAt: identity });
       await withFileLock(metaPath(root, runId), async () => {
         const current = await readMeta(root, runId);
         if (!current || current.finishedAt) throw new Error('감독 초기화 전에 실행이 마감되었습니다');
@@ -164,7 +164,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
       // Supervisor is still waiting on our start lock; it cannot have spawned Codex yet.
       if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ } }
       if (await readMeta(root, runId)) await finishRun(root, runId, { status: 'fail', exit: null, error: redact((error as Error).message) });
-      else await releaseSlot('codex', runId);
+      else await releaseSlot(root, 'codex', runId);
       throw error;
     }
   });
@@ -198,7 +198,7 @@ export async function status(root: string, runId?: string) {
     return { ...meta, alive: record ? await slotOwnerAlive({ ...record, root, childPid: meta.childPid, childStartedAt: meta.childStartedAt }) : false };
   }
   const state = await readState(root);
-  return { delegation: state.delegation ?? null, meta: state.delegation ? await readMeta(root, state.delegation.runId) : null, slots: await slotsStatus() };
+  return { delegation: state.delegation ?? null, meta: state.delegation ? await readMeta(root, state.delegation.runId) : null, slots: await slotsStatus(root) };
 }
 export async function cancel(root: string, runId: string) {
   if (/^external-\d+$/u.test(runId)) throw new Error('외부 Codex 소유자는 취소 대상이 아닙니다');

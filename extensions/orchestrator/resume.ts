@@ -1,5 +1,5 @@
 import { readAutopilot, autopilotInstruction } from '../../src/core/autopilot.ts';
-import { slotOwnerAlive } from '../../src/core/slots.ts';
+import { slotOwnerAlive, slotsPath, type Slots } from '../../src/core/slots.ts';
 import { redact } from '../../src/provider/privacy.ts';
 import { interviewStatus, remainingAreas } from '../../src/core/interview.ts';
 import { substitute, todayKst } from '../../src/core/template-values.ts';
@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { harnessPath, withFileLock } from '../../src/core/storage.ts';
+import { harnessPath, readJson, withFileLock } from '../../src/core/storage.ts';
 import { getConfig, loadConfig } from '../../src/core/config.ts';
 import { activeStates as active, readState, updateState, transitionState, stopForJudgment, type HarnessState } from '../../src/core/state.ts';
 
@@ -82,7 +82,10 @@ export async function autoResume(pi: ExtensionAPI, root: string, ctxLike: Resume
     if (state.awaitingUser && reason === 'slot-free' && state.lastPaused === 'slot') state = await updateState(root, { awaitingUser: false });
     if (state.awaitingUser) return { skipped: 'awaiting-user' };
     if (state.awaitingSlot) {
-      if (await slotOwnerAlive(state.awaitingSlot.owner)) return { skipped: 'slot' };
+      const slots = await readJson<Slots>(slotsPath(root), { codex: null, heavy: null, claude: null });
+      for (const kind of ['heavy', 'codex'] as const) {
+        if (slots[kind] && await slotOwnerAlive({ ...slots[kind]!, kind })) return { skipped: 'slot' };
+      }
       const waiting = state.awaitingSlot;
       state = await updateState(root, current => current.awaitingSlot?.since === waiting.since
         && current.awaitingSlot.owner.runId === waiting.owner.runId ? { awaitingSlot: undefined } : {});

@@ -18,9 +18,8 @@ const waiting = { kind: 'codex' as const, since: '2026-09-24T00:00:00Z',
   owner: { root: '/fixture/other', runId: 'busy', pid: 99999999, startedAt: 'fixture', acquiredAt: 'fixture' } };
 async function project(stage = 'INTERVIEW') {
   const root = await baseProject(stage);
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
-  await mkdir(join(root, 'slots'));
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: waiting.owner, heavy: null }));
+
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: waiting.owner, heavy: null }));
   return root;
 }
 it.each([false, true])('F16 턴 종료 슬롯 대기: 활성 위임=%s', async delegated => {
@@ -163,12 +162,12 @@ it('F17 현재 슬롯 파일의 빈 상태·소유자 교체·사망 및 P1 활�
   await tick(root);
   expect((await readState(root)).awaitingSlot).toEqual(waiting);
   await updateState(root, { state: 'paused(slot)' });
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: null }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: null, heavy: null }));
   const now = Date.now();
   expect((await tick(root, { now })).emitted.map(e => e.kind)).toContain('slot-free');
   expect(identity).not.toHaveBeenCalled();
   const owner = { ...waiting.owner, runId: 'replacement', pid: 99999998 };
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: owner, heavy: null }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: owner, heavy: null }));
   expect((await tick(root, { now: now + 60000 })).emitted).toEqual([]);
   expect((await readState(root)).awaitingSlot?.owner).toEqual(owner);
   const { readLedger } = await import('../src/core/ledger.ts');
@@ -179,7 +178,7 @@ it('F17 현재 슬롯 파일의 빈 상태·소유자 교체·사망 및 P1 활�
 it('F17 stale heavy가 있어도 살아 있는 codex를 기다린다', async () => {
   const root = await project('IMPLEMENT');
   await updateState(root, { state: 'paused(slot)', awaitingSlot: waiting });
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: waiting.owner, heavy: { ...waiting.owner, runId: 'heavy' } }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: waiting.owner, heavy: { ...waiting.owner, runId: 'heavy' } }));
   vi.spyOn(slots, 'slotOwnerIdentity').mockImplementation(async owner => owner.runId === 'heavy' ? 'gone' : 'owned');
   expect((await tick(root)).emitted).toEqual([]);
 });
@@ -196,7 +195,7 @@ it('F17/F18 살아 있는 이전 소유자·빈 파일→slot-free→자동 RESU
   await updateState(root, { state: 'paused(slot)' });
   vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('owned');
   vi.spyOn(slots, 'slotOwnerAlive').mockResolvedValue(true);
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: null }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: null, heavy: null }));
   const records = (await tick(root)).emitted, sendMessage = vi.fn();
   await decideInbox({ sendMessage } as unknown as ExtensionAPI,
     { cwd: root, hasUI: true, isIdle: () => true, ui: { notify: vi.fn() } } as never, root, records);
@@ -212,7 +211,7 @@ it('F17 unknown 누적은 현재 파일 소유자가 바뀌면 처음부터 센�
   vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('unknown');
   const now = Date.now();
   for (let i = 0; i < 9; i++) await tick(root, { now: now + i * 60000 });
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: { ...waiting.owner, runId: 'new-unknown' }, heavy: null }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: { ...waiting.owner, runId: 'new-unknown' }, heavy: null }));
   await tick(root, { now: now + 9 * 60000 });
   const { readJson, harnessPath } = await import('../src/core/storage.ts');
   expect(await readJson(harnessPath(root, 'harness-watcher.json'), {})).toMatchObject({ watch: { slotCheck: { ownerRunId: 'new-unknown', unknownCount: 1 } } });
@@ -222,7 +221,7 @@ it('F17 unknown 누적은 현재 파일 소유자가 바뀌면 처음부터 센�
 it('Q4 codex가 비고 heavy 기록이 죽었으면 대기 소유자는 바꾸지 않는다', async () => {
   const root = await project('IMPLEMENT');
   await updateState(root, { state: 'paused(slot)', awaitingSlot: waiting });
-  await writeFile(slots.slotsPath(), JSON.stringify({ codex: null, heavy: { ...waiting.owner, runId: 'dead-heavy' } }));
+  await writeFile(slots.slotsPath(root), JSON.stringify({ codex: null, heavy: { ...waiting.owner, runId: 'dead-heavy' } }));
   vi.spyOn(slots, 'slotOwnerIdentity').mockResolvedValue('gone');
   expect((await tick(root)).emitted).toContainEqual(expect.objectContaining({ kind: 'slot-free', ownerRunId: waiting.owner.runId }));
   expect((await readState(root)).awaitingSlot?.owner).toEqual(waiting.owner);

@@ -14,7 +14,7 @@ import * as tree from '../src/core/proc-tree.ts';
 const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true }); });
 async function setup(state = 'VERIFY') {
-  const root = await mkdtemp(join(tmpdir(), 'fodh-verify-')); roots.push(root); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
+  const root = await mkdtemp(join(tmpdir(), 'fodh-verify-')); roots.push(root);
   await setConfig(root, 'notify.channels', '["ledger"]'); await updateState(root, { state }); return root;
 }
 async function script(root: string, name: string, code: string) { const path = join(root, name); await writeFile(path, code); return `${process.execPath} ${path}`; }
@@ -39,10 +39,10 @@ it('heavy·codex 양방향 배타, 종료 후 슬롯 해제', async () => {
   const root = await setup(), owner = { root, runId: 'codex', pid: process.pid, startedAt: 'spawn:unknown', acquiredAt: 'now' };
   await acquireSlot('codex', owner); await setConfig(root, 'verify.heavy', JSON.stringify([await script(root, 'heavy.cjs', 'console.log("heavy");')]));
   expect(await runVerify(root, { heavy: true })).toMatchObject({ ok: false, error: '위임 실행 중에는 무거운 검증을 시작할 수 없습니다', owner });
-  await releaseSlot('codex', 'codex'); await acquireSlot('heavy', { ...owner, runId: 'heavy' });
+  await releaseSlot(root, 'codex', 'codex'); await acquireSlot('heavy', { ...owner, runId: 'heavy' });
   expect(await acquireSlot('codex', owner)).toMatchObject({ acquired: false, owner: { runId: 'heavy' } });
-  await releaseSlot('heavy', 'heavy'); expect((await runVerify(root, { heavy: true })).ok).toBe(true);
-  expect((await slotsStatus()).heavy).toBeNull();
+  await releaseSlot(root, 'heavy', 'heavy'); expect((await runVerify(root, { heavy: true })).ok).toBe(true);
+  expect((await slotsStatus(root)).heavy).toBeNull();
 });
 it('타임아웃은 등록된 프로세스 트리만 회수하고 뒤 명령을 실행하지 않는다', async () => {
   const root = await setup(); await setConfig(root, 'verify.timeoutMinutes', '0.002');

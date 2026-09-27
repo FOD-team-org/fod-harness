@@ -149,7 +149,7 @@ async function gitProject() {
 }
 
 it('M1: 죽은 spawn 기록은 stale, codex meta는 lost로 마감하고 재실행도 성공한다', async () => {
-  const root = await setup(); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
+  const root = await setup();
   const record = { pid: 100001, pgid: 100001, startedAt: 'spawn:unknown', runId: 'stale-run', kind: 'codex' };
   await registerProc(root, record);
   await writeMeta(root, { runId: record.runId, kind: 'research', cwd: root, sandbox: 'read-only', command: ['fixture'],

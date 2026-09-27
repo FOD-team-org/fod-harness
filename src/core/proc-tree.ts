@@ -86,21 +86,21 @@ export async function commandSnapshot(run: SnapshotExec = (file, args, options) 
   const { stdout } = await run('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
     timeout: 1000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
   });
-  const snapshot = parseCommandSnapshot(stdout);
-  const detected = externalCodex(snapshot);
-  if (detected) {
-    // ps has no portable cwd column. lsof reads directory metadata only; failure
-    // keeps detection usable and the observer root is used by acquireSlot.
-    try {
-      const cwd = await run('/usr/sbin/lsof', ['-a', '-p', String(detected.pid), '-d', 'cwd', '-Fn'], {
-        timeout: 1000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-      });
-      detected.root = cwd.stdout.split('\n').find(line => line.startsWith('n/'))?.slice(1);
-    } catch { /* command-line root or observer root remains available */ }
-  }
-  return snapshot;
+  return parseCommandSnapshot(stdout);
 }
+export async function processCwd(pid: number, run: SnapshotExec = (file, args, options) => execute(file, args, options)): Promise<string | undefined> {
+  try {
+    const { stdout } = await run('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], {
+      timeout: 1000, env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+    });
+    return stdout.split('\n').find(line => line.startsWith('n/'))?.slice(1);
+  } catch { return undefined; }
+}
+// Preserve the first-candidate API for callers that only need detection.
 export function externalCodex(snapshot: ProcessSnapshotRow[], self = process.pid): ProcessSnapshotRow | undefined {
+  return externalCodexCandidates(snapshot, self)[0];
+}
+export function externalCodexCandidates(snapshot: ProcessSnapshotRow[], self = process.pid): ProcessSnapshotRow[] {
   const byPid = new Map(snapshot.map(row => [row.pid, row]));
   const ancestors = (pid: number) => {
     const chain: ProcessSnapshotRow[] = [], seen = new Set<number>();
@@ -112,7 +112,20 @@ export function externalCodex(snapshot: ProcessSnapshotRow[], self = process.pid
     return chain;
   };
   const ours = new Set(ancestors(self).map(row => row.pid));
-  return snapshot.find(row => row.pid > 1 && row.pid !== self && !ours.has(row.pid)
+  const candidates = snapshot.filter(row => row.pid > 1 && row.pid !== self && !ours.has(row.pid)
     && /codex-companion\.mjs\s+task\b|(?:^|\/)codex\s+exec\b/u.test(row.command)
     && !ancestors(row.pid).some(parent => parent.pid === self || /fodh-codex-supervisor|\/Applications\/(?:ChatGPT|Codex)\.app\//u.test(parent.command)));
+  const ids = new Set(candidates.map(row => row.pid)), outer = new Set<number>();
+  for (const candidate of candidates) {
+    const seen = new Set([candidate.pid]);
+    let pid = candidate.ppid;
+    while (!seen.has(pid)) {
+      seen.add(pid);
+      if (ids.has(pid)) outer.add(pid);
+      const parent = byPid.get(pid);
+      if (!parent) break;
+      pid = parent.ppid;
+    }
+  }
+  return candidates.filter(row => !outer.has(row.pid));
 }

@@ -24,7 +24,7 @@ const roots: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup(state = 'RESEARCH') {
   const root = await mkdtemp(join(tmpdir(), 'fodh-codex-p4-')); roots.push(root);
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots')); await setConfig(root, 'notify.channels', '["ledger"]');
+ await setConfig(root, 'notify.channels', '["ledger"]');
   await updateState(root, { state }); await writeFile(join(root, 'spec.md'), 'fixture'); return root;
 }
 it('L1: startCodex 등록 직후 delegation 전에도 60초 보호 표식이 정리를 막는다', async () => {
@@ -56,7 +56,7 @@ it.each(['', '{}', '{"pid":0}', 'bad json'])('F23 런처 pid 응답 실패는 fa
   await expect(startCodex(root, 'research', { spec: 'spec.md' })).rejects.toThrow();
   const [runId] = await readdir(join(root, '.pi/codex'));
   expect(await readMeta(root, runId)).toMatchObject({ status: 'fail', finishedAt: expect.any(String) });
-  expect((await slotsStatus()).codex).toBeNull();
+  expect((await slotsStatus(root)).codex).toBeNull();
   expect((await readState(root)).delegation).toBeUndefined();
 });
 it.each(['READY', 'RESEARCH'])('L6: watcher critical이면 %s에서도 spawn 전에 위임을 거부한다', async state => {

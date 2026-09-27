@@ -16,33 +16,33 @@ beforeEach(() => {
 });
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'fodh-slots-')); roots.push(root); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
+  const root = await mkdtemp(join(tmpdir(), 'fodh-slots-')); roots.push(root);
   const owner: SlotOwner = { root, runId: 'a', pid: process.pid, startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(), acquiredAt: new Date().toISOString() };
   return { root, owner };
 }
 it('획득·다른 runId 해제 거부·갱신·소유자만 해제', async () => {
-  const { owner } = await setup(); expect(await acquireSlot('codex', owner)).toEqual({ acquired: true });
+  const { root, owner } = await setup(); expect(await acquireSlot('codex', owner)).toEqual({ acquired: true });
   expect(await acquireSlot('codex', { ...owner, runId: 'b' })).toEqual({ acquired: false, owner });
-  await releaseSlot('codex', 'b'); expect((await slotsStatus()).codex).toEqual(owner);
-  await updateSlot('codex', 'a', { pid: process.pid, startedAt: owner.startedAt });
-  await expect(updateSlot('codex', 'b', owner)).rejects.toThrow('소유권');
-  await releaseSlot('codex', 'a'); expect(await slotsStatus()).toEqual({ codex: null, heavy: null, claude: null, alive: { codex: false, heavy: false, claude: false } });
+  await releaseSlot(root, 'codex', 'b'); expect((await slotsStatus(root)).codex).toEqual(owner);
+  await updateSlot(root, 'codex', 'a', { pid: process.pid, startedAt: owner.startedAt });
+  await expect(updateSlot(root, 'codex', 'b', owner)).rejects.toThrow('소유권');
+  await releaseSlot(root, 'codex', 'a'); expect(await slotsStatus(root)).toEqual({ path: slotsPath(root), codex: null, heavy: null, claude: null, alive: { codex: false, heavy: false, claude: false } });
 });
 it('죽은 슬롯은 stale 원장을 남기고 회수한다', async () => {
   const { root, owner } = await setup();
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: { ...owner, pid: 99999999, runId: 'dead' }, claude: null }));
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: { ...owner, pid: 99999999, runId: 'dead' }, claude: null }));
   expect(await acquireSlot('codex', owner)).toEqual({ acquired: true });
   expect(await readLedger(root)).toEqual([expect.objectContaining({ action: 'slot:stale', status: 'ok' })]);
 });
 it('실제 파일 잠금 경합에서 하나만 획득한다', async () => {
-  const { owner } = await setup();
+  const { root, owner } = await setup();
   const results = await Promise.all(Array.from({ length: 8 }, (_, i) => acquireSlot('codex', { ...owner, runId: `r${i}` })));
   expect(results.filter(item => item.acquired)).toHaveLength(1);
 });
 it('PID 재사용과 ±2초 경계, ps 불가 시 살아 있는 슬롯 보존', async () => {
-  const { owner } = await setup(); const start = Date.parse(owner.startedAt);
+  const { root, owner } = await setup(); const start = Date.parse(owner.startedAt);
   const observed = vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(new Date(start + 2000).toISOString());
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: owner, claude: null }));
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: owner, claude: null }));
   expect((await acquireSlot('codex', { ...owner, runId: 'b' })).acquired).toBe(false);
   observed.mockResolvedValue(undefined);
   expect((await acquireSlot('codex', { ...owner, runId: 'b' })).acquired).toBe(false);
@@ -51,8 +51,8 @@ it('PID 재사용과 ±2초 경계, ps 불가 시 살아 있는 슬롯 보존', 
 });
 
 it('죽은 감독의 그룹이 살아 있으면 슬롯을 계속 점유한다', async () => {
-  const { owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: owner.startedAt };
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: orphan, claude: null }));
+  const { root, owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: owner.startedAt };
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: orphan, claude: null }));
   vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid !== orphan.pid);
   vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(owner.startedAt);
@@ -63,8 +63,8 @@ it('죽은 감독의 그룹이 살아 있으면 슬롯을 계속 점유한다', 
 });
 
 it('리더 사망 뒤 생존 그룹의 자식 신원이 불일치하면 슬롯을 stale로 회수한다', async () => {
-  const { owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: '2026-09-24T00:00:00Z' };
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: orphan, claude: null }));
+  const { root, owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: '2026-09-24T00:00:00Z' };
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: orphan, claude: null }));
   vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid !== orphan.pid);
   vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue('2026-09-24T01:00:00Z');
@@ -73,8 +73,8 @@ it('리더 사망 뒤 생존 그룹의 자식 신원이 불일치하면 슬롯�
 });
 
 it.each(['start', 'group'] as const)('죽은 리더의 자식 %s 조회 실패는 unknown으로 슬롯을 보존한다', async failed => {
-  const { owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: owner.startedAt };
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: orphan, claude: null }));
+  const { root, owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998, childStartedAt: owner.startedAt };
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: orphan, claude: null }));
   vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === orphan.childPid);
   vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(failed === 'start' ? undefined : owner.startedAt);
@@ -85,22 +85,22 @@ it.each(['start', 'group'] as const)('죽은 리더의 자식 %s 조회 실패�
 });
 
 it('P4 S3: spawn 때 childStartedAt이 누락되어도 unknown으로 슬롯 보존', async () => {
-  const { owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998 };
+  const { root, owner } = await setup(); const orphan = { ...owner, pid: 99999999, childPid: 99999998 };
   vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === orphan.childPid);
   vi.spyOn(runner, 'groupAlive').mockReturnValue(true);
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: orphan, claude: null }));
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: orphan, claude: null }));
   expect(await slotOwnerAlive(orphan)).toBe(true);
   expect(await acquireSlot('heavy', { ...owner, runId: 'heavy' })).toMatchObject({ acquired: false });
 });
 
 it.each([true, false])('N1: heavy CLI가 죽으면 자식 생존·kind 기록=%s와 무관하게 슬롯 해제', async stamped => {
-  const { owner } = await setup();
+  const { root, owner } = await setup();
   const heavy = { ...owner, ...(stamped ? { kind: 'heavy' as const } : {}), pid: 100001, childPid: 100002, childStartedAt: owner.startedAt };
   vi.spyOn(lock, 'isProcessAlive').mockImplementation(pid => pid === process.pid || pid === 100002);
   vi.spyOn(processTime, 'processStartedAt').mockResolvedValue(owner.startedAt);
-  await atomicWrite(slotsPath(), JSON.stringify({ codex: null, heavy, claude: null }));
-  expect((await slotsStatus()).alive.heavy).toBe(false);
+  await atomicWrite(slotsPath(root), JSON.stringify({ codex: null, heavy, claude: null }));
+  expect((await slotsStatus(root)).alive.heavy).toBe(false);
   expect((await acquireSlot('codex', { ...owner, runId: 'next' })).acquired).toBe(true);
-  expect((await slotsStatus()).heavy).toBeNull();
+  expect((await slotsStatus(root)).heavy).toBeNull();
   expect(await readLedger(owner.root)).toContainEqual(expect.objectContaining({ action: 'slot:stale', evidence: { slot: 'heavy', owner: heavy } }));
 });

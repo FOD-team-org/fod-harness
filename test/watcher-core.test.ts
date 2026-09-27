@@ -26,7 +26,7 @@ const now = Date.parse('2026-09-24T00:00:00Z');
 const iso = (value: number) => new Date(value).toISOString();
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'fodh-watcher-')); roots.push(root); vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
+  const root = await mkdtemp(join(tmpdir(), 'fodh-watcher-')); roots.push(root);
   const { item } = await addJudgment(root, { title: '방식', background: '', options: ['진행', '보류'], recommend: '', blocks: '' });
   const path = join(root, 'docs/판단대기.md');
   const text = await readFile(path, 'utf8');

@@ -25,7 +25,6 @@ async function until(check: () => Promise<boolean>, ms = 10000) {
 }
 async function running() {
   const root = await mkdtemp(join(tmpdir(), 'fodh-supervisor-life-')); roots.push(root);
-  vi.stubEnv('FODH_SLOTS_DIR', join(root, 'slots'));
   // The shell consumes Codex arguments; only sleep runs as the delegated command.
   await setConfig(root, 'delegate.codex.command', JSON.stringify(['/bin/sh', '-c', 'exec sleep 60', 'stub']));
   await updateState(root, { state: 'RESEARCH' });
