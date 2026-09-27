@@ -428,6 +428,12 @@ async function validateWorkspace(root: string, raw: Record<string, unknown>, top
     result[name] = { path: member.path, baseBranch, worktrees: normalized.worktrees, verify: normalized.verify,
       ...(member.secrets === undefined ? {} : { secrets: normalized.secrets }), approvalRules: normalized.approvalRules };
   }
+  for (const [name, member] of Object.entries(result)) {
+    const destination = await prospectiveRealpath(resolve(root, member.path, member.worktrees.root ?? '..'));
+    if ([actualRoot, ...paths].some(path => contains(path, destination))) {
+      throw new Error(`멤버 ${name} worktrees.root는 워크스페이스 루트와 모든 멤버 밖이어야 합니다`);
+    }
+  }
   return { repos: result };
 }
 

@@ -11,7 +11,7 @@ export interface Task {
   resume?: { status: string; state: string; at: string };
   delegate?: 'codex' | 'claude'; codexThread?: string;
   judgment: string; worktree: string; notes: string;
-  verify?: { ok?: boolean; runId?: string; at?: string }; review?: { commit?: string; high?: number }; merge?: { commit?: string };
+  verify?: { ok?: boolean; runId?: string; at?: string }; review?: { commit?: string; high?: number }; merge?: { commit?: string; base?: string; baseJudgment?: string };
   docs?: { ok?: boolean }; cleanup?: { ok?: boolean }; spec?: { rev?: number };
 }
 interface BacklogStore { tasks: Task[]; usedIds: string[]; hash: string; pending?: { before: string; text: string } }

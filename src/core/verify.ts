@@ -7,7 +7,7 @@ import { commandParts, groupAlive } from '../provider/runner.ts';
 import { redact } from '../provider/privacy.ts';
 import { loadConfig } from './config.ts';
 import { readState, updateState } from './state.ts';
-import { getTask } from './backlog.ts';
+import { taskMember, executionTask, assertRecordRepo, repoEvidence, workspaceBranchWarnings } from './workspace-task.ts';
 import { acquireSlot, releaseSlot, updateSlot } from './slots.ts';
 import { inside } from './codex.ts';
 import { registerProc, removeProc } from './procs.ts';
@@ -40,10 +40,17 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   if (!['VERIFY', 'FIX'].includes(state.state)) return { ok: false, error: 'VERIFY 또는 FIX 상태에서만 검증할 수 있습니다' };
   const runId = randomUUID(), startedAt = new Date().toISOString();
   root = await realpath(root);
-  const task = state.taskId ? await getTask(root, state.taskId) : undefined;
+  const task = state.taskId ? await executionTask(root, state.taskId, config) : undefined;
+  if (config.workspace && !task) throw new Error('워크스페이스 검증에는 현재 task가 필요합니다');
+  const member = await taskMember(root, config, task ?? { id: '' }), repo = repoEvidence(config, member);
+  const record = state.worktrees?.find(item => item.taskId === state.taskId);
+  assertRecordRepo(config, task!, record);
+  if (config.workspace && !record) throw new Error(`워크스페이스 모드 task ${task!.id}에 워크트리가 없습니다 — fodh worktree create ${task!.id} 먼저`);
+  const warnings = config.workspace ? await workspaceBranchWarnings(root, config) : [];
   const taskPath = state.worktrees?.find(item => item.taskId === state.taskId)?.path || task?.worktree || root;
   const cwd = await realpath(resolve(root, options.cwd ?? taskPath));
   const registered = await Promise.all((state.worktrees ?? []).map(w => realpath(w.path).catch(() => '')));
+  if (config.workspace && !inside(await realpath(record!.path), cwd)) throw new Error('워크스페이스 모드 검증은 현재 task 워크트리 안에서만 합니다');
   if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
   if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
   const snapshot = await gitSnapshot(cwd);
@@ -52,12 +59,12 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
     const dirtyAfter = snapshot.head ? (await dirtyPaths(cwd)).filter(path => !beforePaths.has(path)) : [];
     const evidence = { ...snapshot, since: state.verifySince, ...(dirtyAfter.length ? { dirtyAfter } : {}) };
     const finishedAt = new Date().toISOString();
-    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd, ...evidence };
+    const result = { ...report, runId, taskId: state.taskId, startedAt, finishedAt, heavy: !!options.heavy, cwd, ...evidence, ...(warnings.length ? { warnings } : {}) };
     await atomicWrite(harnessPath(root, `verify/${runId}/result.json`), `${JSON.stringify(result, null, 2)}\n`);
     await updateState(root, { verify: { runId, taskId: state.taskId, ok: report.ok, at: finishedAt, heavy: !!options.heavy, cwd, ...evidence } });
     return result;
   }
-  const commands = options.heavy ? config.verify.heavy : config.verify.commands;
+  const commands = options.heavy ? member.verify.heavy ?? [] : member.verify.commands;
   if (!commands.length) return finish({ ok: false, error: `verify.${options.heavy ? 'heavy' : 'commands'} 가 비어 있습니다` });
   const ownerStartedAt = await processStartedAt(process.pid) ?? `spawn:${startedAt}`;
   if (options.heavy) {
@@ -70,7 +77,7 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
   const before = await sampleMemory(config.cleanup.swapWarnGB);
   try {
     const dir = harnessPath(root, `verify/${runId}`); await mkdir(dir, { recursive: true });
-    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: 'pre', evidence: { heavy: !!options.heavy, cwd, ...snapshot } });
+    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: 'pre', evidence: { ...repo, heavy: !!options.heavy, cwd, ...snapshot } });
     for (const [index, cmd] of commands.entries()) {
       const argv = commandParts(cmd), file = await open(join(dir, `${index + 1}.log`), 'w+', 0o600);
       const start = Date.now(); let timedOut = false, residual = false, pid: number | undefined;
@@ -87,7 +94,7 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
         void closed.catch(() => undefined);
         pid = child.pid;
         if (pid) {
-          timer = setTimeout(() => { timedOut = true; void stop(); }, config.verify.timeoutMinutes * 60000);
+          timer = setTimeout(() => { timedOut = true; void stop(); }, (member.verify.timeoutMinutes ?? 30) * 60000);
           if (options.heavy) await updateSlot('heavy', runId, { childPid: pid, childStartedAt: await processStartedAt(pid) });
           await registerProc(root, { pid, pgid: pid, runId, kind: 'verify', ownerPid: process.pid, ownerStartedAt, taskId: state.taskId, cmd: redact(cmd).slice(0, 200),
             startedAt: await processStartedAt(pid) ?? `spawn:${new Date().toISOString()}` });
@@ -123,7 +130,7 @@ export async function runVerify(root: string, options: { heavy?: boolean; cwd?: 
     }
     const after = await sampleMemory(config.cleanup.swapWarnGB);
     const report = { runId, commands: results, ...(results.some(r => r.interrupted) ? { interrupted: 'signal' as const } : {}), peakRssMB, swapBeforeGB: before?.swapUsedGB, swapAfterGB: after?.swapUsedGB, ok };
-    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: ok ? 'ok' : 'fail', evidence: report });
+    await appendLedger(root, { runId, taskId: state.taskId, action: 'verify:run', status: ok ? 'ok' : 'fail', evidence: { ...repo, ...report } });
     return await finish(report);
   } finally { if (options.heavy) await releaseSlot('heavy', runId); }
 }

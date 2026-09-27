@@ -31,7 +31,7 @@ function patchTarget(words: string[], cwd: string) {
 
 
 const inside = (path: string, base: string) => path === base || path.startsWith(base + sep);
-export interface AuditBoundary { root: string; cwd?: string; docsRoot: string; worktrees: { path: string }[] }
+export interface AuditBoundary { members?: string[]; root: string; cwd?: string; docsRoot: string; worktrees: { path: string }[] }
 
 // Only literal arguments in a write context are candidates. No shell/code evaluation.
 function fileOperands(args: string[], script = false): string[] {
@@ -67,6 +67,7 @@ export function auditPathReport(name: string, input: Record<string, unknown>, co
   const boundaryWarning = (value: string) => {
     const path = resolve(cwd, value);
     if (context.worktrees.some(w => inside(path, resolve(root, w.path)))) return false;
+    if (context.members?.some(member => inside(path, member))) return true;
     if (patches.includes(path)) return true;
     if (name === 'Bash' && (!inside(path, root) || /^\/dev\/(?:null|stdout|stderr|tty|fd\/.*)$/u.test(path))) return false;
     if (!inside(path, root)) return true;

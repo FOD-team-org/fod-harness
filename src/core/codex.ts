@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { taskMember, executionTask, assertRecordRepo } from './workspace-task.ts';
+import { repoOf, type ResolvedWorkspaceMember } from './workspace.ts';
 import { codexOwnership } from './process-identity.ts';
 import { reclaimCodexOwner } from './codex-reclaim.ts';
 import { spawn } from 'node:child_process';
@@ -7,7 +10,7 @@ import { isAbsolute, relative, resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { loadConfig, type HarnessConfig } from './config.ts';
-import { getTask, setTask } from './backlog.ts';
+import { setTask } from './backlog.ts';
 import { readState, updateState } from './state.ts';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { appendLedger } from './ledger.ts';
@@ -24,19 +27,21 @@ export class CodexError extends Error {
 }
 const pkg = fileURLToPath(new URL('../../', import.meta.url));
 export const inside = (root: string, path: string) => { const rel = relative(root, path); return rel === '' || rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); };
-export interface StartOptions { spec: string; taskId?: string; resume?: string; wait?: boolean; cwd?: string; title?: string }
+export interface StartOptions { repo?: string; spec: string; taskId?: string; resume?: string; wait?: boolean; cwd?: string; title?: string }
 export function codexArgs(config: HarnessConfig['delegate']['codex'], input: { sandbox: string; cwd: string; resultDir: string; resume?: string }): string[] {
   return [...commandParts(config.command), 'exec', ...(input.resume
     ? ['resume', input.resume, '-c', `sandbox_mode=${JSON.stringify(input.sandbox)}`]
     : ['-s', input.sandbox, '-C', input.cwd]), '--skip-git-repo-check', '-m', config.brainModel,
   '-c', `model_reasoning_effort=${config.brainEffort}`, '--json', '-o', join(input.resultDir, 'last-message.md'), '-'];
 }
-export async function buildHeader(meta: Pick<CodexMeta, 'kind' | 'runId' | 'taskId' | 'cwd' | 'sandbox' | 'workerModel' | 'workerEffort'>, maxChildAgents: number, spec: string): Promise<string> {
+export async function buildHeader(meta: Pick<CodexMeta, 'kind' | 'runId' | 'taskId' | 'cwd' | 'sandbox' | 'workerModel' | 'workerEffort'>, maxChildAgents: number, spec: string, member?: ResolvedWorkspaceMember): Promise<string> {
+  const home = homedir(), memberPath = member?.path === home ? '~' : member?.path.startsWith(home + sep) ? '~' + member.path.slice(home.length) : member?.path;
   const values: Record<string, string> = { ...meta, taskId: meta.taskId ?? '없음', maxChildAgents: String(maxChildAgents), spec,
     readOnly: meta.sandbox === 'read-only' ? ' — 파일을 쓸 수 없다. 결과는 마지막 메시지에 전부 적는다.' : '',
     kindFormat: meta.kind === 'review' ? ' review 는 `## 판정` (`APPROVE|REQUEST_CHANGES`) + 높음/중간/낮음 표(파일:줄·재현·수정안).'
       : meta.kind === 'research' ? ' research 는 `## 조사 결과` + 출처 목록.' : '' };
-  return (await readFile(join(pkg, 'templates/codex-header.md'), 'utf8')).replace(/\{\{(\w+)\}\}/gu, (_, key: string) => values[key] ?? '');
+  const header = (await readFile(join(pkg, 'templates/codex-header.md'), 'utf8')).replace(/\{\{(\w+)\}\}/gu, (_, key: string) => values[key] ?? '');
+  return member && meta.kind === 'task' ? header.replace(/^(- 작업 폴더:.*)$/mu, line => `${line}\n- 대상 레포: ${member.name} (${memberPath}) — 다른 멤버 레포는 읽기만 한다. 그 레포의 AGENTS.md 규칙을 따른다.`) : header;
 }
 async function assertCodexMemory(root: string) {
   const state = await readState(root);
@@ -48,10 +53,16 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
   root = await realpath(root);
   const started = await withFileLock(harnessPath(root, 'harness-delegation'), async () => {
     const state = await readState(root), config = await loadConfig(root), cfg = config.delegate.codex;
+    if (options.repo !== undefined) {
+      if (kind !== 'research') throw new Error('--repo 는 codex research 에서만 씁니다');
+      if (!config.workspace) throw new Error('--repo 는 워크스페이스 모드에서만 씁니다');
+      if (options.cwd !== undefined) throw new Error('--repo 와 --cwd 는 함께 쓸 수 없습니다');
+    }
+    const researchMember = options.repo !== undefined ? await repoOf(root, config, { repo: options.repo }) : undefined;
     await assertCodexMemory(root);
     if (kind === 'task' && !options.taskId || options.taskId !== undefined && !/^T\d+$/u.test(options.taskId)) throw new Error('--task T번호가 필요합니다');
     if (kind === 'review' && state.state !== 'REVIEW' || kind === 'research' && !['RESEARCH', 'ARCH', 'PLANNING', 'SPEC', 'REVIEW'].includes(state.state)) throw new Error(`현재 상태에서는 codex ${kind} 를 시작할 수 없습니다`);
-    const task = options.taskId ? await getTask(root, options.taskId) : undefined;
+    const task = options.taskId ? await executionTask(root, options.taskId, config) : undefined;
     if (kind === 'task' && (!['IMPLEMENT', 'FIX'].includes(state.state) || state.taskId !== options.taskId)) throw new Error('현재 상태에서는 codex task 를 시작할 수 없습니다');
     if (kind === 'task' && task?.status === 'done') throw new Error('완료된 task는 위임할 수 없습니다');
     if (state.delegation) {
@@ -63,11 +74,13 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
     const specPath = await realpath(resolve(root, options.spec));
     if (!inside(root, specPath)) throw new Error('--spec은 프로젝트 내부 상대 경로여야 합니다');
     const spec = await readFile(specPath, 'utf8');
-    const gitTask = kind === 'task' && await lstat(join(root, '.git')).then(() => true).catch(error => {
+    const member = task ? await taskMember(root, config, task) : undefined;
+    if (task) assertRecordRepo(config, task, state.worktrees?.find(item => item.taskId === task.id));
+    const gitTask = kind === 'task' && await lstat(join(member!.path, '.git')).then(() => true).catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
       throw error;
     });
-    const needsWorktree = 'IMPLEMENT 는 워크트리가 필요합니다: fodh worktree create <task>';
+    const needsWorktree = config.workspace ? `워크스페이스 모드 task ${task?.id}에 워크트리가 없습니다 — fodh worktree create ${task?.id} 먼저` : 'IMPLEMENT 는 워크트리가 필요합니다: fodh worktree create <task>';
     const worktree = kind === 'task' && task?.worktree ? await realpath(resolve(root, task.worktree)).catch(error => {
       if (gitTask && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(needsWorktree);
       throw error;
@@ -76,9 +89,9 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
     if (gitTask && (!worktree || !(state.worktrees ?? []).some((item, index) => item.taskId === task!.id && registered[index] === worktree))) {
       throw new Error(needsWorktree);
     }
-    const cwd = await realpath(options.cwd ? resolve(root, options.cwd) : worktree ?? root);
+    const cwd = await realpath(options.cwd ? resolve(root, options.cwd) : researchMember?.path ?? worktree ?? root);
     if (gitTask && !inside(worktree!, cwd)) throw new Error('--cwd는 해당 task의 등록된 워크트리 안이어야 합니다');
-    if (!inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
+    if (!researchMember && !inside(root, cwd) && !registered.some(path => path && inside(path, cwd))) throw new Error('--cwd는 프로젝트 또는 등록된 워크트리 안이어야 합니다');
     if (!(await stat(cwd)).isDirectory()) throw new Error('--cwd는 디렉터리여야 합니다');
     const resume = options.resume === 'last' ? task?.codexThread : options.resume;
     if (options.resume === 'last' && !resume) throw new Error('재개할 task.codexThread가 없습니다');
@@ -90,7 +103,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
       model: cfg.brainModel, effort: cfg.brainEffort, workerModel: cfg.workerModel, workerEffort: cfg.workerEffort,
       startedAt, timeoutMinutes: cfg.timeoutMinutes, status: 'running', state: state.state, worktree,
       routeHint: task ? config.delegate.route[task.category] ?? config.delegate.route.default : undefined };
-    const prompt = await buildHeader(meta, cfg.maxChildAgents, spec);
+    const prompt = await buildHeader(meta, cfg.maxChildAgents, spec, config.workspace && kind === 'task' ? member : undefined);
     await assertCodexMemory(root);
     const acquired = await acquireSlot('codex', { root, runId, taskId: task?.id, pid: process.pid,
       startedAt: await processStartedAt(process.pid) ?? `spawn:${startedAt}`, acquiredAt: startedAt });

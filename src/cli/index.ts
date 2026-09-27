@@ -16,7 +16,7 @@ import { resetMemory } from '../core/memory.ts';
 import { memoryStatus } from '../core/watcher.ts';
 import { resolveCliRoot } from './root.ts';
 import { startCodex, status as codexStatus, result as codexResult, cancel as cancelCodex, CodexError } from '../core/codex.ts';
-import { createWorktree, removeWorktree, listWorktrees, commitWorktree, validateTaskCommit } from '../core/worktree.ts';
+import { createWorktree, removeWorktree, listWorktrees, commitWorktree, mergeWorktree, validateTaskCommit } from '../core/worktree.ts';
 import { slotsStatus } from '../core/slots.ts';
 import { getConfig, setConfig, loadConfig } from '../core/config.ts';
 import { normalizeNotes, addTask, getTask, listBacklog, readBacklog, syncBacklog, setTask, BacklogError, type Task } from '../core/backlog.ts';
@@ -56,7 +56,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     const [group, action, ...rest] = positionals;
     for (const key of ['for', 'max', 'interview'] as const) if (group !== 'autopilot' && values[key] !== undefined) throw new Error(`Unknown option '--${key}'`);
     const workspaceInit = group === 'workspace' && action === 'init';
-    if (values.repo !== undefined && !(workspaceInit || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
+    if (values.repo !== undefined && !(workspaceInit || group === 'codex' && action === 'research' || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
     if (values.identity !== undefined && !workspaceInit) throw new Error("Unknown option '--identity'");
     if (!args.length || group === 'help' || values.help) {
       const selected = !group || group === 'help' ? commandTable
@@ -95,7 +95,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       if (!/^(0|[1-9]\d*)$/u.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name}는 0 이상의 정수여야 합니다`);
       return Number(value);
     };
-    if (group === 'backlog' && (values.repo?.length ?? 0) > 1) throw new Error('--repo 는 하나만 지정하세요');
+    if (!workspaceInit && (values.repo?.length ?? 0) > 1) throw new Error('--repo 는 하나만 지정하세요');
     const repo = values.repo?.[0];
     let result: unknown;
     if (group === 'autopilot') {
@@ -126,7 +126,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'codex' && ['task', 'review', 'research'].includes(action)) {
       exact(0); if (!values.spec) throw new Error('--spec 인자가 필요합니다');
       result = await startCodex(root, action as 'task' | 'review' | 'research', { spec: values.spec, taskId: values.task,
-        resume: values.resume, wait: values.wait, cwd: values.cwd, title: values.title });
+        resume: values.resume, wait: values.wait, cwd: values.cwd, title: values.title, ...(repo === undefined ? {} : { repo }) });
     } else if (group === 'codex' && action === 'status') {
       if (rest.length > 1) throw new Error('명령 인자 수를 확인하세요.'); result = await codexStatus(root, rest[0]);
     } else if (group === 'codex' && action === 'result') { exact(1); result = await codexResult(root, rest[0]); }
@@ -134,6 +134,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'slots' && action === 'status') { exact(0); result = await slotsStatus(); }
     else if (group === 'worktree' && action === 'create') { exact(1); result = await createWorktree(root, rest[0], values.base); }
     else if (group === 'worktree' && action === 'commit') { exact(1); result = await commitWorktree(root, rest[0], values.message ?? ''); }
+    else if (group === 'worktree' && action === 'merge') { exact(1); result = await mergeWorktree(root, rest[0]); }
     else if (group === 'worktree' && action === 'remove') { exact(1); result = await removeWorktree(root, rest[0], values.force); }
     else if (group === 'worktree' && action === 'list') { exact(0); result = await listWorktrees(root); }
     else if (group === 'workspace' && action === 'add') { exact(2); result = await addWorkspaceMember(root, rest[0], rest[1], { approve: values.approve }); }

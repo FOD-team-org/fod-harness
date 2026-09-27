@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { auditPathReport } from '../core/audit.ts';
 import { join, resolve } from 'node:path';
 import { access } from 'node:fs/promises';
+import { workspaceMembers } from '../core/workspace.ts';
 import { loadConfig } from '../core/config.ts';
 import { notify } from '../core/notify.ts';
 import { readState, updateState, activeStates } from '../core/state.ts';
@@ -42,7 +43,8 @@ export async function buildPrompt(root: string, latest: string, runId: string): 
   const unknown = await unknownEntries(root);
   const recovery = state.state === 'recovering' || unknown.length > 0
     ? '복구 모드: 원장의 unknown 항목을 증거로 대조하라(커밋 SHA, 원격 SHA, 위임 결과 파일, 워크트리 존재).\n'
-      + unknown.map(({ runId, action, at }) => JSON.stringify({ runId, action, at })).join('\n')
+      + unknown.map(({ runId, action, at, evidence }) => JSON.stringify({ runId, action, at,
+        ...(evidence && typeof evidence === 'object' && 'repo' in evidence ? { repo: evidence.repo } : {}) })).join('\n')
       + '\nfodh ledger resolve <runId> <action> ok|fail --evidence "증거 대조 결과" 로 각 항목을 닫아라.\n' : '';
   await deliverInbox(root, pending.map(item => item.id), runId);
   return recovery + pending.map(item => `[인박스 ${item.id}] ${JSON.stringify(item)}` + (item.kind === 'codex-done' ? item.resultDir ? `\nfodh codex result ${item.codexRunId ?? item.runId} 를 읽고 결과를 반영하라.` : '\n결과 없음 — 위임을 다시 시작하거나 fodh judgment add 로 판단을 등록하라.' : '')).join('\n') + (pending.length ? '\n\n' : '') + latest;
@@ -90,6 +92,7 @@ async function executeTurn(latest: string, options: TurnOptions, display: TurnDi
     if (!options.lockHeld) release = await acquireLock(join(root, '.pi/harness.lock'));
     await checkBillingEnvironment(root, options.env);
     const config = await loadConfig(root);
+    const members = config.workspace ? (await workspaceMembers(root, config)).map(member => member.path) : undefined;
     const model = options.doctor ? 'haiku' : options.model ?? config.brain.model;
     if (!config.brain.skipPermissions) throw new Error('configError: skipPermissions가 필요합니다.');
     try { await access(join(root, '.claude/settings.json')); }
@@ -283,7 +286,7 @@ async function executeTurn(latest: string, options: TurnOptions, display: TurnDi
         for (const tool of toolInputs.values()) {
           if (denials.has(canonical(safeValue({ tool: canonicalTool(tool.tool_name), input: tool.tool_input })))) continue;
           const audit = auditPathReport(tool.tool_name, (tool.tool_input ?? {}) as Record<string, unknown>, {
-            root, docsRoot: config.docs.root, worktrees,
+            root, docsRoot: config.docs.root, worktrees, ...(members ? { members } : {}),
           });
           for (const path of audit.boundary) suspicious.add(redact(path));
           for (const raw of audit.unresolved) {

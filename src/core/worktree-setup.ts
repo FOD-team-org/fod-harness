@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { appendLedger } from './ledger.ts';
 import { atomicWrite, harnessPath, readJson } from './storage.ts';
+import { recordMember, repoEvidence } from './workspace-task.ts';
 import { loadConfig } from './config.ts';
 import { readState, updateState } from './state.ts';
 import { redact } from '../provider/privacy.ts';
@@ -19,17 +20,19 @@ export async function setupWorktree(root: string, taskId: string, options: { tim
   const config = await loadConfig(root), state = await readState(root);
   const record = state.worktrees?.find(item => item.taskId === taskId);
   if (!record) throw new Error('등록된 task 워크트리가 필요합니다');
-  if (record.setupOk || !config.worktrees.setup.length) return record;
+  const member = await recordMember(root, config, record), repo = repoEvidence(config, member);
+  const setup = member.worktrees.setup ?? [];
+  if (record.setupOk || !setup.length) return record;
   await assertSetupMemory(root);
   const runId = randomUUID(), log = `.pi/worktree-setup/${taskId}-${runId}.log`;
   let output = '';
   await atomicWrite(join(root, log), '');
-  for (let index = 0; index < config.worktrees.setup.length; index++) {
+  for (let index = 0; index < setup.length; index++) {
     await assertSetupMemory(root);
     const started = Date.now(), order = index + 1;
-    await appendLedger(root, { runId, taskId, action: 'worktree:setup', status: 'pre', evidence: { order, log } });
+    await appendLedger(root, { runId, taskId, action: 'worktree:setup', status: 'pre', evidence: { ...repo, order, log } });
     const result = await new Promise<{ exitCode: number; output: string }>(ok => {
-      const child = spawn('/bin/sh', ['-c', config.worktrees.setup[index]], {
+      const child = spawn('/bin/sh', ['-c', setup[index]], {
         cwd: record.path, env: { ...process.env, FODH_WORKTREE: record.path, FODH_TASK: taskId },
         detached: true, stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -47,7 +50,7 @@ export async function setupWorktree(root: string, taskId: string, options: { tim
         process.on(signal, handler); return handler;
       });
       process.once('exit', kill);
-      const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs ?? config.worktrees.setupTimeoutMinutes * 60000);
+      const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs ?? (member.worktrees.setupTimeoutMinutes ?? 10) * 60000);
       const finish = (code: number, error = '') => {
         if (settled) return;
         settled = true; clearTimeout(timer); clearTimeout(drain);
@@ -76,7 +79,7 @@ export async function setupWorktree(root: string, taskId: string, options: { tim
     output += `\n[명령 ${order}]\n${redact(result.output)}`;
     await atomicWrite(join(root, log), output);
     await appendLedger(root, { runId, taskId, action: 'worktree:setup', status: result.exitCode === 0 ? 'ok' : 'fail',
-      evidence: { order, exitCode: result.exitCode, durationMs: Date.now() - started, log } });
+      evidence: { ...repo, order, exitCode: result.exitCode, durationMs: Date.now() - started, log } });
     if (result.exitCode !== 0) throw new Error(`worktree 준비 실패: ${order} exit ${result.exitCode} (로그 ${log})`);
   }
   const complete = { ...record, setupOk: true, setupAt: new Date().toISOString() };

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { getTask, setTask, listBacklog, backlogInSync, missingDoD, BacklogError, type Task } from './backlog.ts';
 import { appendLedger } from './ledger.ts';
+import { taskMember, baseTip } from './workspace-task.ts';
 import { loadConfig } from './config.ts';
 import { todayKst } from './template-values.ts';
 import { hasReviewEvidence } from './codex-record.ts';
@@ -173,10 +174,12 @@ export async function transitionState(root: string, to: string, input: Transitio
     let task: Task | undefined;
     let verified: HarnessState['verify'];
     let documented = false;
+    let mergeEntryBase: string | undefined;
     let backlogWarningTask: string | undefined;
     let staleResumeTask: HarnessState['resumeTask'];
     const next = await updateState(root, async current => {
       backlogWarningTask = undefined;
+      mergeEntryBase = undefined;
       const savedTask = options.resume && options.taskId ? await getTask(root, options.taskId) : undefined;
       const taskCheckpoint = savedTask && ['doing', 'verify', 'review', 'fix', 'merge'].includes(savedTask.status)
         && savedTask.resume?.state === to;
@@ -282,8 +285,15 @@ export async function transitionState(root: string, to: string, input: Transitio
       if (returning && current.resumeTask && current.resumeTask.taskId !== current.taskId) staleResumeTask = current.resumeTask;
       const clearsTask = ['IDLE', 'PLANNING', 'DONE_ALL', 'INTERVIEW', 'PROJECT_READY'].includes(to) || to === 'PICK' && !returning;
       const failures = to === 'CLEANUP_FAILED' ? (current.cleanupFailures ?? 0) + 1 : current.cleanupFailures;
-      const mergeBase = current.state === 'REVIEW' && to === 'MERGE'
-        ? await (await import('./worktree.ts')).rootHead(root) : current.mergeBase;
+      let mergeBase = current.mergeBase;
+      if (current.state === 'REVIEW' && to === 'MERGE' && !resume) {
+        const config = await loadConfig(root);
+        if (config.workspace) mergeEntryBase = await baseTip(await taskMember(root, config, task!));
+        else {
+          mergeBase = await (await import('./worktree.ts')).rootHead(root);
+          mergeEntryBase = mergeBase ?? undefined;
+        }
+      }
       return { mergeBase, ...(to === 'FIX' && !resume ? { verify: undefined } : {}), awaitingSlot: to === 'paused(slot)' || to === 'WAIT_RESOURCE' || to === 'PICK' && current.lastPaused === 'slot'
           ? current.awaitingSlot : undefined, state: to === 'CLEANUP_FAILED' && failures! >= 2 ? 'paused(cleanup)' : to,
         ...(to === 'VERIFY' && (resume || current.state === 'WAIT_JUDGMENT') ? { verifySince: current.resumeVerifySince } : {}),
@@ -309,7 +319,7 @@ export async function transitionState(root: string, to: string, input: Transitio
     if (task) {
       const status = ({ SPEC: 'doing', IMPLEMENT: 'doing', VERIFY: 'verify', REVIEW: 'review', FIX: 'fix',
         MERGE: 'merge', DOCS: 'merge', CLEANUP: 'merge' } as Record<string, string>)[to];
-      await setTask(root, task.id, { status, ...(options.resume ? { resume: undefined } : {}), ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
+      await setTask(root, task.id, { status, ...(mergeEntryBase ? { merge: { base: mergeEntryBase, baseJudgment: undefined } } : {}), ...(options.resume ? { resume: undefined } : {}), ...(documented ? { docs: { ok: true } } : {}), ...(verified ? { verify: { ok: true, runId: verified.runId, at: verified.at } } : {}), ...(to === 'FIX' && !options.resume ? { repair: task.repair + 1,
         verify: { ok: false }, review: { commit: undefined, high: undefined }, merge: { commit: undefined }, docs: { ok: false }, cleanup: { ok: false } } : {}) });
     }
     if (staleResumeTask) await appendLedger(root, { runId: randomUUID(), taskId: next.taskId,

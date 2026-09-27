@@ -1,3 +1,6 @@
+import { checkMergeResume } from './merge-base.ts';
+import { loadConfig } from './config.ts';
+import { workspaceBranchWarnings } from './workspace-task.ts';
 import { listBacklog, setTask, type Task } from './backlog.ts';
 import { addJudgment, type JudgmentItem } from './judgment.ts';
 import { readState, transitionState, updateState, taskStates, type HarnessState } from './state.ts';
@@ -6,7 +9,7 @@ import { harnessPath, withFileLock } from './storage.ts';
 export interface PickResources { slots: 'ok' | 'unavailable' | boolean; now?: number }
 export interface PickDecision {
   outcome: 'RESUME' | 'SPEC' | 'EMPTY' | 'DONE_ALL' | 'WAIT_JUDGMENT' | 'WAIT_RETRY' | 'WAIT_RESOURCE' | 'DEADLOCK';
-  task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
+  warnings?: string[]; task?: Task; next?: string; orphans?: Task[]; reason: string; cycle?: string[];
   retry?: { count: number; nextAt?: string }; exhausted?: boolean;
 }
 const inProgress = (task: Task) => ['doing', 'verify', 'review', 'fix', 'merge'].includes(task.status);
@@ -89,6 +92,15 @@ export function decidePick(backlog: Task[], state: HarnessState, resources: Pick
   }
   return { outcome: 'DEADLOCK', reason: '실행 가능한 task의 의존 증거를 확인해야 합니다', cycle: pending.map(task => task.id) };
 }
+async function blockOrphans(root: string, orphans: Task[] = []) {
+  for (const orphan of orphans) {
+    const { item } = await addJudgment(root, { title: `고아 task ${orphan.id}: 재개 / 폐기`,
+      background: '현재 재개 대상이 아닌 진행 중 task입니다. 소유 프로세스와 증거를 확인해야 합니다.',
+      options: ['ready 로 되돌려 재개', 'blocked 유지(보류)'], recommend: '① 증거 확인 후 재개', blocks: orphan.id,
+      resolution: 'resume', dedupeKey: `orphan:${orphan.id}` });
+    await setTask(root, orphan.id, { status: `blocked(${item.id})`, judgment: item.id });
+  }
+}
 export async function runPick(root: string, resources: PickResources = { slots: 'ok' }): Promise<PickDecision> {
   return withFileLock(harnessPath(root, 'harness-pick'), async () => {
     let state = await readState(root);
@@ -99,22 +111,39 @@ export async function runPick(root: string, resources: PickResources = { slots: 
     if (!['PICK', 'WAIT_RETRY', 'WAIT_RESOURCE', ...taskStates].includes(state.state)) {
       throw new Error('PICK 상태에서만 작업을 선택할 수 있습니다');
     }
-    const decision = decidePick(await listBacklog(root), state, { ...resources, now });
+    let backlog = await listBacklog(root);
+    let decision = decidePick(backlog, state, { ...resources, now });
+    const withWarnings = async (value: PickDecision) => {
+      if (value.outcome !== 'SPEC' && value.outcome !== 'RESUME') return value;
+      const config = await loadConfig(root);
+      if (!config.workspace) return value;
+      const warnings = await workspaceBranchWarnings(root, config);
+      return warnings.length ? { ...value, warnings } : value;
+    };
     if (decision.outcome !== 'WAIT_RESOURCE') await updateState(root, { lastPaused: undefined });
     if (taskStates.includes(state.state)) {
-      if (decision.outcome === 'RESUME') return decision;
+      if (decision.outcome === 'RESUME') return withWarnings(decision);
       throw new Error('현재 task를 먼저 완료하거나 회수해야 합니다');
     }
     if (state.state === 'WAIT_RESOURCE' && decision.outcome === 'WAIT_RESOURCE') return decision;
     if (state.state === 'WAIT_RETRY' && decision.outcome === 'WAIT_RETRY') return decision;
     if (state.state !== 'PICK') state = await transitionState(root, 'PICK', { now });
     if (decision.outcome === 'EMPTY') return decision;
-    for (const orphan of decision.orphans ?? []) {
-      const { item } = await addJudgment(root, { title: `고아 task ${orphan.id}: 재개 / 폐기`,
-        background: '현재 재개 대상이 아닌 진행 중 task입니다. 소유 프로세스와 증거를 확인해야 합니다.',
-        options: ['ready 로 되돌려 재개', 'blocked 유지(보류)'], recommend: '① 증거 확인 후 재개', blocks: orphan.id,
-        resolution: 'resume', dedupeKey: `orphan:${orphan.id}` });
-      await setTask(root, orphan.id, { status: `blocked(${item.id})`, judgment: item.id });
+    await blockOrphans(root, decision.orphans);
+    let checked = 0;
+    while (decision.outcome === 'RESUME' && decision.next === 'MERGE' && decision.task) {
+      if (checked++ >= backlog.length) {
+        const { item } = await addJudgment(root, { title: 'pick:merge-base-loop', background: '병합 기준점 재개 후보 재계산 한도를 넘었습니다.',
+          options: ['백로그와 기준점을 확인한 뒤 재시도', '보류'], recommend: '① 원인 확인 뒤 재시도', blocks: '-', dedupeKey: 'pick:merge-base-loop' });
+        await updateState(root, { pickJudgment: item.id });
+        await transitionState(root, 'WAIT_JUDGMENT');
+        return { outcome: 'WAIT_JUDGMENT', reason: `pick:merge-base-loop (${item.id})` };
+      }
+      if (await checkMergeResume(root, decision.task)) break;
+      backlog = await listBacklog(root);
+      state = await readState(root);
+      decision = decidePick(backlog, { ...state, lastPaused: undefined, resumeTask: undefined }, { ...resources, now }, {});
+      await blockOrphans(root, decision.orphans);
     }
     if (decision.outcome === 'RESUME') {
       await transitionState(root, decision.next!, { taskId: decision.task?.id, resume: true });
@@ -135,6 +164,6 @@ export async function runPick(root: string, resources: PickResources = { slots: 
       if (decision.retry) await updateState(root, { retry: decision.retry });
       await transitionState(root, decision.outcome);
     }
-    return decision;
+    return withWarnings(decision);
   });
 }

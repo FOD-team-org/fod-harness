@@ -308,7 +308,9 @@ Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 �
 
 CLI 등록 상한은 제목 60자, 배경 400자, 선택지 하나 160자, 추천 200자다. 배경은 두 문장 안으로 쓰고 긴 근거는 문서로 분리한다. 내부 재질문·안전망 등록에는 이 제한을 적용하지 않는다. 판단기록은 워처 감시 대상이 아니며 두뇌의 직접 쓰기는 판단 파일과 같은 경계로 차단한다.
 
-워크스페이스는 독립 폴더에서 `fodh workspace init --repo web=../web --repo app=../app`으로 만듭니다(`--dry-run`, `--identity '이름 <메일>'` 지원). `fodh workspace add <이름> <상대경로> --approve`, `remove <이름> --approve`로 멤버를 관리하고 `list`로 JSON 상태를 확인합니다. add의 경로는 워크스페이스 루트 기준입니다. 작업 등록에는 `fodh backlog add --repo <이름> …`를 씁니다. 새 멤버 기본 검증은 `git diff --check`이므로 실제 검증 명령은 사용자가 `harness.json`의 `workspace.repos.<이름>.verify.commands`에 직접 설정하세요. `config set workspace…`는 `--approve`가 있어도 거부됩니다. W1은 설정·백로그까지 지원하며 레포별 실행은 W2에서 연결합니다.
+워크스페이스는 독립 폴더에서 `fodh workspace init --repo web=../web --repo app=../app`으로 만듭니다(`--dry-run`, `--identity '이름 <메일>'` 지원). `fodh workspace add <이름> <상대경로> --approve`, `remove <이름> --approve`로 멤버를 관리하고 `list`로 JSON 상태를 확인합니다. add의 경로는 워크스페이스 루트 기준입니다. 작업 등록에는 `fodh backlog add --repo <이름> …`를 씁니다. 새 멤버 기본 검증은 `git diff --check`이므로 실제 검증 명령은 사용자가 `harness.json`의 `workspace.repos.<이름>.verify.commands`에 직접 설정하세요. `config set workspace…`는 `--approve`가 있어도 거부됩니다. task 워크트리·검증·병합은 지정 멤버의 설정과 저장소를 사용합니다.
+
+`fodh worktree merge <T번호>`는 MERGE 상태의 검수 커밋을 기준 브랜치에 병합하고 레포 커밋 훅을 실행한 뒤 `merge.commit`을 기록합니다(두 모드 공통, 상태 전이는 별도). 워크스페이스 조사 위임은 `fodh codex research --spec <경로> --repo <이름>`으로 멤버 체크아웃에서 읽기 전용 실행합니다. `--repo`와 `--cwd`는 함께 쓰지 않습니다.
 
 ## 오토파일럿
 
