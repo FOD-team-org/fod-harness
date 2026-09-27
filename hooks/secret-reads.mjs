@@ -1,3 +1,5 @@
+import { possibleCwds, commandCwds, gitTargets } from './effective-cwd.mjs';
+import { pathInside } from './member-main.mjs';
 import { existsSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -37,13 +39,18 @@ function gitSubcommand(args) {
   }
 }
 
-export function secretReadGuard({ root, cwd, config, deny }) {
-  const policy = secretPolicy(root, config);
+export function secretReadGuard({ root, cwd, cwdSet, config, deny, members, worktrees = [] }) {
+  const policies = [secretPolicy(root, config)];
+  let memberPolicyError = false;
+  try { policies.push(...(members ?? []).filter(m => m.secrets !== undefined).map(m => secretPolicy(m.path, m.secrets))); }
+  catch { memberPolicyError = true; }
+  const policy = { ...policies[0], secretPath: path => policies.some(p => p.secretPath(path)), basenameDenied: name => policies.some(p => p.basenameDenied(name)) };
+  let bases = [cwd], cwdUnknown = false;
   const rejected = path => deny(`비밀 파일은 두뇌가 읽을 수 없습니다: ${basename(path)}. 값이 필요하면 판단으로 사용자에게 요청하세요`, 'boundary');
-  const expanded = word => resolve(cwd, word.replace(/^~(?=\/|$)/, process.env.HOME ?? '~')
+  const expanded = (word, base = cwd) => resolve(base, word.replace(/^~(?=\/|$)/, process.env.HOME ?? '~')
     .replace(/\$(?:HOME\b|\{HOME\})/g, process.env.HOME ?? '$HOME'));
-  const check = (word, glob = true) => {
-    const path = expanded(word);
+  const checkAt = (word, glob, base) => {
+    const path = expanded(word, base);
     if (/[$`]/.test(path)) {
       const last = basename(word);
       if (!/[$`]/.test(last) && policy.basenameDenied(last)) rejected(last);
@@ -54,7 +61,15 @@ export function secretReadGuard({ root, cwd, config, deny }) {
     catch { rejected('탐색 상한 초과'); return; }
     for (const target of targets) if (policy.secretPath(target)) rejected(target);
   };
+  const check = (word, glob = true) => {
+    // Keep event cwd first, even when the new calculation cannot resolve cwd.
+    for (const base of bases) {
+      try { checkAt(word, glob, base); } catch { rejected('경로 확인 불가'); }
+    }
+    if (cwdUnknown && policy.basenameDenied(basename(word))) rejected(word);
+  };
   const fileTool = (name, input) => {
+    if (memberPolicyError) { deny('하네스 설정을 읽을 수 없습니다.', 'guard'); return; }
     if (/^(?:Read|NotebookRead)$/i.test(name) || name === 'Grep') {
       const path = input.file_path ?? input.notebook_path ?? input.path;
       if (typeof path === 'string') check(path, false);
@@ -63,16 +78,21 @@ export function secretReadGuard({ root, cwd, config, deny }) {
       const pattern = basename(input.glob);
       // Broad filename selection is not evidence of intent to read a secret.
       if (/^\*+$/u.test(pattern)) return;
-      if (policy.basenameDenied(pattern) || !policy.readAllow.includes(pattern)
+      for (const policy of policies) if (policy.basenameDenied(pattern) || !policy.readAllow.includes(pattern)
         && policy.readDeny.filter(p => !p.includes('/')).some(p => globsOverlap(pattern, p))) {
         // Exact allowlisted filenames do not become denied just because they also match a deny glob.
-        if (!/[*?\[]/.test(pattern) && !policy.basenameDenied(pattern)) return;
+        if (!/[*?\[]/.test(pattern) && !policy.basenameDenied(pattern)) continue;
         rejected(pattern);
       }
     }
   };
   const bash = entries => {
+    if (memberPolicyError) { deny('하네스 설정을 읽을 수 없습니다.', 'guard'); return; }
+    const set = cwdSet ?? possibleCwds(entries, cwd, { workspace: !!members });
     for (const { words, rawWords, normalizedWords } of entries) {
+      const effective = commandCwds(words, set);
+      cwdUnknown = effective.unknown;
+      bases = [...new Set([cwd, ...effective.cwds, ...(cwdUnknown && members ? [...members.map(m => m.path), ...worktrees.map(w => w.path)] : [])])];
       const args = commandWords(withoutRedirects(words)), exe = basename(args[0] ?? '');
       for (let i = 0; i < words.length; i++) if (['<', '<>'].includes(words[i]) && words[i + 1]) check(words[i + 1]);
       // Original tokens also contain control/group syntax. Classify metadata by the
@@ -90,7 +110,7 @@ export function secretReadGuard({ root, cwd, config, deny }) {
       const inline = inlineIndex > 0 ? args[inlineIndex + 1] : /^(?:node|bun)$/.test(exe)
         ? args.find(w => /^--(?:eval|print)=/.test(w))?.split('=').slice(1).join('=') : undefined;
       if (inline) for (const literal of inline.match(/[~\w./-]+/gu) ?? []) {
-        if (policy.secretPath(expanded(literal))) rejected(literal);
+        check(literal, false);
       }
       // Shell source is parsed separately by shellCommands, not used as a filename here.
       const nested = /^(?:sh|bash|zsh|dash|ksh|fish|eval)$/.test(exe);
@@ -100,7 +120,29 @@ export function secretReadGuard({ root, cwd, config, deny }) {
       if (exe !== 'find') for (let i = 1; i < args.length; i++) {
         let word = args[i];
         if (search?.skip.has(i)) continue;
-        if (exe === 'git' && ['show', 'cat-file'].includes(subcommand) && /^[^:]+:.+/.test(word)) { check(word.slice(word.indexOf(':') + 1), false); continue; }
+        if (exe === 'git' && ['show', 'cat-file'].includes(subcommand)
+          && (/^[^:]+:.+/.test(word) || /^:(?:[0-3]:)?[^/].*/.test(word))) {
+          const path = word.startsWith(':') ? word.replace(/^:(?:[0-3]:)?/, '') : word.slice(word.indexOf(':') + 1);
+          check(path, false);
+          try {
+            const targets = gitTargets(words, { cwds: bases, unknown: cwdUnknown });
+            for (const target of targets.cwds) {
+              const tree = worktrees.find(w => pathInside(target, w.path));
+              const member = members?.find(m => pathInside(target, m.path));
+              let tops;
+              if (tree) tops = [tree.path, members?.find(m => m.name === tree.repo)?.path ?? root];
+              else if (member) tops = [member.path];
+              else if (pathInside(target, root)) tops = [root];
+              else {
+                const top = spawnSync('git', ['-C', target, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 1000, maxBuffer: 1024 * 1024 });
+                tops = [top.status === 0 && top.stdout.trim() ? top.stdout.trim() : target];
+              }
+              const candidates = [...tops.map(top => resolve(top, path)), ...(/^(?:\.\/|\.\.\/)/.test(path) ? [resolve(target, path)] : [])];
+              for (const candidate of candidates) check(candidate, false);
+            }
+          } catch { rejected('경로 확인 불가'); }
+          continue;
+        }
         if (word === inline || nested || destinations.includes(word)) continue;
         if (filterOptions.includes(word)) { i++; continue; }
         if (filterOptions.some(opt => word.startsWith(opt + '='))) continue;
@@ -125,17 +167,35 @@ export function secretReadGuard({ root, cwd, config, deny }) {
       }
       const findOptions = args.findIndex((w, i) => i > 0 && w.startsWith('-'));
       const operands = search?.paths ?? args.slice(1, findOptions < 0 ? undefined : findOptions);
-      const paths = operands.filter(w => !/[$`]/.test(w)).map(expanded).filter(existsSync);
+      const paths = operands.filter(w => !/[$`]/.test(w)).flatMap(word => bases.map(base => expanded(word, base))).filter(existsSync);
       // Unknown value-taking options may have consumed the pattern. Never silently scan nothing.
-      const targets = paths.length ? paths.filter(directoryExists) : [cwd];
+      const targets = paths.length ? paths.filter(directoryExists) : bases;
       const ignores = rg && !args.some(w => /^-[^-]*u/.test(w) || w === '--unrestricted' || w.startsWith('--no-ignore'))
         || ag && !args.some(w => /^-[^-]*[uU]/.test(w) || w === '--unrestricted');
       const pruneDirectories = directories => {
-        if (!ignores || !existsSync(resolve(root, '.git'))) return new Set();
-        const ignored = spawnSync('git', ['-C', cwd, 'check-ignore', '--stdin', '-z'], {
-          input: directories.map(p => p + '/').join('\0') + '\0', encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024,
-        });
-        return ignored.status === 0 || ignored.status === 1 ? new Set(ignored.stdout.split('\0').map(p => p.replace(/\/$/, ''))) : new Set();
+        if (!ignores) return new Set();
+        const groups = new Map();
+        try {
+          for (const directory of directories) {
+            let owner = cwd;
+            if (members) {
+              const tree = worktrees.find(w => pathInside(directory, w.path));
+              const member = members.find(m => pathInside(directory, m.path));
+              if (tree) owner = tree.path;
+              else if (member) { if (!existsSync(resolve(member.path, '.git'))) continue; owner = member.path; }
+              else if (!existsSync(resolve(root, '.git'))) continue;
+            } else if (!existsSync(resolve(root, '.git'))) continue;
+            const paths = groups.get(owner) ?? []; paths.push(directory); groups.set(owner, paths);
+          }
+          const result = new Set();
+          for (const [owner, paths] of groups) {
+            const ignored = spawnSync('git', ['-C', owner, 'check-ignore', '--stdin', '-z'], {
+              input: paths.map(p => p + '/').join('\0') + '\0', encoding: 'utf8', timeout: 1000, maxBuffer: 4 * 1024 * 1024,
+            });
+            if (ignored.status === 0 || ignored.status === 1) for (const path of ignored.stdout.split('\0')) result.add(path.replace(/\/$/, ''));
+          }
+          return result;
+        } catch { return new Set(); }
       };
       const match = (pattern, name) => globRegex(pattern)?.test(name);
       for (const dir of targets) {

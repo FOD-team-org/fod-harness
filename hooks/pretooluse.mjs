@@ -1,3 +1,7 @@
+import { hookWorkspace } from './workspace-members.mjs';
+import { possibleCwds, commandCwds, gitTargets, syntaxFragment } from './effective-cwd.mjs';
+import { messages, memberMainOf, memberWrite, memberCommand, gitEnvironment, pathInside } from './member-main.mjs';
+import { approvalForms } from './approval-normalize.mjs';
 import { secretReadGuard } from './secret-reads.mjs';
 import { globRegex, dynamicPathPattern, specificDynamicPattern } from './path-patterns.mjs';
 import { writePaths, withoutRedirects, copyDestinations } from './write-paths.mjs';
@@ -134,11 +138,18 @@ try {
   }
   const worktrees = (Array.isArray(state?.worktrees) ? state.worktrees : [])
     .filter(w => typeof w?.path === 'string').map(w => resolve(root, w.path));
+  const worktreeRecords = (Array.isArray(state?.worktrees) ? state.worktrees : [])
+    .filter(w => typeof w?.path === 'string').map(w => ({ path: resolve(root, w.path), repo: w.repo }));
+  let workspace = { enabled: false, members: [] };
   const inWorktree = path => worktrees.some(w => inside(path, w));
   const docs = resolve(root, process.env.FODH_DOCS_ROOT || 'docs');
-  const boundary = (value, bashWrite = false) => {
+  const boundary = (value, bashWrite = false, cwds = [cwd], cwdUnknown = false) => {
     const path = normalizePath(resolve(cwd, value));
     if (inside(path, resolve(root, '.claude/skills'))) deny('스킬은 fodh skills install로만 변경할 수 있습니다.', 'boundary');
+    if (bashWrite && workspace.enabled) {
+      const message = memberWrite(value, { cwds, unknown: cwdUnknown }, { members: workspace.members, worktrees });
+      if (message) deny(message, 'boundary');
+    }
     if (inWorktree(path)) return;
     if (bashWrite && (!inside(path, root) || /^\/dev\/(?:null|stdout|stderr|tty|fd\/.*)$/.test(path))) return;
     if (!inside(path, root)) deny('프로젝트 밖 쓰기는 금지합니다. .pi/scratch/를 사용하세요.', 'boundary');
@@ -154,6 +165,8 @@ try {
       if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('config');
       projectRules = approvalRules(config.approvalRules);
       secrets = config.secrets;
+      workspace = hookWorkspace(root, config);
+      projectRules.push(...workspace.members.flatMap(member => member.approvalRules));
     } catch (error) { if (brain) deny('하네스 설정을 읽을 수 없습니다.'); }
   }
   let judgmentFile = 'docs/판단대기.md', judgmentArchive;
@@ -245,11 +258,12 @@ try {
     deny('가드 설정은 fodh로만 변경할 수 있습니다.');
   }
   if (brain && editing) boundary(input.file_path ?? input.notebook_path ?? '');
-  const readGuard = brain ? secretReadGuard({ root, cwd, config: secrets, deny }) : undefined;
+  const parsed = bash ? shellCommands(command, { extended: brain }) : undefined;
+  const cwdSet = parsed ? possibleCwds(parsed.entries, cwd, { workspace: workspace.enabled }) : undefined;
+  const readGuard = brain ? secretReadGuard({ root, cwd, cwdSet, config: secrets, deny, ...(workspace.enabled ? { members: workspace.members } : {}), worktrees: worktreeRecords }) : undefined;
   readGuard?.fileTool(name, input);
   if (!bash) process.exit(0);
 
-  const parsed = shellCommands(command, { extended: brain });
   const { entries, unterminatedHeredoc } = parsed;
   readGuard?.bash(entries);
   const groups = entries.map(entry => entry.words);
@@ -274,7 +288,9 @@ try {
       || executable === 'node' && word.startsWith('--eval=') && /FODH_[A-Z_]*/.test(word));
     if (assignment || unset || clearedEnv || nestedEnv) deny('하네스 환경변수는 바꿀 수 없습니다.');
   }
-  const commands = groups.filter(words => words.length).map(commandWords);
+  if (brain && workspace.enabled && groups.some(words => gitEnvironment(words))) deny(messages.M6, 'boundary');
+  const commandGroups = groups.filter(words => words.length);
+  const commands = commandGroups.map(commandWords);
   const globCompanion = word => /[*?\[]/.test(word ?? '') && /plugins\/cache|codex-companion/.test(word);
   const interpreter = executable => /^(?:node|bun|deno|python[\w.]*)$/.test(executable);
   const firstScript = args => {
@@ -333,7 +349,13 @@ try {
         ...(substitution.empty ? [{ value: substitution.empty, tempException: false }] : [])]
         : [{ value, tempException: tempEnabled, unresolved: /[$`]/.test(value) }];
     };
-    const checks = writePaths(words).flatMap(resolveCheck);
+    const writes = writePaths(words);
+    // writePaths preserves redirects first, then the command's own operands.
+    // Keep provenance even when a redirect and an operand have the same value.
+    const redirectCount = writes.length - writePaths(withoutRedirects(words)).length;
+    const checks = writes.flatMap((value, index) => resolveCheck(value).map(check => ({
+      ...check, origin: index < redirectCount ? 'redirect' : 'operand',
+    })));
     const paths = checks.map(check => check.value);
     {
       const operands = withoutRedirects(args);
@@ -442,6 +464,7 @@ try {
     if (paths.some(protectedPath)) deny('가드 설정은 fodh로만 변경할 수 있습니다.');
     if (process.env.FODH_CODEX_CHILD === '1' && executable === 'fodh') deny('Codex 자식은 fodh를 실행할 수 없습니다.', 'boundary');
     if (brain) {
+      if (workspace.enabled && executable === 'git' && gitTargets(words, cwdSet).invalidGlobal) deny(messages.M7, 'boundary');
       if (executable === 'fodh' && args[1] === 'memory' && args[2] === 'reset') deny('두뇌 세션은 memory reset 을 실행할 수 없습니다. 사용자 터미널에서 실행하세요');
       const action = executable === 'git' ? gitAction(args) : undefined;
       if (['revert', 'cherry-pick', 'am'].includes(action)) {
@@ -473,7 +496,7 @@ try {
           if (samePath(path, root) || samePath(path, docs) || inside(path, resolve(root, '.git'))
             || inside(path, resolve(root, '.pi')) && !(inside(path, resolve(root, '.pi/scratch')) && !samePath(path, resolve(root, '.pi/scratch')))
             || worktrees.some(tree => samePath(path, tree) || inside(tree, path))
-            || !inside(path, root) && !inWorktree(path) && !(tempException && temporary.tempSafe(value))) deny('프로젝트 밖·루트·문서 트리·.git·.pi 삭제는 금지합니다.', 'boundary');
+            || !inside(path, root) && !inWorktree(path) && !(tempException && temporary.tempSafe(value) && !(workspace.enabled && memberWrite(value, { cwds: [cwd], unknown: false }, { members: workspace.members, worktrees })))) deny('프로젝트 밖·루트·문서 트리·.git·.pi 삭제는 금지합니다.', 'boundary');
         }
       }
       if (executable === 'find' && args.includes('-delete')) deny('find -delete 대량 삭제는 금지합니다.', 'boundary');
@@ -486,15 +509,31 @@ try {
           const prefix = check.value.split(/[$`]/, 1)[0];
           if ((prefix.startsWith('~') || prefix.startsWith('/') && !inside(prefix, root) && !temporary.underTemp(prefix))) deny('동적 쓰기 경로를 확인할 수 없습니다', 'boundary');
         }
-        boundary(check.value, true);
+        const effective = commandCwds(words, cwdSet);
+        if (workspace.enabled && executable === 'git' && check.origin === 'operand') {
+          const message = memberWrite(check.value, gitTargets(words, cwdSet), { members: workspace.members, worktrees, git: true });
+          if (message) deny(message, 'boundary');
+        }
+        boundary(check.value, true, effective.cwds, effective.unknown);
       }
     }
   }
 
-  for (const words of commands) {
+  for (const [commandIndex, words] of commands.entries()) {
     const executable = basename(words[0] ?? '');
     if (executable === 'codex') deny('codex 직접 실행은 금지합니다. fodh codex를 사용하세요.', 'boundary');
     if (executable === 'git' && ['commit', 'push', 'merge'].includes(gitAction(words))) {
+      // Target checks apply to all audiences, before the unchanged state gate.
+      try {
+        const targets = gitTargets(commandGroups[commandIndex], cwdSet);
+        if (targets.unknown || gitEnvironment(commandGroups[commandIndex], false)
+          || groups.some(group => group.some((w, i) => w === 'export' && group.slice(i + 1).some(v => /^GIT_(?:DIR|WORK_TREE)(?:=|$)/.test(v))))) deny(messages.M4, 'boundary');
+        for (const target of targets.cwds) {
+          if (worktrees.some(tree => pathInside(target, tree))) continue;
+          if (workspace.enabled && memberMainOf(target, workspace.members, worktrees)) deny(messages.M2, 'boundary');
+          if (!pathInside(target, root)) deny(messages.M3, 'boundary');
+        }
+      } catch { deny(messages.M4, 'boundary'); }
       let state;
       try { state = JSON.parse(readFileSync(resolve(root, '.pi/harness-state.json'), 'utf8')).state; }
       catch { deny('상태를 확인할 수 없어 git 변경을 거부합니다.'); }
@@ -522,22 +561,32 @@ try {
   }
   const rawCandidates = parsed.unresolved && brain
     ? [command, ...[...command.matchAll(/[\s;|&({`"']+/g)].map(match => command.slice(match.index + match[0].length))] : [];
+  const forms = commandGroups.flatMap(words => basename(commandWords(words)[0] ?? '') === 'fodh' ? [] : approvalForms(words));
+  const formText = words => words.raw ? words[0] : [basename(words[0] ?? ''), ...words.slice(1)].join(' ');
   for (const category of configured) {
     const prodEnvironment = category === 'prod-migration' && groups.some(words =>
       basename(commandWords(words)[0] ?? '') !== 'fodh'
       && words.some(word => /^DATABASE_URL=.*prod/i.test(word)));
-    const matches = commands.some(words => {
+    const matches = forms.some(words => {
       if (basename(words[0] ?? '') === 'fodh') return false;
       if (category === 'push-main' && !['push', 'branch', 'tag'].includes(gitAction(words))) return false;
-      return rules[category]?.test([basename(words[0] ?? ''), ...words.slice(1)].join(' '));
+      return rules[category]?.test(formText(words));
     });
     if (prodEnvironment || matches || rawCandidates.some(text => rules[category]?.test(text))) {
       deny(`승인 필수 동작(${category})입니다. 판단대기 항목을 만들어라.`, 'approval');
     }
   }
   for (const rule of projectRules) {
-    if (commands.some(words => basename(words[0] ?? '') !== 'fodh' && new RegExp(rule.pattern, rule.flags).test([basename(words[0] ?? ''), ...words.slice(1)].join(' '))) || rawCandidates.some(text => new RegExp(rule.pattern, rule.flags).test(text))) {
+    if (forms.some(words => new RegExp(rule.pattern, rule.flags).test(formText(words))) || rawCandidates.some(text => new RegExp(rule.pattern, rule.flags).test(text))) {
       deny(`승인 필수 동작(${rule.id})입니다. 판단대기 항목을 만들어라.`, 'approval');
+    }
+  }
+  if (brain && workspace.enabled) {
+    const results = entries.flatMap((entry, i) => syntaxFragment(entry, entries[i + 1]) ? []
+      : [memberCommand(entry, cwdSet, { members: workspace.members, worktrees, substitute: substitutions.get(entry.words) })]);
+    for (const result of results) {
+      if (result.member && !result.allowed) deny(result.git ? messages.M2 : messages.M1(result.member), 'boundary');
+      if (!result.allowed && (result.possible || result.xargs && results.some(r => r.member))) deny(messages.M5, 'boundary');
     }
   }
 } catch { deny('훅 입력을 해석할 수 없습니다.'); }
