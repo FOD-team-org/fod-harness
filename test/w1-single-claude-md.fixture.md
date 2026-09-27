@@ -25,7 +25,7 @@
 | PICK | fodh pick |
 | SPEC | fodh docs scaffold spec |
 | IMPLEMENT·FIX | fodh codex task |
-| VERIFY | fodh verify run |
+| VERIFY | fodh verify run · fodh verify detect |
 | REVIEW | fodh docs scaffold review |
 | MERGE | fodh worktree merge |
 | DOCS | fodh backlog set |
@@ -39,6 +39,7 @@
 - fodh start
 - fodh cleanup run
 - fodh verify run
+- fodh verify detect
 - fodh memory status
 - fodh notify send
 - fodh codex status

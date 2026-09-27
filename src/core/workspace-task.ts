@@ -12,7 +12,7 @@ import { redact } from '../provider/privacy.ts';
 
 const execute = promisify(execFile);
 export async function taskGit(path: string, args: string[]): Promise<string> {
-  try { return (await execute('git', ['-C', path, ...args], { timeout: 60000 })).stdout; }
+  try { return (await execute('git', ['-C', path, ...args], { timeout: 60000, env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } })).stdout; }
   catch (error) { throw new Error(redact((error as { stderr?: string }).stderr || 'git worktree 실행 실패')); }
 }
 export type WorktreeRecord = NonNullable<HarnessState['worktrees']>[number];

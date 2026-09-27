@@ -11,7 +11,7 @@ import { scaffoldDoc } from '../core/docs.ts';
 import { generateClaudeMd } from '../core/claude-md.ts';
 import { installSkills, skillsStatus } from '../core/skills.ts';
 import { runCleanup, type CleanupScope } from '../core/cleanup.ts';
-import { runVerify } from '../core/verify.ts';
+import { runVerify, detectVerifyConfig } from '../core/verify.ts';
 import { notify } from '../core/notify.ts';
 import { resetMemory } from '../core/memory.ts';
 import { memoryStatus } from '../core/watcher.ts';
@@ -41,7 +41,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
       for: { type: 'string' }, max: { type: 'string' }, interview: { type: 'boolean' },
       repo: { type: 'string', multiple: true }, identity: { type: 'string' },
       brain: { type: 'string' }, model: { type: 'string' }, help: { type: 'boolean', short: 'h' }, notes: { type: 'string' },
-      approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
+      apply: { type: 'boolean' }, approve: { type: 'boolean' }, count: { type: 'string' }, answer: { type: 'string' }, source: { type: 'string' }, reason: { type: 'string' }, area: { type: 'string' }, text: { type: 'string' }, must: { type: 'boolean' }, subject: { type: 'string' }, topic: { type: 'string' }, date: { type: 'string' }, check: { type: 'boolean' },
       scope: { type: 'string' }, 'dry-run': { type: 'boolean' }, dry: { type: 'boolean' }, heavy: { type: 'boolean' }, body: { type: 'string' }, level: { type: 'string' },
       spec: { type: 'string' }, resume: { type: 'string' }, wait: { type: 'boolean' }, cwd: { type: 'string' },
       message: { type: 'string', short: 'm' }, base: { type: 'string' }, force: { type: 'boolean' }, delegate: { type: 'string' },
@@ -57,7 +57,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     const [group, action, ...rest] = positionals;
     for (const key of ['for', 'max', 'interview'] as const) if (group !== 'autopilot' && values[key] !== undefined) throw new Error(`Unknown option '--${key}'`);
     const workspaceInit = group === 'workspace' && action === 'init';
-    if (values.repo !== undefined && !(workspaceInit || group === 'codex' && action === 'research' || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
+    if (values.repo !== undefined && !(workspaceInit || group === 'verify' && action === 'detect' || group === 'codex' && action === 'research' || group === 'backlog' && ['add', 'set'].includes(action))) throw new Error("Unknown option '--repo'");
     if (values.identity !== undefined && !workspaceInit) throw new Error("Unknown option '--identity'");
     if (!args.length || group === 'help' || values.help) {
       const selected = !group || group === 'help' ? commandTable
@@ -89,7 +89,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     const readOnly = new Set(['autopilot status', 'state get', 'backlog list', 'backlog get', 'codex status', 'codex result',
       'judgment read', 'ledger list', 'worktree list', 'config get', 'slots status', 'memory status',
       'workspace list', 'watch status', 'interview status', 'skills status', 'inbox list', 'proc list']);
-    if (!readOnly.has(`${group} ${action ?? ''}`) && !(group === 'pick' && values.dry)
+    if (!readOnly.has(`${group} ${action ?? ''}`) && !(group === 'verify' && action === 'detect' && !values.apply) && !(group === 'pick' && values.dry)
       && !(group === 'claude-md' && values.check)) await assertHarnessAlive(root);
     const exact = (count: number) => { if (rest.length !== count) throw new Error('명령 인자 수를 확인하세요.'); };
     const integer = (value: string, name: string): number => {
@@ -116,6 +116,7 @@ export async function main(args = process.argv.slice(2), root?: string): Promise
     else if (group === 'skills' && action === 'install') { exact(0); result = await installSkills(root); for (const name of (result as { conflicts: string[] }).conflicts) process.stderr.write(`사용자 스킬과 이름이 겹칩니다: ${name}\n`); }
     else if (group === 'skills' && action === 'status') { exact(0); result = await skillsStatus(root); }
     else if (group === 'cleanup' && action === 'run') { exact(0); result = await runCleanup(root, { scope: (values.scope ?? 'all') as CleanupScope, taskId: values.task, dryRun: values['dry-run'] }); }
+    else if (group === 'verify' && action === 'detect') { exact(0); result = await detectVerifyConfig(root, { cwd: values.cwd, apply: values.apply, approve: values.approve, repo }); }
     else if (group === 'verify' && action === 'run') { exact(0); result = await runVerify(root, { heavy: values.heavy, cwd: values.cwd }); }
     else if (group === 'memory' && action === 'reset') { exact(0); result = await resetMemory(root); }
     else if (group === 'memory' && action === 'status') { exact(0); result = await memoryStatus(root); }

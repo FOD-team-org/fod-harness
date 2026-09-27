@@ -30,7 +30,7 @@ export interface JudgmentInput {
 }
 export interface AnswerClassification {
   kind: 'choice' | 'conditional' | 'freeform' | 'ambiguous' | 'revision-mismatch' | 'empty';
-  applicable: boolean; selection?: number; interpretation?: string; condition?: string; reason?: string;
+  applicable: boolean; selection?: number; selections?: number[]; interpretation?: string; condition?: string; reason?: string;
 }
 
 const circled = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
@@ -95,7 +95,7 @@ export function parseJudgment(text: string, options: { migrate?: boolean } = {})
   return { items, completed };
 }
 
-export function classifyAnswer(text: string, options: string[], rev = 1, answerRev = rev, requiresApproval = false): AnswerClassification {
+export function classifyAnswer(text: string, options: string[], rev = 1, answerRev = rev, requiresApproval = false, settings: { allowMulti?: boolean } = {}): AnswerClassification {
   const answer = text.trim();
   if (!answer) return { kind: 'empty', applicable: false };
   if (rev !== answerRev) return { kind: 'revision-mismatch', applicable: false, reason: '문항과 답의 개정 번호가 다릅니다' };
@@ -109,8 +109,15 @@ export function classifyAnswer(text: string, options: string[], rev = 1, answerR
   const circles = [...answer.matchAll(/[①-⑩]/gu)];
   // 번 뒤 조사가 이어지는 "2번으로"도 선택이다. 소수와 영숫자 식별자는 제외한다.
   const leading = answer.match(/^(10|[1-9])(?!\.\d)(?:번(?=$|[\s\p{P}\p{Script=Hangul}])|(?=$|[\s\p{P}]))/u);
-  const numbers = [...answer.matchAll(/(?<![A-Za-z0-9_])(?<!\d\.)(10|[1-9])(?![A-Za-z0-9_]|\.\d)(?=$|[\s\p{P}]|번|과|와|또는|혹은|이나|은|는|을|를|으로|로|하고|및)/gu)];
+  const numberPattern = /(?<![A-Za-z0-9_])(?<!\d\.)(10|[1-9])(?![A-Za-z0-9_]|\.\d)(?=$|[\s\p{P}]|번|과|와|또는|혹은|이나|은|는|을|를|으로|로|하고|및)/gu;
+  const numbers = [...answer.matchAll(numberPattern)];
   if (circles.length + numbers.length > 1) {
+    const selections = [...new Set([...circles.map(m => ({ index: m.index!, number: circled.indexOf(m[0]) + 1 })),
+      ...numbers.map(m => ({ index: m.index!, number: Number(m[1]) }))].sort((a, b) => a.index - b.index).map(m => m.number))];
+    if (settings.allowMulti && selections.every(n => n >= 1 && n <= options.length)) {
+      return { kind: 'freeform', applicable: true, selections,
+        interpretation: `복수 선택: ${selections.map(n => options[n - 1]).join(', ')}; 원문: ${answer}` };
+    }
     return { kind: 'ambiguous', applicable: false, reason: '선택 번호가 여러 개입니다' };
   }
   if (/모두|제외|전부/u.test(answer) && !circles.length && !leading
@@ -140,7 +147,13 @@ function classifyItemAnswer(item: JudgmentItem, answerRev = item.answerRev ?? it
     && number <= item.options.length && item.rev === answerRev) {
     return { kind: 'choice', applicable: true, selection: number, interpretation: item.options[number - 1] };
   }
-  return classifyAnswer(item.answer, item.options, item.rev, answerRev, requiresApproval);
+  const classification = classifyAnswer(item.answer, item.options, item.rev, answerRev, requiresApproval,
+    { allowMulti: !requiresApproval && !item.resolution });
+  // Shared by apply and its locked completion check; the watcher still waits for freeform stability.
+  if (classification.kind === 'ambiguous' && item.reaskOf && !requiresApproval && !item.resolution) {
+    return { kind: 'freeform', applicable: true, interpretation: `사용자 지시(재질문 뒤 자유 서술): ${item.answer}` };
+  }
+  return classification;
 }
 
 async function location(root: string): Promise<string> { return resolve(root, (await loadConfig(root)).judgment.file); }
@@ -561,7 +574,7 @@ export async function applyJudgments(root: string, ids?: string[], expectedAnswe
         const reason = classification.reason ?? '미답';
         unapplied.push({ id: item.id, reason });
         if (classification.kind === 'empty') continue;
-        const next = await addJudgment(root, { title: `${item.id} 재질문: ${item.title}`, background: `${reason}. 이전 답: ${item.answer}`,
+        const next = await addJudgment(root, { title: `${item.id} 재질문: ${item.title}`, background: `${reason}. 이전 답: ${item.answer}. 번호 하나만 쓰세요(예: 2). 조건은 번호 뒤에(예: 2 iOS 먼저).`,
           options: item.options, recommend: item.recommend, blocks: item.blocks, requiresApproval,
           reaskOf: item.id, resolution: item.resolution, dedupeKey: `reask:${item.id}:${item.rev}:${hash(item.answer)}` });
         await markFollowup(root, item, next.item.id);

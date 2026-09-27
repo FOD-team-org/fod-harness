@@ -5,6 +5,7 @@ import { invokeWorkspace } from './w3a-helpers.ts';
 import { invoke } from './hook-helpers.ts';
 import { single } from './w3b-helpers.ts';
 const golden = JSON.parse(await readFile(new URL('./fixtures/w3b-single-golden.json', import.meta.url), 'utf8')) as { before: Record<string, string> };
+const verifyRule = "\n검증 명령은 하네스 프리셋으로 자동 설정하고 셸로 실행한다. 자동 설정의 환경 문제는 `fodh verify detect --apply` 로 재감지한다. `--cwd` 를 붙이지 않는다. 설정 판단은 감지 실패나 사용자 설정 변경이 필요할 때만 요청한다. 빈 heavy 건너뜀은 판단 사유가 아니다.\n";
 const retry = "단 거부 문구에 `리터럴 경로로 쓰세요`·`git 전역 옵션은`·`단순한 명령으로 나눠 쓰세요` 가 있으면 같은 명령을 되풀이하지 말고, 명령을 나누거나 리터럴 경로·허용된 git 전역 옵션만 쓰는 꼴로 고쳐 한 번만 다시 친다.";
 const mergeRule = "MERGE 의 병합은 `fodh worktree merge <T>` 로만 한다(`git merge` 를 직접 치지 않는다). 실패하면 재시도하거나 git 으로 정리하지 않고 `fodh judgment add … --blocks <T> --reclaim` 으로 올린다. 비-git 프로젝트는 `fodh backlog set <T> --merge-commit none` 이다.";
 const workflow = "| MERGE | `fodh worktree merge <T>`(비-git 은 `fodh backlog set <T> --merge-commit none`) 뒤 `fodh state transition DOCS`, 실패 → `fodh judgment add … --blocks <T> --reclaim` |\n| DOCS | 실제 증거를 `fodh backlog set <T>`에 기록 |";
@@ -14,12 +15,12 @@ it('T1 brain rules change only the two exact specified places', async () => {
   const path = 'templates/brain-rules.md', lines = golden.before[path].split('\n');
   lines[2] = lines[2].replace('위임(fodh codex task / Claude Agent)으로 바꾼다. `[보호]`', '위임(fodh codex task / Claude Agent)으로 바꾼다. ' + retry + ' `[보호]`');
   lines.splice(8, 0, mergeRule);
-  expect(await readFile(path, 'utf8')).toBe(lines.join('\n'));
+  expect(await readFile(path, 'utf8')).toBe(lines.join('\n') + verifyRule);
 });
 it('T2 workflow has exactly the two new flow rows', async () => {
   const path = 'skills/fodh-workflow/SKILL.md', lines = golden.before[path].split('\n');
   lines.splice(14, 1, workflow);
-  expect(await readFile(path, 'utf8')).toBe(lines.join('\n'));
+  expect(await readFile(path, 'utf8')).toBe(lines.join('\n') + verifyRule);
 });
 it('T3 spec skill adds only the single workspace line', async () => {
   const path = 'skills/fodh-spec-writing/SKILL.md', lines = golden.before[path].split('\n');

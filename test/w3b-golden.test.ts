@@ -16,7 +16,9 @@ function I1(text: string): string {
   for (const target of [flow, command]) if (text.split(target).length !== 2) throw new Error('I1 requires exactly one original target');
   if (text.includes('- fodh worktree merge')) throw new Error('I1 requires pre-W3b output');
   return text.replace(flow, '| MERGE | fodh worktree merge |\n| DOCS | fodh backlog set |')
-    .replace(command, command + '- fodh worktree merge\n');
+    .replace(command, command + '- fodh worktree merge\n')
+    .replace('| VERIFY | fodh verify run |', '| VERIFY | fodh verify run · fodh verify detect |')
+    .replace('- fodh verify run\n', '- fodh verify run\n- fodh verify detect\n');
 }
 async function documents(rich: boolean) {
   const f = await fixture(['web']);

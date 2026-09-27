@@ -715,3 +715,20 @@ it('R6 heredoc과 같은 문자열의 실제 명령 치환도 검사한다', asy
     await writeFile(join(root, '.pi/harness.json'), JSON.stringify({ approvalRules: [projectApproval] }));
   } })).toMatchObject({ code: 2, stderr: expect.stringContaining('[승인]') });
 });
+
+it.each(['replace A B', 'replace -f A B', 'replace --edit A', 'replace --graft A B', 'replace -d A'])('J1 brain git %s writes are protected; user terminal remains allowed', async command => {
+  for (const state of ['IMPLEMENT', 'MERGE', 'IDLE']) {
+    expect(await invoke('Bash', { command: `git ${command}` }, state, brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+  }
+  expect((await invoke('Bash', { command: `git ${command}` }, 'IDLE')).code).toBe(0);
+});
+it.each(['replace', 'replace -l', 'replace --list', 'replace --format=long', 'replace -l --format=short'])('J1 brain git %s is read-only', async command => {
+  expect((await invoke('Bash', { command: `git ${command}` }, 'IMPLEMENT', brain)).code).toBe(0);
+});
+
+it.each(['fetch . A:refs/replace/X', 'push . A:refs/replace/X', 'symbolic-ref refs/replace/X refs/heads/main'])('K3 brain git %s cannot write replacement refs', async command => {
+  expect(await invoke('Bash', { command: `git ${command}` }, 'IMPLEMENT', brain)).toMatchObject({ code: 2, stderr: expect.stringContaining('[보호]') });
+});
+it.each(['replace -l A*', 'replace --list A*', 'replace -l refs/replace/*', 'for-each-ref refs/replace', 'show-ref refs/replace/X', 'log refs/replace/X'])('K3/K4 brain git %s remains read-only', async command => {
+  expect((await invoke('Bash', { command: `git ${command}` }, 'IMPLEMENT', brain)).code).toBe(0);
+});

@@ -11,6 +11,7 @@ export const commandTable: { group: string; action?: string; summary: string; us
   { group: 'start', summary: '터미널에서 하네스 시작', usage: 'fodh start [--model 별칭|id] [--dry-run]' },
   {"group": "cleanup", "action": "run", "summary": "정리 실행", "usage": "fodh cleanup run [--scope processes|storage|worktrees|all] [--task T번호] [--dry-run]"},
   {"group": "verify", "action": "run", "summary": "검증 실행", "usage": "fodh verify run [--heavy] [--cwd 경로]"},
+  {"group": "verify", "action": "detect", "summary": "검증 프리셋 감지·자동 설정", "usage": "fodh verify detect [--cwd 경로] [--apply] [--approve] [--repo 멤버]"},
   {"group": "memory", "action": "status", "summary": "메모리 상태 조회", "usage": "fodh memory status"},
   {"group": "memory", "action": "reset", "summary": "두뇌 세션 초기화", "usage": "fodh memory reset"},
   {"group": "notify", "action": "send", "summary": "알림 전송", "usage": "fodh notify send --title 제목 --body 본문 [--level info|warning|error]"},

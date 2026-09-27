@@ -114,7 +114,7 @@ export async function runProcess(options: RunOptions): Promise<ProcessResult> {
   if (options.signal?.aborted) return { code: null, stderr: '', abortKind: 'user', cleaned: true };
   const [command, ...prefix] = commandParts(options.command);
   const child = spawn(command, [...prefix, ...options.args ?? []], {
-    cwd: options.root, env: childEnv(options.env), detached: true, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: options.root, env: { ...childEnv(options.env), GIT_NO_REPLACE_OBJECTS: '1' }, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
   });
   const isBrain = (options.kind ?? 'brain') === 'brain';
   if (isBrain && child.pid) currentBrainGroup.pgid = child.pid;

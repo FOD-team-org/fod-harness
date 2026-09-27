@@ -157,7 +157,8 @@ npm 별칭·옵션 형태(`npm run-script db:migrate`, `npm --prefix . run db:mi
 감독 PID 재사용은 신호 없이 위임을 마감하고 `pid-reused`, 자식 신원이 맞지 않는 생존 그룹은 `group-unverified`를 원장에 남긴다. 도구 그룹은 30초 표본 때 meta.toolGroups에 누적해 정상 종료·cancel·lost·reclaim에서 함께 회수한다. 회수 실패 원장은 runId별 첫 1건과 10분마다 1건만 기록한다. `supervisorLost`는 결과·인박스에 전달하며 추정 성공 경고를 표시한다. 사용자 대기 표지는 본문 어느 줄이든, 위임 표지는 마지막 비어 있지 않은 3줄에서 인정한다. Codex 자식은 프로젝트 루트 env를 받지 않으며 `FODH_CODEX_CHILD=1`로 fodh 실행이 거부된다.
 
 - `fodh cleanup run [--scope processes|storage|worktrees|all] [--task T] [--dry-run]`: 등록 프로세스·프로젝트 재생성 경로·완료 또는 현재 CLEANUP 작업의 워크트리 정리, `.pi/cleanup-last.json` 보고서. 공유 캐시는 보고만 한다.
-- `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 순차 실행한다. 프로젝트마다 heavy 1개·Codex 1개 슬롯을 두며 같은 프로젝트 안에서 상호 배타다. 워크스페이스는 멤버별이 아닌 워크스페이스 루트 하나의 슬롯을 쓴다.
+- `fodh verify detect [--cwd <dir>] [--apply] [--approve] [--repo <멤버>]`: 프리셋과 현재 설정을 표시한다. `--apply`는 빈 설정 또는 자동 표지 hash가 일치하는 설정을 갱신한다. 사용자 설정 교체는 사용자 터미널의 `--approve`가 필요하다. 적용은 task 워크트리 → 멤버 경로 → 프로젝트 루트 순으로 정한 기준 경로에서만 감지한다. `--cwd`는 미리보기용이며, `--apply`와 함께 쓰면 realpath가 기준 경로와 같을 때만 허용한다(`--approve`도 예외 없음).
+- `fodh verify run [--heavy] [--cwd <dir>]`: VERIFY/FIX에서 설정된 명령을 `/bin/sh -c`로 task 워크트리 루트에서 순차 실행한다. 빈 commands는 프리셋으로 자동 채우며, 빈 heavy는 일반 검증 상태를 보존하고 건너뛴다. 프로젝트마다 heavy 1개·Codex 1개 슬롯을 두며 같은 프로젝트 안에서 상호 배타다. 워크스페이스는 멤버별이 아닌 워크스페이스 루트 하나의 슬롯을 쓴다.
 - `fodh notify send --title … --body … [--level info|warning|error]`: TUI/macOS/원장 알림. 같은 키 60초 제한, Slack은 skip 기록만 남긴다.
 - `fodh memory status`: 현재 메모리 표본과 60초 워치독 상태. 스왑 초과 5분은 paused(memory)(DOCS·CLEANUP은 계속하고 다음 PICK에서 WAIT_RESOURCE), 경고치−2 GB 미만 5분은 자동 재개다.
 
@@ -181,7 +182,7 @@ P5 인터뷰·문서·스킬:
 
 `/project-start`는 은행·판단대기 사전 검증 실패 시 error와 실패 원장을 남기고 IDLE을 유지한다. 검증 후 인터뷰를 시작하며, 두 시작 명령은 스킬 설치·CLAUDE.md 생성을 수행한다(이 준비 실패는 warning). doctor의 `skillsMissing`·`claudeMdLoaded`는 훅 성공 여부와 별도로 알린다. 프로젝트 스킬 로드는 [Fable 1차 실기](docs/검수/2026-09-24-P5-Fable-실기.md)에서 관측됐다. 2차 doctor 표식 프로토콜은 별도 실기 확인이 필요하다.
 
-P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. P6부터 두뇌의 config set은 `delegate.*`·`verify.*`를 포함한 모든 키를 거부하고 판단대기로 안내한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI는 아래 승인 전용 키에 `--approve`가 필요하다.
+P5 2차: 두뇌·doctor 자식은 `FODH_BRAIN=1`을 받는다. P6부터 두뇌의 config set은 `delegate.*`·`verify.*`를 포함한 모든 키를 거부하고 판단대기로 안내한다. 검증 명령은 하네스 프리셋으로 자동 설정하며 두뇌가 문자열을 고르지 못한다. `.pi/interview-bank.md`·`.pi/templates/`와 설정에서 계산한 `FODH_PROTECTED_EXTRA` 경로는 편집 훅으로 보호한다. 사용자 CLI는 아래 승인 전용 키에 `--approve`가 필요하다.
 
 doctor는 memory_paths를 CLAUDE.md 목록으로 해석하지 않는다. 배열·객체 원형은 원장에 안전하게 보존하고, 결과는 문자열 배열로 정규화한다. 관리 블록의 `FODH-DOC-<해시8자>`에 대해 두뇌가 `문서 확인 <표식>`으로 답하면 claudeMdLoaded=true, 다른 해시면 claudeMdStale=true다. 기대값은 claudeMdMarker로 반환하며, 스킬 누락·문서 확인 실패·낡은 표식은 경고만 낸다. 다른 해시도 문서 로드는 true이며 낡음(재생성 필요)으로 구분한다. 해시는 실제 표시하는 설정으로만 계산하고, develop-start에서 문서가 바뀌면 “커밋 필요”를 알린다.
 
@@ -235,6 +236,10 @@ git 프로젝트의 `codex task`는 해당 task의 `task.worktree`와 `state.wor
 
 | 경우 | 현재 범위와 남은 한계 |
 |---|---|
+| 하네스 Git 실행 환경 | PATH의 `git`을 쓰고 HOME을 따른다. 두뇌가 PATH를 바꾸는 것은 검증 명령 자체에도 해당하는 기존 한계다 |
+| 미추적 Git 제어 파일 | 자기 자신을 무시하는 미추적 `.gitignore`·`.gitattributes`는 clean 판정에서 숨는다. 기존 REVIEW 게이트의 한계이며, 감지는 HEAD를 읽으므로 영향이 없다 |
+| sparse checkout | 하네스 등록 워크트리에서는 지원하지 않는다. 파일 존재 여부와 관계없이 skip-worktree 항목은 dirty로 판정한다 |
+| 서브모듈 감지 | HEAD 감지는 gitlink(160000)를 탐색하지 않는다. init(fs)이 서브모듈 스택을 채운 경우 새로 고침은 설정을 줄이지 않고 그대로 유지한다 |
 | 비밀 파일의 간접 읽기 | `npm run …` 같은 프로젝트 스크립트가 내부에서 `.env`를 읽어 출력하는 경우, `xargs`·`$(…)`로 조립한 경로와 인코딩된 경로는 완전히 추적하지 않는다. 정적 basename 단서가 있는 동적 경로는 검사한다. |
 | Codex 수행자의 비밀 파일 읽기 | Codex는 Claude 훅 범위 밖이며 샌드박스가 읽기를 막지 못한다. 수행자 머리말에 비밀 파일 열기·출력 금지를 명시한다. |
 | Grep 디렉터리·일반 glob | 일반 확장자 glob과 `*`는 허용하고 `.env*`·`*.pem` 등 명시 비밀 glob은 막는다. 로컬 rg는 명시적인 `-g '*.ts'`로 `.env.ts`도 선택한다. 따라서 일반 glob이나 디렉터리 검색으로 gitignore 밖 비밀 파일이 노출될 수 있다. doctor의 `secretsNotIgnored` 경고로 보완한다. |
@@ -295,6 +300,8 @@ Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 �
 두뇌 훅은 모든 상태에서 `branch -f/-D/-M/-C`, `branch --move --force/--copy --force`, `checkout -B`, `switch -C/--force-create`, `update-ref`, 인자 있는 `reset`, `rebase`, `filter-branch`, `reflog expire`, `fetch/push`의 `+` refspec, `merge -s ours/-X ours`(긴 옵션 포함)를 `[보호]`로 차단한다. 부모 검사는 내용을 버리는 ours 병합을 구분하지 못하므로 해당 훅 차단이 1차 방어다.
 
 
+승인 필수·resolution이 아닌 판단의 복수 번호 답은 자유 서술로 적용합니다. 같은 항목의 재질문은 1회까지이며, 재질문 뒤 모호한 답도 자유 서술로 적용합니다(승인 필수·resolution 제외).
+
 ## 판단대기 구조
 
 판단 파일은 머리말 → 지금 상태 한 줄 → 한눈에 표 → 열린 판단 → 사용자 절(보류 등) → 최근 결정 순으로 읽는다. 답은 열린 항목의 `- 답:`에만 쓴다. 선택지는 한 줄에 하나씩 표시하며, 한눈에 표와 최근 결정은 하네스가 저장할 때 다시 만든다.
@@ -310,7 +317,7 @@ Codex 슬롯 거부는 `awaitingSlot`과 `wait: slot`을 남긴다. 위임을 �
 
 CLI 등록 상한은 제목 60자, 배경 400자, 선택지 하나 160자, 추천 200자다. 배경은 두 문장 안으로 쓰고 긴 근거는 문서로 분리한다. 내부 재질문·안전망 등록에는 이 제한을 적용하지 않는다. 판단기록은 워처 감시 대상이 아니며 두뇌의 직접 쓰기는 판단 파일과 같은 경계로 차단한다.
 
-워크스페이스는 독립 폴더에서 `fodh workspace init --repo web=../web --repo app=../app`으로 만듭니다(`--dry-run`, `--identity '이름 <메일>'` 지원). `fodh workspace add <이름> <상대경로> --approve`, `remove <이름> --approve`로 멤버를 관리하고 `list`로 JSON 상태를 확인합니다. add의 경로는 워크스페이스 루트 기준입니다. 작업 등록에는 `fodh backlog add --repo <이름> …`를 씁니다. 새 멤버 기본 검증은 `git diff --check`이므로 실제 검증 명령은 사용자가 `harness.json`의 `workspace.repos.<이름>.verify.commands`에 직접 설정하세요. `config set workspace…`는 `--approve`가 있어도 거부됩니다. task 워크트리·검증·병합은 지정 멤버의 설정과 저장소를 사용합니다.
+워크스페이스는 독립 폴더에서 `fodh workspace init --repo web=../web --repo app=../app`으로 만듭니다(`--dry-run`, `--identity '이름 <메일>'` 지원). `fodh workspace add <이름> <상대경로> --approve`, `remove <이름> --approve`로 멤버를 관리하고 `list`로 JSON 상태를 확인합니다. add의 경로는 워크스페이스 루트 기준입니다. 작업 등록에는 `fodh backlog add --repo <이름> …`를 씁니다. 새 멤버는 파일에서 검증 프리셋을 자동 감지합니다. 감지 실패 시 자동 표지가 있는 `git diff --check` 자리표시를 쓰고 task 워크트리에서 다시 감지합니다. 기존 표지 없는 사용자 설정은 보존합니다. `config set workspace…`는 `--approve`가 있어도 거부됩니다. task 워크트리·검증·병합은 지정 멤버의 설정과 저장소를 사용합니다.
 
 `fodh worktree merge <T번호>`는 MERGE 상태의 검수 커밋을 기준 브랜치에 병합하고 레포 커밋 훅을 실행한 뒤 `merge.commit`을 기록합니다(두 모드 공통, 상태 전이는 별도). 워크스페이스 조사 위임은 `fodh codex research --spec <경로> --repo <이름>`으로 멤버 체크아웃에서 읽기 전용 실행합니다. `--repo`와 `--cwd`는 함께 쓰지 않습니다.
 
@@ -330,3 +337,25 @@ CLI 등록 상한은 제목 60자, 배경 400자, 선택지 하나 160자, 추�
 | 백로그 완료 | 알림 후 대기, 새 범위는 사용자 결정 |
 
 Pi 창이 열려 있고 두뇌가 쉬는 동안만 자동 처리한다. 유예 중 직접 답하거나 끄면 자동 답을 취소한다. 자동 답은 판단기록의 `답 출처: 오토파일럿`과 최근 결정의 `(오토)`로 남는다. 기간 만료 또는 한도 도달 시 꺼진다. 추천의 품질 자체를 검증하지 않으며, 차단 낱말 때문에 기획 질문도 사용자에게 남을 수 있다.
+
+### 검증 프리셋
+
+감지·clean 판정용 Git은 replace 객체와 상속된 `GIT_*` 환경변수를 무시하고, 등록 워크트리의 공통 Git 디렉터리를 원래 저장소와 대조한다. 두뇌의 `git replace` 쓰기·삭제는 금지한다. 제어 문자가 포함된 파일·폴더 이름은 감지에서 제외한다. 새로 고침 감지·쓰기 오류는 `verify:auto-config` 경고로 남기고 기존 명령을 실행한다.
+`verify run` 자동 설정과 `verify detect`(미리보기·`--apply`·사용자 `--approve`)는 Git의 커밋된 HEAD를 감지합니다. 미커밋 내용을 반영하려면 먼저 커밋하세요. 사용자 전용 init·workspace init/add는 파일 시스템을 읽습니다.
+표지와 hash가 일치하는 자동 설정은 일반 검증 전에 새로 감지해 명령·자동 heavy를 추가만 합니다. 새 테스트·스크립트를 커밋하면 다음 검증에서 추가해 실행하고, 같음·축소·감지 실패·dirty이면 현재 설정을 실행합니다.
+단조 규칙으로 기존 commands·자동 heavy의 축소를 거부하며 사용자 heavy는 보존합니다. 축소는 사용자 터미널의 `verify detect --apply --approve`로만 허용합니다.
+자동 채움과 `verify detect --apply`는 Git 기준 경로가 깨끗할 때만 기록합니다(추적 변경·미추적 파일 포함, ignore 존중). 기존 자동 명령의 추가·순서 변경은 허용하지만 commands·자동 heavy 축소는 거부합니다. 빈 설정과 표지가 일치하는 자리표시는 예외이며, 사용자의 `--approve`는 깨끗한 트리·축소 제한을 건너뜁니다. 사용자 전용 init·workspace init/add는 깨끗한 트리 검사를 하지 않습니다. 읽을 수 없는 탐색 폴더는 감지 실패이며, init·workspace init/add에서는 경고와 함께 미감지로 설치합니다. 워크스페이스 docs.root는 워크스페이스 루트 기준이므로 멤버 자신의 docs/는 감지에 포함됩니다.
+기존 코드가 있는 단일 레포의 최초 `fodh init`과 `workspace init/add`에서도 감지합니다. 루트와 깊이 2까지 탐색하고 숨김·빌드·의존성·워크트리 prefix·심링크·기준 경로 안의 `config.docs.root`는 건너뜁니다. 한 폴더에서는 아래 우선순위 첫 스택만 쓰며 하위 탐색을 멈춥니다. 단 루트 Node가 워크스페이스(`package.json`의 `workspaces` 또는 `pnpm-workspace.yaml`)가 아니면 깊이 2까지 하위 탐색을 계속합니다. `verify.auto`는 시각·스택·실제 commands/heavy의 SHA-256을 기록합니다. 사용자 heavy를 보존했으면 `heavySource: "user"`를 남기며, 사용자 터미널의 `--approve`로 교체하기 전까지 유지합니다.
+
+| 스택 | 감지 파일·조건 | 일반 검증 / heavy |
+|---|---|---|
+| Flutter | pubspec.yaml의 sdk: flutter | pub get, analyze, 테스트가 있으면 test / 지원 플랫폼 build |
+| Dart | pubspec.yaml | pub get, analyze, 테스트가 있으면 test / 없음 |
+| Node | package.json의 typecheck·lint·test | 있는 스크립트만 순서대로 / build |
+| Go | go.mod | vet, test / build |
+| Rust | Cargo.toml | check, test / build --release |
+| Swift | Package.swift | build, Tests가 있으면 test / 없음 |
+| Python | pyproject.toml·setup.py·requirements.txt + 테스트 표지 | python3 -m pytest -q / 없음 |
+| Gradle | gradlew | ./gradlew test / ./gradlew build |
+
+Flutter의 비ASCII 실제 경로에서는 `dart analyze`를 사용하고 iOS heavy는 macOS에서만 넣습니다. Node는 pnpm→yarn→bun→npm 순으로 lock 파일을 확인하고 기본 test 자리표시는 제외합니다. 설치 명령은 넣지 않습니다.

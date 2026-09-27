@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { initWorkspace, addWorkspaceMember, removeWorkspaceMember, readMarker, listWorkspace } from '../src/core/workspace.ts';
+import { autoVerifyMarker } from '../src/core/config.ts';
 import { acquireLock } from '../src/core/lock.ts';
 import { addTask, setTask } from '../src/core/backlog.ts';
 import * as installation from '../src/cli/init.ts';
@@ -13,7 +14,11 @@ it('3개 멤버 설치, raw 설정·표지·로컬 명의·IDLE·다음 안내',
   const f = await fixture(), result = await initWorkspace({ cwd: f.root, repos: f.args });
   expect(result.committed).toBe(true); expect(result.nextSteps[0]).toBe('fodh 로 창을 열고 첫 백로그를 요청합니다(fodh backlog add --repo <이름> …)');
   const config = JSON.parse(await readFile(join(f.root, '.pi/harness.json'), 'utf8'));
-  expect(config).toEqual(f.candidate); expect(config.verify).toBeUndefined(); expect(config.worktrees).toBeUndefined();
+  const repos = Object.fromEntries(Object.entries(f.repos).map(([name, member]) => {
+    const verify = { ...member.verify, heavy: [] };
+    return [name, { ...member, verify: { ...verify, auto: { ...autoVerifyMarker(verify, []), at: expect.any(String) } } }];
+  }));
+  expect(config).toEqual({ workspace: { repos } }); expect(config.verify).toBeUndefined(); expect(config.worktrees).toBeUndefined();
   for (const name of Object.keys(f.repos)) expect(await readMarker(join(f.member(name), '.git'))).toBe(f.root);
   expect(await git(f.root, 'log', '-1', '--format=%an <%ae>')).toBe('W1 Fixture <w1@example.invalid>');
   expect(await git(f.root, 'config', '--local', '--get', 'user.email')).toBe('w1@example.invalid');

@@ -1,21 +1,24 @@
 import { secretSettings, secretPolicy, type SecretSettings } from '../../hooks/secret-paths.mjs';
 import { approvalRules, type ApprovalRule } from '../../hooks/approval-rules.mjs';
+import { isDetectedVerify, type DetectedVerify } from './verify-detect.ts';
 import { assertNotBrain } from './brain-guard.ts';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { lstat, realpath, stat, unlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { redact } from '../provider/privacy.ts';
 import { commandParts } from '../provider/runner.ts';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { atomicWrite, harnessPath, readJson, withFileLock } from './storage.ts';
 import { notify as sendNotification } from './notify.ts';
 
 export const bundledSkills = ['fodh-workflow', 'fodh-spec-writing', 'fodh-review-checklist', 'fodh-judgment'];
+export interface VerifyAuto { at: string; stacks: string[]; hash: string; heavySource?: 'user' }
 export interface WorkspaceMember {
   path: string;
   baseBranch?: string;
   worktrees: { root?: string; prefix: string; links?: string[]; setup?: string[]; setupTimeoutMinutes?: number };
-  verify: { commands: string[]; heavy?: string[]; timeoutMinutes?: number };
+  verify: { commands: string[]; heavy?: string[]; timeoutMinutes?: number; auto?: VerifyAuto };
   secrets?: { readDeny?: string[]; readAllow?: string[] };
   approvalRules?: ApprovalRule[];
 }
@@ -42,7 +45,7 @@ export interface HarnessConfig {
   };
   cleanup: { rebuildablePaths: string[]; keepPaths: string[]; sharedCaches: { enabled: boolean; paths: string[] }; codexRunsKeep: number;
     processes: { neverKill: string[]; killPatterns: string[] }; swapWarnGB: number };
-  verify: { commands: string[]; heavy: string[]; timeoutMinutes: number };
+  verify: { commands: string[]; heavy: string[]; timeoutMinutes: number; auto?: VerifyAuto };
   notify: { channels: ('tui' | 'macos' | 'slack' | 'ledger')[] };
   budget: { dailyTurns: number; dailyHours: number };
   worktrees: { root: string; prefix: string; links: string[]; setup: string[]; setupTimeoutMinutes: number };
@@ -257,7 +260,7 @@ export async function loadConfig(root: string, candidate?: unknown, options: { d
       processes: { neverKill: strings(processes.neverKill, ['nest start --watch', 'qemu-system', 'Simulator', 'ChatGPT'], 'cleanup.processes.neverKill'),
         killPatterns: strings(processes.killPatterns, ['jest', 'flutter_tester', 'GradleDaemon'], 'cleanup.processes.killPatterns') },
       swapWarnGB: atLeast(defaultValue(cleanup.swapWarnGB, 8), 'cleanup.swapWarnGB', 3) },
-    verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes') },
+    verify: { commands: commands(verify.commands, 'verify.commands'), heavy: commands(verify.heavy, 'verify.heavy'), timeoutMinutes: positive(defaultValue(verify.timeoutMinutes, 30), 'verify.timeoutMinutes'), ...(verify.auto === undefined ? {} : { auto: validateVerifyAuto(verify.auto) }) },
     notify: { channels: channels as HarnessConfig['notify']['channels'] },
     budget: { dailyTurns: positive(defaultValue(budget.dailyTurns, 200), 'budget.dailyTurns', true), dailyHours: positive(defaultValue(budget.dailyHours, 20), 'budget.dailyHours') },
     secrets, delegate: delegation, worktrees: { root: wtRoot, prefix, links, setup: strings(wt.setup, [], 'worktrees.setup'), setupTimeoutMinutes: bounded(wt.setupTimeoutMinutes, 10, 1, 60, 'worktrees.setupTimeoutMinutes') }, watch: watching, judgment: { file, archive, recent }, requiresApproval, approvalRules: approvalRules(raw.approvalRules),
@@ -446,4 +449,57 @@ async function prospectiveRealpath(path: string): Promise<string> {
     if (await lstat(path).then(entry => entry.isSymbolicLink(), () => false)) throw error;
     return resolve(await prospectiveRealpath(dirname(path)), basename(path));
   }
+}
+
+function validateVerifyAuto(value: unknown): VerifyAuto {
+  const auto = object(value, 'verify.auto');
+  if (typeof auto.at !== 'string' || !Number.isFinite(Date.parse(auto.at))
+    || !Array.isArray(auto.stacks) || auto.stacks.some(s => typeof s !== 'string' || !s)
+    || auto.heavySource !== undefined && auto.heavySource !== 'user'
+    || typeof auto.hash !== 'string' || !/^[a-f0-9]{64}$/u.test(auto.hash)) throw new Error('verify.auto 형식이 올바르지 않습니다');
+  return { at: auto.at, stacks: auto.stacks as string[], hash: auto.hash, ...(auto.heavySource === 'user' ? { heavySource: 'user' as const } : {}) };
+}
+export function verifyHash(value: { commands: string[]; heavy?: string[] }): string {
+  return createHash('sha256').update(JSON.stringify({ commands: value.commands, heavy: value.heavy ?? [] })).digest('hex');
+}
+export function autoVerifyMarker(value: { commands: string[]; heavy?: string[] }, stacks: DetectedVerify['stacks']): VerifyAuto {
+  return { at: new Date().toISOString(), stacks: stacks.map(s => `${s.stack}:${s.dir}`), hash: verifyHash(value) };
+}
+export const userSetVerify = (value: WorkspaceMember['verify']): boolean =>
+  value.commands.length > 0 && (!value.auto || value.auto.hash !== verifyHash(value));
+export const verifyUserSetError = '사용자가 설정한 검증 명령입니다 — harness.json 을 직접 고치거나 사용자 터미널에서 --approve 로 교체하세요';
+
+/** Internal preset writer. There is no CLI parameter for command strings. */
+export async function writeAutoVerify(root: string, target: string, detected: DetectedVerify, options: { approve?: boolean } = {}) {
+  if (!isDetectedVerify(detected)) throw new Error('detectVerify 결과만 기록할 수 있습니다');
+  const path = harnessPath(root, 'harness.json');
+  return withFileLock(path, async () => {
+    const raw = object(await readJson(path, {}), '하네스');
+    const loaded = await loadConfig(root, raw, { dryRun: true });
+    const match = /^workspace\.repos\.([a-z][a-z0-9-]{0,15})\.verify$/u.exec(target);
+    if (target !== 'verify' && !match || target === 'verify' && loaded.workspace) throw new Error('자동 검증 설정 대상이 올바르지 않습니다');
+    const current = match ? loaded.workspace?.repos[match[1]]?.verify : loaded.verify;
+    if (!current) throw new Error('등록되지 않은 멤버입니다');
+    if (userSetVerify(current) || options.approve) {
+      if (!options.approve) throw new Error(verifyUserSetError);
+      try { await assertNotBrain(root, 'verify detect --approve'); } catch { throw new Error(verifyUserSetError); }
+    }
+    const parent = match ? object(object(object(raw.workspace, 'workspace').repos, 'repos')[match[1]], 'member') : raw;
+    const previous = object(parent.verify ?? {}, 'verify');
+    const preserveHeavy = !options.approve && (current.auto?.heavySource === 'user' || !current.auto && !!current.heavy?.length);
+    const placeholder = current.auto && !userSetVerify(current)
+      && current.commands.length === 1 && current.commands[0] === 'git diff --check';
+    if (!options.approve && current.commands.length && !placeholder) {
+      const missing = [...current.commands.filter(cmd => !detected.commands.includes(cmd)),
+        ...(!preserveHeavy ? (current.heavy ?? []).filter(cmd => !detected.heavy.includes(cmd)) : [])];
+      if (missing.length) throw new Error(`감지 결과가 현재 검증 명령을 줄입니다(빠짐: ${missing.map(redact).join(' · ')}) — 줄이려면 사용자가 터미널에서 fodh verify detect --apply --approve 를 실행해야 합니다`);
+    }
+    const heavy = preserveHeavy ? current.heavy ?? [] : detected.heavy;
+    const next = { ...previous, commands: [...detected.commands], heavy: [...heavy],
+      auto: { ...autoVerifyMarker({ commands: detected.commands, heavy }, detected.stacks), ...(preserveHeavy ? { heavySource: 'user' as const } : {}) } };
+    parent.verify = next;
+    await loadConfig(root, raw, { dryRun: true });
+    await atomicWrite(path, JSON.stringify(raw, null, 2) + '\n');
+    return next;
+  });
 }

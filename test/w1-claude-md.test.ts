@@ -6,7 +6,7 @@ import { fixture, writeConfig } from './w1-helpers.ts';
 it('한 레포 CLAUDE.md는 W1 전 HEAD 생성 결과와 바이트 동일·check 변경 없음', async () => {
   const f = await fixture(['web']); await writeConfig(f.root, {});
   await writeFile(join(f.root, '.pi/harness-state.json'), JSON.stringify({ state: 'IDLE', projectName: 'W1 single repository' }));
-  // HEAD 6bfa751 출력 + W3b I1
+  // HEAD 6bfa751 출력 + W3b I1 + VC1 verify detect
   const baseline = await readFile(new URL('./w1-single-claude-md.fixture.md', import.meta.url));
   await generateClaudeMd(f.root);
   expect(await readFile(join(f.root, 'CLAUDE.md'))).toEqual(baseline);

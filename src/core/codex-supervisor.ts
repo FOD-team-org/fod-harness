@@ -38,7 +38,7 @@ async function stopChildren(child: ChildProcess, toolGroups: readonly ToolGroup[
 }
 export function codexChildEnv(env: NodeJS.ProcessEnv, runId: string): NodeJS.ProcessEnv {
   const { FODH_PROJECT_ROOT: _projectRoot, ...rest } = env;
-  return { ...rest, FODH_RUN_ID: runId, FODH_CODEX_CHILD: '1' };
+  return { ...rest, FODH_RUN_ID: runId, FODH_CODEX_CHILD: '1', GIT_NO_REPLACE_OBJECTS: '1' };
 }
 export async function supervise(root: string, runId: string): Promise<void> {
   let child: ChildProcess | undefined, timer: ReturnType<typeof setTimeout> | undefined, rssTimer: ReturnType<typeof setInterval> | undefined;

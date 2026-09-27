@@ -32,7 +32,7 @@ it('명령 순차 실행·실패 중단·redact tail 4KB·레지스트리 및 �
 });
 it('상태·빈 설정·cwd 경계 검사', async () => {
   const root = await setup('IMPLEMENT'); expect(await runVerify(root)).toMatchObject({ ok: false, error: expect.stringContaining('VERIFY') });
-  await updateState(root, { state: 'FIX' }); expect(await runVerify(root)).toMatchObject({ ok: false, error: 'verify.commands 가 비어 있습니다' });
+  await updateState(root, { state: 'FIX' }); expect(await runVerify(root)).toMatchObject({ ok: false, error: expect.stringContaining('verify.commands 가 비어 있고 자동 감지된 스택이 없습니다') });
   await setConfig(root, 'verify.commands', '["node --version"]'); await expect(runVerify(root, { cwd: '/' })).rejects.toThrow('--cwd');
 });
 it('heavy·codex 양방향 배타, 종료 후 슬롯 해제', async () => {

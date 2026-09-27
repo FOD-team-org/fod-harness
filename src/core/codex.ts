@@ -127,7 +127,7 @@ export async function startCodex(root: string, kind: CodexKind, options: StartOp
       try {
         const child = spawn(process.execPath, [launcher.bin ?? join(pkg, 'bin/fodh-codex-supervisor'), root, runId, '--launch'], {
           detached: true, stdio: ['ignore', 'pipe', log.fd], cwd: root,
-          env: { ...childEnv(), FODH_PROJECT_ROOT: root, FODH_RUN_ID: runId },
+          env: { ...childEnv(), GIT_NO_REPLACE_OBJECTS: '1', FODH_PROJECT_ROOT: root, FODH_RUN_ID: runId },
         });
         let output = '';
         child.stdout!.setEncoding('utf8');

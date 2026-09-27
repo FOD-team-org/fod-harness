@@ -185,7 +185,7 @@ it('runPick 재시도 예약 중 반복 호출은 백오프를 증가시키지 �
 });
 it.each([
   ['①','choice',true],['2, 단 검수 후','conditional',true],['테스트 먼저','freeform',true],
-  ['1 또는 2','ambiguous',false],['rev','revision-mismatch',false],['','empty',false],
+  ['1 또는 2','freeform',true],['rev','revision-mismatch',false],['','empty',false],
 ])('judgment apply 6분류 %s (%s)',async(answer,kind,applies)=>{
   const root=await project(),t=await addTask(root,input),added=await addJudgment(root,{title:'범위',background:'',options:['첫째','둘째'],recommend:'①',blocks:t.id});
   await setTask(root,t.id,{status:`blocked(${added.item.id})`,judgment:added.item.id});

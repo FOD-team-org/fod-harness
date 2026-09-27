@@ -2,7 +2,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstat, readFile, realpath, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { loadConfig, type HarnessConfig, type WorkspaceMember } from './config.ts';
+import { autoVerifyMarker, loadConfig, type HarnessConfig, type WorkspaceMember } from './config.ts';
+import { DetectUnreadableError, type DetectedVerify, detectVerify, verifySkipDirs } from './verify-detect.ts';
 import type { Task } from './backlog.ts';
 import { assertNotBrain } from './brain-guard.ts';
 import { lockOwnerAlive, ownerAt } from './lock.ts';
@@ -98,9 +99,21 @@ export async function checkWorkspaceMember(root: string, member: ResolvedWorkspa
   const branches = await workspaceGit(member.path, ['branch', '--no-merged', member.baseBranch!, '--list', `${member.worktrees.prefix}*`]);
   if (branches) throw new Error(`멤버 ${member.name}에 병합 안 된 prefix 브랜치가 있습니다: ${branches}`);
 }
-// Minimal safe defaults; configure actual verification commands before W2 execution.
+// Unrecognized members retain a marked placeholder for detection in their first task.
 export function defaultWorkspaceMember(name: string, path: string): WorkspaceMember {
   return { path, baseBranch: 'main', worktrees: { prefix: `wt-${name}-` }, verify: { commands: ['git diff --check'] } };
+}
+async function detectedWorkspaceMember(member: WorkspaceMember, root: string, docsRoot: string, warnings: string[]): Promise<WorkspaceMember> {
+  const base = await realpath(resolve(root, member.path));
+  let detected: DetectedVerify | undefined;
+  try {
+    detected = await detectVerify(base, { source: 'fs', skipPrefixes: [member.worktrees.prefix], skipDirs: verifySkipDirs(base, docsRoot, root) });
+  } catch (error) {
+    if (!(error instanceof DetectUnreadableError)) throw error;
+    warnings.push(error.message);
+  }
+  const verify = { commands: detected?.commands ?? member.verify.commands, heavy: detected?.heavy ?? [] };
+  return { ...member, verify: { ...verify, auto: autoVerifyMarker(verify, detected?.stacks ?? []) } };
 }
 export async function initWorkspace(options: { cwd?: string; repos: string[]; identity?: string; dryRun?: boolean }) {
   const root = await realpath(options.cwd ?? process.cwd());
@@ -115,13 +128,17 @@ export async function initWorkspace(options: { cwd?: string; repos: string[]; id
   for (const entry of options.repos) {
     const at = entry.indexOf('='), name = entry.slice(0, at), path = entry.slice(at + 1);
     if (at < 1 || !path || Object.hasOwn(repos, name)) throw new Error('--repo 이름=상대경로 형식과 중복 이름을 확인하세요');
-    Object.defineProperty(repos, name, { value: defaultWorkspaceMember(name, path), enumerable: true });
+    Object.defineProperty(repos, name, { value: defaultWorkspaceMember(name, path), enumerable: true, writable: true });
   }
+  const preflight = await loadConfig(root, { workspace: { repos } }, { dryRun: true });
+  const warnings: string[] = [];
+  for (const name of Object.keys(repos)) repos[name] = await detectedWorkspaceMember(repos[name], root, preflight.docs.root, warnings);
   const configPath = harnessPath(root, 'harness.json'), pendingPath = harnessPath(root, 'harness-workspace-init.json');
   const old = await readText(configPath), pending = await readJson<{ repos: Record<string, WorkspaceMember> } | undefined>(pendingPath, undefined);
   const candidate = old ? JSON.parse(old) : { workspace: { repos } };
-  if (old && (!pending || JSON.stringify(pending.repos) !== JSON.stringify(repos)
-    || JSON.stringify(candidate.workspace?.repos) !== JSON.stringify(repos))) throw new Error('이미 하네스가 설치된 폴더입니다');
+  const comparable = (value: unknown) => JSON.stringify(value, (key, entry) => key === 'auto' && entry ? { ...entry, at: undefined } : entry);
+  if (old && (!pending || comparable(pending.repos) !== comparable(repos)
+    || comparable(candidate.workspace?.repos) !== comparable(repos))) throw new Error('이미 하네스가 설치된 폴더입니다');
   const config = await loadConfig(root, candidate, { dryRun: true });
   const members = await workspaceMembers(root, config);
   for (const member of members) await checkWorkspaceMember(root, member);
@@ -161,6 +178,7 @@ export async function initWorkspace(options: { cwd?: string; repos: string[]; id
         for (const common of createdMarkers) await removeMarker(common);
       } else if (result.committed || result.skipped.some(item => item.reason.startsWith('커밋이 있는 저장소'))) await unlink(pendingPath);
     }
+    if (warnings.length) result.warnings = [...(result.warnings ?? []), ...warnings];
     return result;
   } catch (error) {
     for (const common of createdMarkers) await removeMarker(common);
@@ -184,15 +202,17 @@ export async function addWorkspaceMember(root: string, name: string, path: strin
     const config = await loadConfig(root, candidate, { dryRun: true });
     const member = (await workspaceMembers(root, config)).find(item => item.name === name)!;
     await checkWorkspaceMember(root, member);
-    return { candidate, member };
+    const warnings: string[] = [];
+    candidate.workspace.repos[name] = await detectedWorkspaceMember(candidate.workspace.repos[name], root, config.docs.root, warnings);
+    return { candidate, member, warnings };
   }
   await prepare();
   return withFileLock(configPath, async () => {
-    const { candidate, member } = await prepare(), before = await readText(configPath);
+    const { candidate, member, warnings } = await prepare(), before = await readText(configPath);
     await atomicWrite(configPath, JSON.stringify(candidate, null, 2) + '\n');
     try { await writeMarker(join(member.path, '.git'), root); }
     catch (error) { await atomicWrite(configPath, before); throw error; }
-    return { name, path: member.path };
+    return { name, path: member.path, ...(warnings.length ? { warnings } : {}) };
   });
 }
 export async function removeWorkspaceMember(root: string, name: string, options: { approve?: boolean } = {}) {

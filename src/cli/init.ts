@@ -6,7 +6,8 @@ import { claudeHookStatus, hookMergeGuidance } from '../core/claude-settings.ts'
 import { globalProjectLocation, projectFolderHint, assertMainWorktree } from './project-root.ts';
 import { assertNotBrain } from '../core/brain-guard.ts';
 import { memberWorkspace } from '../core/workspace.ts';
-import { brainModels, loadConfig, type WorkspaceMember } from '../core/config.ts';
+import { brainModels, loadConfig, writeAutoVerify, type WorkspaceMember } from '../core/config.ts';
+import { DetectUnreadableError, detectVerify, verifySkipDirs, type DetectedVerify } from '../core/verify-detect.ts';
 import { installSkills } from '../core/skills.ts';
 import { generateClaudeMd } from '../core/claude-md.ts';
 import { readJudgment } from '../core/judgment.ts';
@@ -41,8 +42,10 @@ export async function initProject(options: { cwd?: string; brain?: string; dryRu
   const created: string[] = [], existed: string[] = [], skipped: { path: string; reason: string }[] = [];
   const existingCode = (await readdir(root)).some(name => !['.git', '.pi', '.claude', '.DS_Store', 'CLAUDE.md', 'AGENTS.md', 'docs'].includes(name));
   const nextSteps = [options.workspaceInit ? 'fodh 로 창을 열고 첫 백로그를 요청합니다(fodh backlog add --repo <이름> …)' : existingCode ? 'docs/backlog.md 를 채운 뒤 /develop-start 를 실행하세요' : '/project-start 를 실행하세요'];
-  const result = { root, dryRun: !!options.dryRun, created, existed, skipped, settingsNeedsHook: false,
-    gitInitialized: false, committed: false, nextSteps };
+  const result: { root: string; dryRun: boolean; created: string[]; existed: string[];
+    skipped: { path: string; reason: string }[]; settingsNeedsHook: boolean; gitInitialized: boolean;
+    committed: boolean; warnings?: string[]; verifyDetected?: DetectedVerify | null; nextSteps: string[] } = { root, dryRun: !!options.dryRun, created, existed, skipped, settingsNeedsHook: false,
+    gitInitialized: false, committed: false, verifyDetected: null, nextSteps };
   if (newRepository) {
     if (!options.dryRun) {
       try { await git(root, ['init']); result.gitInitialized = true; }
@@ -57,7 +60,16 @@ export async function initProject(options: { cwd?: string; brain?: string; dryRu
     if (!options.dryRun) { await mkdir(dirname(path), { recursive: true }); await action(path); }
     return true;
   }
-  await create('.pi/harness.json', path => writeFile(path, JSON.stringify(options.workspaceInit ? { workspace: { repos: options.workspaceInit.repos } } : { brain: { model: options.brain ?? model } }, null, 2) + '\n', { flag: 'wx' }));
+  const configCreated = await create('.pi/harness.json', path => writeFile(path, JSON.stringify(options.workspaceInit ? { workspace: { repos: options.workspaceInit.repos } } : { brain: { model: options.brain ?? model } }, null, 2) + '\n', { flag: 'wx' }));
+  if (configCreated && existingCode && !options.workspaceInit) {
+    try {
+      result.verifyDetected = await detectVerify(root, { source: 'fs', skipPrefixes: [config.worktrees.prefix], skipDirs: verifySkipDirs(root, config.docs.root) }) ?? null;
+    } catch (error) {
+      if (!(error instanceof DetectUnreadableError)) throw error;
+      result.warnings = [error.message];
+    }
+    if (!options.dryRun && result.verifyDetected) await writeAutoVerify(root, 'verify', result.verifyDetected);
+  }
   if (!options.dryRun) await options.workspaceInit?.afterConfig?.();
   const settingsCreated = await create('.claude/settings.json', async path =>
     writeFile(path, await readFile(new URL('../../templates/claude-settings.json', import.meta.url)), { flag: 'wx' }));
